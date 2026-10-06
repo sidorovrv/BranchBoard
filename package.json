@@ -1,0 +1,34 @@
+{
+  "name": "branchboard",
+  "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/sidorovrv/BranchBoard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sidorovrv/BranchBoard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sidorovrv/BranchBoard/issues"
+  },
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm -w @branchboard/web run build",
+    "start": "npm -w @branchboard/server run start",
+    "dev:server": "npm -w @branchboard/server run dev",
+    "dev:web": "npm -w @branchboard/web run dev",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
+  }
+}

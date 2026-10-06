@@ -1,0 +1,34 @@
+{
+  "name": "branchboard",
+  "version": "0.1.0",
+  "description": "A whiteboard where every AI chat turn is a node and the wiring decides what each node knows. Runs locally on top of the claude or opencode command you already have.",
+  "keywords": ["ai", "chat", "whiteboard", "claude", "opencode", "local-first"],
+  "license": "MIT",
+  "homepage": "https://github.com/sidorovrv/BranchBoard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sidorovrv/BranchBoard.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/sidorovrv/BranchBoard/issues"
+  },
+  "type": "module",
+  "bin": {
+    "branchboard": "bin/branchboard.mjs"
+  },
+  "files": ["bin", "dist", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:binary": "node scripts/build-binary.mjs"
+  },
+  "devDependencies": {
+    "@branchboard/core": "*",
+    "@branchboard/server": "*",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6"
+  }
+}
