@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  binaries:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm -w branchboard run build:binary
+      - name: Check the binary starts
+        shell: bash
+        run: |
+          for binary in packages/cli/dist/binary/*; do
+            chmod +x "$binary"
+            "$binary" --version
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.runner }}
+          path: packages/cli/dist/binary/*
+          if-no-files-found: error
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l binaries
+          gh release create "${{ github.ref_name }}" binaries/* \
+            --repo "${{ github.repository }}" \
+            --title "Branchboard ${{ github.ref_name }}" \
+            --generate-notes
