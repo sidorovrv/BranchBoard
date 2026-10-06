@@ -48,6 +48,7 @@ const PART_FLUSH_MS = 250;
 export const createBoardService = (repository: Repository, hub: Hub) => {
   const states = new Map<Id, BoardState>();
   const flushTimers = new Map<Id, NodeJS.Timeout>();
+  let hasStoppedSaving = false;
 
   const readState = (boardId: Id): BoardState | undefined => {
     const board = repository.get<Board>("boards", boardId);
@@ -125,13 +126,13 @@ export const createBoardService = (repository: Repository, hub: Hub) => {
     clearTimeout(flushTimers.get(nodeId));
     flushTimers.delete(nodeId);
     const parts = states.get(boardId)?.parts[nodeId];
-    if (!parts) return;
+    if (!parts || hasStoppedSaving) return;
     repository.upsertMany("parts", () => boardId, parts);
     markSaved(boardId);
   };
 
   const scheduleFlush = (boardId: Id, nodeId: Id) => {
-    if (!flushTimers.has(nodeId)) flushTimers.set(nodeId, setTimeout(() => flushParts(boardId, nodeId), PART_FLUSH_MS));
+    if (!hasStoppedSaving && !flushTimers.has(nodeId)) flushTimers.set(nodeId, setTimeout(() => flushParts(boardId, nodeId), PART_FLUSH_MS));
   };
 
   const recordRunEvent = (boardId: Id, nodeId: Id, event: RunEvent) => {
@@ -241,7 +242,10 @@ export const createBoardService = (repository: Repository, hub: Hub) => {
     redo: (boardId: Id) => travel(boardId, "redoStack", "undoStack"),
     recordRunEvent,
     flushParts,
-    flushAllParts: () => states.forEach((state, boardId) => Object.keys(state.parts).forEach((nodeId) => flushParts(boardId, nodeId))),
+    flushPartsAndStopSaving: () => {
+      states.forEach((state, boardId) => Object.keys(state.parts).forEach((nodeId) => flushParts(boardId, nodeId)));
+      hasStoppedSaving = true;
+    },
     saveRequest,
     saveBoard,
     saveSnapshot,

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -144,6 +144,11 @@ describe("AL-2 attachments", () => {
   const upload = async (boardId: string, name: string, text: string) =>
     (await request(`/api/boards/${boardId}/attachments?name=${name}`, undefined, { ...trusted, "content-type": "text/plain" }, text)).json as { id: string };
 
+  const ageStoredFile = (id: string) => {
+    const anHourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(join(directory, "attachments", id), anHourAgo, anHourAgo);
+  };
+
   it("keeps a file while a deleted node can still be restored and removes it once the trash is emptied", async () => {
     const boardId = await newBoard("files");
     const file = await upload(boardId, "kept.txt", "keep me");
@@ -160,6 +165,7 @@ describe("AL-2 attachments", () => {
     const file = await upload(boardId, "loose.txt", "never attached");
     expect(server.trash.sweepAttachments()).toBe(0);
     expect(existsSync(join(directory, "attachments", file.id))).toBe(true);
+    ageStoredFile(file.id);
     expect(server.trash.sweepAttachments(0)).toBeGreaterThanOrEqual(1);
     expect(existsSync(join(directory, "attachments", file.id))).toBe(false);
   });
@@ -170,6 +176,7 @@ describe("AL-2 attachments", () => {
     const nodeId = (await command({ type: "reply", boardId, prompt: "", run: false })).json.nodeId;
     await command({ type: "attach", boardId, nodeId, attachmentIds: [file.id] });
     await command({ type: "detach", boardId, nodeId, attachmentId: file.id });
+    ageStoredFile(file.id);
     expect(server.trash.sweepAttachments(0)).toBe(0);
     await command({ type: "undo", boardId });
     expect((await nodeOf(boardId, nodeId)).attachments).toHaveLength(1);

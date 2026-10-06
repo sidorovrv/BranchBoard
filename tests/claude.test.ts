@@ -150,7 +150,7 @@ describe("user message", () => {
     expect(image).toEqual({ type: "image", source: { type: "base64", media_type: "image/png", data: "bytes-of-C:\\store\\a1" } });
   });
 
-  it("grants access to the folders of referenced files only", () => {
+  it.runIf(process.platform === "win32")("grants access to the folders of referenced files only", () => {
     expect(attachmentDirectories(files)).toEqual(["C:\\store"]);
     expect(attachmentDirectories([files[0]])).toEqual([]);
   });
@@ -627,8 +627,9 @@ describe("runs through the board", () => {
     expect(node.runtimeRef?.sessionId).toBe("sess-root");
     expect(node.usage).toEqual({ inputTokens: 15, outputTokens: 7, cacheReadTokens: 5, cacheCreationTokens: 0 });
     expect(launch.process.wasKilled).toBe(true);
-    const extra = Object.keys(launch.env).filter((key) => !(key in process.env));
-    expect(extra.sort()).toEqual(["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "MCP_TOOL_TIMEOUT"]);
+    const timeoutKeys = ["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "MCP_TOOL_TIMEOUT"];
+    const unexpected = Object.keys(launch.env).filter((key) => !(key in process.env) && !timeoutKeys.includes(key));
+    expect(unexpected).toEqual([]);
     expect(launch.env.MCP_TOOL_TIMEOUT).toBe(String(TOOL_TIMEOUT_MS));
     expect(launch.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).toBe(String(TOOL_TIMEOUT_MS));
     expect(approvals.registeredCount()).toBe(0);

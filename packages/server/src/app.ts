@@ -219,7 +219,7 @@ export const createApp = (options: AppOptions) => {
     });
 
   return { app, listen, boards, runs, trash, perfLog, startPerfSampling, codeFileSync, close: () => {
-      boards.flushAllParts();
+      boards.flushPartsAndStopSaving();
       repository.close();
     } };
 };

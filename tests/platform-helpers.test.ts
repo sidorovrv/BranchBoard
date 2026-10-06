@@ -19,7 +19,7 @@ describe("locateOpencode", () => {
     expect(located.path).toBe(shim);
   });
 
-  it("prefers a PATH entry over the known directories", () => {
+  it.runIf(process.platform === "win32")("prefers a PATH entry over the known directories", () => {
     const onPath = join("C:\\tools", "opencode.cmd");
     const located = locateOpencode(environment({ env: { PATH: "C:\\tools", APPDATA: "C:\\A" } }, [onPath, join("C:\\A", "npm", "opencode.cmd")]));
     expect(located.path).toBe(onPath);
