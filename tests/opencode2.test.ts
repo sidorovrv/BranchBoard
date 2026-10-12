@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { RUNTIMES, type RunEvent } from "@branchboard/core";
 import { opencodeEventMap } from "../packages/server/src/runtimes/opencode";
@@ -143,8 +144,9 @@ describe("OpenCode 2 setup", () => {
 
   it("finds opencode2 next to the npm global shim and honours its own override variable", () => {
     const environment = (overrides: Partial<LocatorEnvironment>, files: string[]): LocatorEnvironment => ({ platform: "linux", env: { PATH: "/usr/bin" }, home: "/home/tester", isFile: (path) => files.includes(path), ...overrides });
-    expect(locateOpencode2(environment({ env: { PATH: "/opt/bin" } }, ["/opt/bin/opencode2"])).path).toBe("/opt/bin/opencode2");
-    expect(locateOpencode2(environment({ env: { PATH: "/opt/bin" } }, ["/opt/bin/opencode"])).path).toBeUndefined();
+    const onPath = (name: string) => join("/opt/bin", name);
+    expect(locateOpencode2(environment({ env: { PATH: "/opt/bin" } }, [onPath("opencode2")])).path).toBe(onPath("opencode2"));
+    expect(locateOpencode2(environment({ env: { PATH: "/opt/bin" } }, [onPath("opencode")])).path).toBeUndefined();
     expect(locateOpencode2(environment({ env: { BRANCHBOARD_OPENCODE2_PATH: "/x/oc2" } }, ["/x/oc2"])).path).toBe("/x/oc2");
     expect(locateOpencode2(environment({ env: { BRANCHBOARD_OPENCODE_PATH: "/x/oc1" } }, ["/x/oc1"])).path).toBeUndefined();
   });

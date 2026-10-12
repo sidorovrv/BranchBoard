@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunEvent } from "@branchboard/core";
 import { configureLogFile, currentLogFile, log, readLogTail } from "../packages/server/src/log";
 import { createSeenState, opencodeEventMap, translateEvent } from "../packages/server/src/runtimes/opencode";
@@ -90,7 +90,11 @@ describe("the server log file", () => {
   const directory = mkdtempSync(join(tmpdir(), "branchboard-log-"));
   const path = join(directory, "logs", "server.log");
 
-  beforeEach(() => configureLogFile(undefined));
+  beforeEach(() => {
+    configureLogFile(undefined);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
   afterAll(() => {
     configureLogFile(undefined);
     rmSync(directory, { recursive: true, force: true });
