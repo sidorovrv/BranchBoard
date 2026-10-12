@@ -1,20 +1,11 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { createServer } from "node:net";
 import { pathToFileURL } from "node:url";
-import { decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, UNSET_CHOICE, type Catalog, type CatalogCommand, type CatalogModel, type PendingRequest, type RunEvent } from "@branchboard/core";
+import { decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, SESSION_GONE_MESSAGE, UNSET_CHOICE, type Catalog, type CatalogCommand, type CatalogModel, type PendingRequest, type RunEvent } from "@branchboard/core";
 import { approvalOpened, questionOpened, streamEventMap, subagentEventMap } from "./commonEvents";
 import { log } from "../log";
 import { locateOpencode } from "./opencodeLocator";
+import { createServerPool, isNotFound, serverSentEvents, splitModel, type OpencodeServer } from "./opencodeServer";
 import { pickSmallModel } from "./smallModel";
-import { killTree, withoutCurrentDirectorySearch } from "./spawnProcess";
-import type { EventMap, NativeEvent, RunScope, RuntimeSteps } from "../run/types";
-
-interface OpencodeServer {
-  baseUrl: string;
-  authorization: string;
-  child?: ChildProcess;
-}
+import { RecoverableError, type EventMap, type NativeEvent, type RunScope, type RuntimeSteps } from "../run/types";
 
 interface OpencodeHandle {
   server: OpencodeServer;
@@ -24,146 +15,13 @@ interface OpencodeHandle {
 
 type OpencodeNative = NativeEvent & Record<string, any>;
 
-const STARTUP_TIMEOUT_MS = 20000;
-const OUTPUT_TAIL_CHARS = 2000;
-const PROGRESS_LOG_MS = 3000;
-const servers = new Map<string, Promise<OpencodeServer>>();
-
-const freePort = () =>
-  new Promise<number>((resolve, reject) => {
-    const probe = createServer();
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address() as { port: number };
-      probe.close(() => resolve(port));
-    });
-    probe.on("error", reject);
-  });
-
-const call = async (server: OpencodeServer, directory: string, path: string, init: RequestInit = {}) => {
-  const separator = path.includes("?") ? "&" : "?";
-  const response = await fetch(`${server.baseUrl}${path}${separator}directory=${encodeURIComponent(directory)}`, {
-    ...init,
-    headers: { authorization: server.authorization, "content-type": "application/json", ...init.headers },
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    log.error("opencode", `${init.method ?? "GET"} ${path} failed with ${response.status}`, body);
-    throw new Error(`OpenCode ${path} failed with ${response.status}${body ? `: ${body.slice(0, 300)}` : ""}`);
-  }
-  return response;
-};
-
-const callJson = async (server: OpencodeServer, directory: string, path: string, init?: RequestInit) =>
-  (await call(server, directory, path, init)).json() as Promise<any>;
-
-const waitUntilHealthy = async (server: OpencodeServer) => {
-  const started = Date.now();
-  const deadline = started + STARTUP_TIMEOUT_MS;
-  let lastReason = "no response yet";
-  let nextProgressLog = started + PROGRESS_LOG_MS;
-  while (Date.now() < deadline && server.child?.exitCode == null) {
-    const healthy = await fetch(`${server.baseUrl}/global/health`, { headers: { authorization: server.authorization } }).then(
-      (response) => {
-        if (!response.ok) lastReason = `health returned ${response.status}`;
-        return response.ok;
-      },
-      (error) => {
-        lastReason = `connection failed: ${error?.cause?.code ?? error?.message ?? error}`;
-        return false;
-      },
-    );
-    if (healthy) {
-      log.info("opencode", `Server healthy after ${Date.now() - started}ms at ${server.baseUrl}`);
-      return;
-    }
-    if (Date.now() >= nextProgressLog) {
-      log.warn("opencode", `Still waiting for ${server.baseUrl} (${Date.now() - started}ms, ${lastReason})`);
-      nextProgressLog += PROGRESS_LOG_MS;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
-  if (server.child?.exitCode != null) throw new Error("opencode serve exited before becoming healthy");
-  log.error("opencode", `Gave up waiting for ${server.baseUrl} after ${STARTUP_TIMEOUT_MS}ms (${lastReason})`);
-  throw new Error("opencode serve did not become healthy in time");
-};
-
-const startServer = async (directory: string): Promise<OpencodeServer> => {
-  const located = locateOpencode();
-  if (!located.path) {
-    log.error("opencode", "Could not find the opencode executable", located.searched.join("\n"));
-    throw new Error("The opencode command was not found. Install OpenCode (npm install -g opencode-ai) or set BRANCHBOARD_OPENCODE_PATH to its full path.");
-  }
-  const password = randomBytes(16).toString("hex");
-  const port = await freePort();
-  log.info("opencode", `Spawning ${located.path} serve on port ${port} in ${directory}`);
-  const isWindows = process.platform === "win32";
-  const child = spawn(isWindows ? `"${located.path}"` : located.path, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
-    cwd: directory,
-    env: withoutCurrentDirectorySearch({ ...process.env, OPENCODE_SERVER_PASSWORD: password }),
-    shell: isWindows,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  log.debug("opencode", `Spawned pid ${child.pid}`);
-  let output = "";
-  const remember = (chunk: Buffer) => {
-    output = (output + chunk.toString()).slice(-OUTPUT_TAIL_CHARS);
-    chunk.toString().split(/\r?\n/).filter(Boolean).forEach((line) => log.debug("opencode", `pid ${child.pid}: ${line}`));
-  };
-  child.stdout?.on("data", remember);
-  child.stderr?.on("data", remember);
-  const failure = new Promise<never>((_resolve, reject) => {
-    child.on("error", (error) => {
-      log.error("opencode", `Could not spawn ${located.path}`, error);
-      reject(new Error(`Could not start opencode: ${error.message}. Is OpenCode installed and on PATH?`));
-    });
-    child.on("exit", (code, signal) => {
-      log.error("opencode", `opencode serve (pid ${child.pid}) exited with code ${code} signal ${signal}`, output.trim() || undefined);
-      servers.delete(directory);
-      reject(new Error(`opencode serve exited with code ${code} in ${directory}. ${output.trim()}`));
-    });
-  });
-  failure.catch(() => undefined);
-  const server: OpencodeServer = { baseUrl: `http://127.0.0.1:${port}`, authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`, child };
-  process.on("exit", () => killTree(child));
-  try {
-    await Promise.race([waitUntilHealthy(server), failure]);
-  } catch (error) {
-    killTree(child);
-    if (error instanceof Error && error.message.startsWith("opencode serve did not")) throw new Error(`${error.message} ${output.trim()}`);
-    throw error;
-  }
-  return server;
-};
-
-const serverFor = (directory: string): Promise<OpencodeServer> => {
-  const existing = servers.get(directory);
-  if (existing) return existing;
-  const started = startServer(directory);
-  servers.set(directory, started);
-  started.catch(() => servers.delete(directory));
-  return started;
-};
-
-const splitModel = (model: string | undefined) => {
-  if (!model || !model.includes("/")) return undefined;
-  const [providerID, ...rest] = model.split("/");
-  return { providerID, modelID: rest.join("/") };
-};
-
-async function* serverSentEvents(response: Response, signal: AbortSignal): AsyncGenerator<OpencodeNative> {
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
-    if (signal.aborted) return;
-    buffer += decoder.decode(chunk, { stream: true });
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() ?? "";
-    for (const frame of frames) {
-      const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("");
-      if (data) yield JSON.parse(data) as OpencodeNative;
-    }
-  }
-}
+const { servers, call, callJson, post, serverFor } = createServerPool({
+  logName: "opencode",
+  label: "OpenCode",
+  healthPath: "/global/health",
+  locate: locateOpencode,
+  missingMessage: "The opencode command was not found. Install OpenCode (npm install -g opencode-ai) or set BRANCHBOARD_OPENCODE_PATH to its full path.",
+});
 
 const describeTool = (part: any): string => part.state?.input?.description ?? part.state?.title ?? part.tool ?? "tool";
 
@@ -295,7 +153,7 @@ async function* execute(handle: OpencodeHandle, input: string, scope: RunScope):
     body: JSON.stringify({ agent: scope.agent, model: splitModel(scope.model), variant: isChosen(scope.effort) ? scope.effort : undefined, system: scope.systemNote, parts: [{ type: "text", text: input }, ...scope.files.map((file) => ({ type: "file", mime: file.mime, filename: file.name, url: pathToFileURL(file.path).href }))] }),
   });
   try {
-    for await (const raw of serverSentEvents(stream, scope.signal)) {
+    for await (const raw of serverSentEvents<OpencodeNative>(stream, scope.signal)) {
       for (const native of translateEvent(raw, handle, seen)) {
         yield native;
         if (native.type === "idle" || native.type === "failure") {
@@ -342,16 +200,13 @@ const catalog = async (workspacePath: string): Promise<Catalog> => {
     const models: CatalogModel[] = (providers.providers ?? []).flatMap((provider: any) =>
       Object.values<any>(provider.models ?? {}).map((model) => ({ id: `${provider.id}/${model.id}`, name: model.name ?? model.id, provider: provider.name ?? provider.id, contextWindow: model.limit?.context, efforts: effortsOf(model) })),
     );
-    const primaryAgents = (agents as any[]).filter((agent) => agent.mode !== "subagent").map((agent) => agent.name as string);
+    const primaryAgents = (agents as any[]).filter((agent) => agent.mode !== "subagent" && !agent.hidden).map((agent) => agent.name as string);
     return { agents: primaryAgents, models, commands, health: { ok: true, detail: "connected to opencode serve" } };
   } catch (error) {
     log.error("opencode", `Catalog failed for ${workspacePath}`, error);
     return { agents: [], models: [], health: { ok: false, detail: error instanceof Error ? error.message : String(error) } };
   }
 };
-
-const post = (server: OpencodeServer, directory: string, path: string, body?: unknown) =>
-  call(server, directory, path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 
 const answerQuestion = async (server: OpencodeServer, directory: string, request: PendingRequest, answer: string) => {
   if (answer === REJECTED_ANSWER) {
@@ -360,8 +215,6 @@ const answerQuestion = async (server: OpencodeServer, directory: string, request
   }
   await post(server, directory, `/question/${request.remoteId}/reply`, { answers: decodeAnswers(request.questions?.length ?? 1, answer) });
 };
-
-const isNotFound = (error: unknown): boolean => error instanceof Error && error.message.includes("failed with 404");
 
 const answerPermission = async (server: OpencodeServer, directory: string, remoteId: string, answer: string) => {
   const [sessionId, permissionId] = remoteId.split("/");
@@ -376,8 +229,9 @@ const answerPermission = async (server: OpencodeServer, directory: string, remot
   }
 };
 
-export const opencodeRuntime: RuntimeSteps<OpencodeNative, OpencodeHandle> = {
+export const opencode1Runtime: RuntimeSteps<OpencodeNative, OpencodeHandle> = {
   id: "opencode",
+  editsFiles: true,
   canSuggestTitles: true,
   titleModel: async (scope) => {
     const server = await serverFor(scope.workspacePath);
@@ -392,7 +246,9 @@ export const opencodeRuntime: RuntimeSteps<OpencodeNative, OpencodeHandle> = {
     const server = await serverFor(scope.workspacePath);
     const directory = scope.workspacePath;
     const created = plan.spine
-      ? await callJson(server, directory, `/session/${plan.spine.runtimeRef.sessionId}/fork`, { method: "POST", body: JSON.stringify({}) })
+      ? await callJson(server, directory, `/session/${plan.spine.runtimeRef.sessionId}/fork`, { method: "POST", body: JSON.stringify({}) }).catch((error) => {
+          throw isNotFound(error) ? new RecoverableError(SESSION_GONE_MESSAGE, "assemble") : error;
+        })
       : await callJson(server, directory, "/session", { method: "POST", body: JSON.stringify({}) });
     return { server, directory, sessionId: created.id as string };
   },

@@ -1,8 +1,11 @@
+import type { RecoveryId } from "./recovery";
+import type { CredentialStatus, RuntimeId } from "./runtimes";
+
 export type Id = string;
 export type NodeKind = "turn" | "context" | "file" | "subagent" | "code";
 export type NodeStatus = "idle" | "queued" | "running" | "awaiting_approval" | "done" | "error" | "interrupted";
 export type ContextMode = "exact" | "injected" | "assembled";
-export type RuntimeId = "opencode" | "claude" | "fake";
+export type { RuntimeId };
 
 export interface RuntimeRef {
   sessionId: string;
@@ -65,6 +68,17 @@ export interface TodoItem {
   status: TodoStatus;
 }
 
+export interface RevertedFile {
+  path: string;
+  afterRun: string | null;
+  restoredHash: string | null;
+}
+
+export interface RevertRecord {
+  at: number;
+  files: RevertedFile[];
+}
+
 export interface RollSnapshot {
   status: NodeStatus;
   runtimeRef?: RuntimeRef;
@@ -75,6 +89,18 @@ export interface RollSnapshot {
   stopped?: boolean;
   startedAt?: number;
   completedAt?: number;
+  workspaceSnapshot?: string | null;
+  fileHashes?: Record<string, string | null> | null;
+  reverted?: RevertRecord | null;
+}
+
+export interface NodeComment {
+  id: Id;
+  roll: number;
+  start: number;
+  end: number;
+  quote: string;
+  text: string;
 }
 
 export interface GraphNode {
@@ -106,12 +132,16 @@ export interface GraphNode {
   contextMode?: ContextMode;
   usage?: Usage;
   stopped?: boolean;
+  workspaceSnapshot?: string | null;
+  fileHashes?: Record<string, string | null> | null;
+  reverted?: RevertRecord | null;
   createdAt: number;
   startedAt?: number;
   completedAt?: number;
   activeRoll?: number;
   rollCount?: number;
   rolls?: Record<number, RollSnapshot>;
+  comments?: NodeComment[];
   pinned?: boolean;
   satelliteOf?: Id;
   summary?: NodeSummary;
@@ -255,7 +285,7 @@ export type RunEvent =
   | { type: "prompt"; text: string }
   | { type: "subagent.event"; key: string; event: RunEvent }
   | { type: "usage"; usage: Usage }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; recovery?: RecoveryId }
   | { type: "done"; stopped?: boolean };
 
 export type BoardEvent =
@@ -316,6 +346,13 @@ export interface Catalog {
   commands?: CatalogCommand[];
   defaultPermissionMode?: string;
   health: { ok: boolean; detail: string };
+  credential?: CredentialStatus;
+}
+
+export interface DocumentFile {
+  name: string;
+  mime: string;
+  base64: string;
 }
 
 export interface BoardDocument {
@@ -326,6 +363,7 @@ export interface BoardDocument {
   edges: GraphEdge[];
   parts: Part[];
   staleNodeIds: Id[];
+  files?: Record<Id, DocumentFile>;
 }
 
 export type GraphEdit =
@@ -342,6 +380,7 @@ export type GraphEdit =
   | { type: "queue"; nodeId: Id }
   | { type: "selectRoll"; nodeId: Id; roll: number }
   | { type: "editNode"; nodeId: Id; fields: Partial<Pick<GraphNode, "prompt" | "title" | "filePath" | "gitRef" | "agent" | "model" | "effort" | "permissionMode" | "forceAssemble">> }
+  | { type: "editComments"; nodeId: Id; add?: NodeComment; update?: { id: Id; text: string }; removeId?: Id; clearRoll?: number }
   | { type: "collapse"; nodeId: Id; collapsed?: boolean }
   | { type: "pin"; nodeId: Id; pinned?: boolean }
   | { type: "restoreNodes"; ids: Id[] }
@@ -354,8 +393,13 @@ export interface GitBranches {
   branches: string[];
 }
 
+export interface RemovedBlock {
+  after: number;
+  lines: string[];
+}
+
 export interface GitChanges {
   added: number[];
   removed: number;
-  removedAfter: number[];
+  removedBlocks: RemovedBlock[];
 }

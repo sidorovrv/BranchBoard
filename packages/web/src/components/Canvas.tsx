@@ -137,7 +137,7 @@ const useDerivedNodes = (): Node[] => {
 
 const LIVE_MOVE_SETTLE_MS = 400;
 
-const useDerivedEdges =(): Edge[] => {
+const useDerivedEdges = (): Edge[] => {
   const graph = useGraphWithLiveMoves();
   const selectedIds = useBoard((state) => state.selectedIds);
   const direction = useSettings((state) => state.settings.flowDirection);

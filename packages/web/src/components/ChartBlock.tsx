@@ -131,7 +131,7 @@ const ChartCanvas = ({ spec }: { spec: Record<string, unknown> }) => {
 export const ChartBlock = ({ source }: { source: string }) => {
   const parsed = useMemo(() => parseChartSpec(source), [source]);
   return (
-    <BlockFrame label="chart" source={source} language="json">
+    <BlockFrame label="chart" tourAnchor="chart" source={source} language="json">
       {"error" in parsed ? <BlockError message={parsed.error} /> : <ChartCanvas spec={parsed.spec} />}
     </BlockFrame>
   );

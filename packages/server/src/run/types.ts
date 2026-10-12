@@ -1,4 +1,4 @@
-import type { Catalog, Id, PendingRequest, RunEvent, RuntimeId, RuntimeRef, SessionPlan } from "@branchboard/core";
+import type { Catalog, Id, PendingRequest, RecoveryId, RunEvent, RuntimeId, RuntimeRef, SessionPlan } from "@branchboard/core";
 
 export interface RunFile {
   name: string;
@@ -40,6 +40,9 @@ export type EventMap<Native extends NativeEvent> = Record<string, (native: Nativ
 export interface RuntimeSteps<Native extends NativeEvent = any, Handle = any> {
   id: RuntimeId;
   canSuggestTitles?: boolean;
+  editsFiles?: boolean;
+  testConnection?(): Promise<{ ok: boolean; detail: string }>;
+  forgetCaches?(): void;
   titleModel?(scope: RunScope): Promise<string | undefined>;
   generateTitle?(input: string, scope: RunScope, signal: AbortSignal, purpose?: "title" | "summary"): Promise<string>;
   diagnostics?(workspacePath: string): Promise<RuntimeDiagnostics>;
@@ -48,4 +51,13 @@ export interface RuntimeSteps<Native extends NativeEvent = any, Handle = any> {
   execute(handle: Handle, input: string, scope: RunScope): AsyncIterable<Native>;
   eventMap: EventMap<Native>;
   answerRequest(request: PendingRequest, answer: string, scope: RunScope | undefined): Promise<void>;
+}
+
+export class RecoverableError extends Error {
+  constructor(
+    message: string,
+    readonly recovery: RecoveryId,
+  ) {
+    super(message);
+  }
 }

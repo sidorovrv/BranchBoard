@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { activeRollOf, answerText, liveNodes } from "@branchboard/core";
 import { actionById, titleWithShortcut } from "../actions";
+import { useSearchHighlights } from "../searchHighlight";
 import { useSettings } from "../settings";
 import { useBoard } from "../store";
 import { IconRow } from "./Icons";
 
 const MAX_RESULTS = 8;
+const HIGHLIGHT_REFRESH_MS = 700;
 
 const KIND_LABELS = { turn: "Chat", context: "Note", code: "Code", file: "File", subagent: "Subagent" };
 
@@ -28,17 +30,37 @@ const SearchBox = () => {
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, []);
-  const results = useMemo(() => {
+  const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return [];
-    return liveNodes(graph)
-      .filter((node) => [node.title, node.prompt, answerText(parts[node.id], activeRollOf(node))].some((text) => text.toLowerCase().includes(needle)))
-      .slice(0, MAX_RESULTS);
+    return liveNodes(graph).filter((node) => [node.title, node.prompt, answerText(parts[node.id], activeRollOf(node))].some((text) => text.toLowerCase().includes(needle)));
   }, [graph, parts, query]);
+  const results = matches.slice(0, MAX_RESULTS);
+  const [current, setCurrent] = useState(-1);
+  const [refreshTick, setRefreshTick] = useState(0);
+  useSearchHighlights(query, `${matches.length}:${refreshTick}`);
+  useEffect(() => setCurrent(-1), [query]);
   const close = () => useBoard.getState().setSearchOpen(false);
+  const step = (direction: 1 | -1) => {
+    if (matches.length === 0) return;
+    const next = (current + direction + matches.length) % matches.length;
+    setCurrent(next);
+    focusNode(matches[next].id);
+    setTimeout(() => setRefreshTick((tick) => tick + 1), HIGHLIGHT_REFRESH_MS);
+  };
   return (
     <div className="search-box">
-      <input ref={input} value={query} placeholder="Search titles, prompts and answers" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.key === "Escape" && close()} />
+      <input
+        ref={input}
+        value={query}
+        placeholder="Search inside nodes"
+        onChange={(event) => setQuery(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") close();
+          if (event.key === "Enter") step(event.shiftKey ? -1 : 1);
+        }}
+      />
+      {query.trim() && <span className="muted">{matches.length === 0 ? "No matches" : `${current + 1 || "–"} of ${matches.length} nodes (Enter: next, Shift+Enter: previous)`}</span>}
       {results.map((node) => (
         <button key={node.id} className="link" onClick={() => (focusNode(node.id), close())}>{KIND_LABELS[node.kind]}: {node.title}</button>
       ))}

@@ -1,28 +1,40 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement, type ReactNode } from "react";
 import {
   BINDABLE_ACTIONS,
   NODE_MAX_HEIGHT,
   NODE_MAX_WIDTH,
   NODE_MIN_HEIGHT,
   NODE_MIN_WIDTH,
+  RUNTIMES,
   RUNTIME_DEFAULT_PERMISSION_MODE,
+  RUNTIME_IDS,
   bindingProblem,
   clickBindingOf,
-  hasMultipleBindings,
+  describeUpdateStatus,
+  formatAgo,
+  releaseNotesUrl,
+  updateCommand,
+  API_RUNTIMES_ARE_SHOWN,
+  isApiRuntime,
   isDefaultBinding,
   isSidePointerButton,
   keyBindingOf,
   modifiersOfBinding,
+  sharedBindingOwners,
   type BindableAction,
   type BindingKind,
   type Keybinds,
+  type RuntimeId,
 } from "@branchboard/core";
+import { useAbout } from "../aboutStore";
 import { shortcutCapture } from "../actions";
 import { displayBinding, displayModifier, displayShortcuts } from "../platform";
 import { ACTIVE_JOBS_SHOWN_MAX, ALT_CLICK_ZOOM_MAX, ALT_CLICK_ZOOM_MIN, KEYBOARD_PAN_SPEED_MAX, KEYBOARD_PAN_SPEED_MIN, useSettings, type Settings } from "../settings";
 import { sendBoardCommand, useBoard } from "../store";
 import { ChipSelect } from "./ChipSelect";
 import { Icon, type IconName } from "./Icons";
+import { CredentialForm, useRuntimeCatalog } from "./SetupGuide";
+import { copyUpdateCommand } from "./UpdateBanner";
 
 interface FieldBase {
   label: string;
@@ -84,6 +96,7 @@ interface SettingsSection {
   summary: string;
   fields: SettingField[];
   Editor?: () => ReactElement;
+  isPinnedToBottom?: boolean;
 }
 
 const DEFAULT_SHARE_PERCENT = 60;
@@ -98,7 +111,8 @@ const ShortcutRow = ({ action, keybinds }: { action: BindableAction; keybinds: K
   const [isCapturing, setIsCapturing] = useState(false);
   const [problem, setProblem] = useState<string>();
   const bindings = keybinds[action.id] ?? [];
-  const hasMultiple = hasMultipleBindings(keybinds, action.id);
+  const shared = sharedBindingOwners(keybinds, action.id);
+  const hasConflict = Object.keys(shared).length > 0;
   const setBindings = (next: string[]) => update("keybinds", { ...keybinds, [action.id]: next });
 
   useEffect(() => {
@@ -152,15 +166,13 @@ const ShortcutRow = ({ action, keybinds }: { action: BindableAction; keybinds: K
     setProblem(undefined);
     setIsCapturing(!isCapturing);
   };
-  const description = problem ?? (isCapturing ? CAPTURE_PROMPTS[action.kind] : bindings.length === 0 ? "No shortcut set" : "");
+  const conflictText = Object.entries(shared).map(([binding, labels]) => `${displayBinding(binding)} is also used by ${labels.map((label) => `“${label}”`).join(", ")}`).join(". ");
+  const description = problem ?? (isCapturing ? CAPTURE_PROMPTS[action.kind] : conflictText || (bindings.length === 0 ? "No shortcut set" : ""));
   return (
-    <div className={`setting-row shortcut-row${hasMultiple ? " has-multiple" : ""}`}>
+    <div className={`setting-row shortcut-row${hasConflict ? " has-conflict" : ""}`}>
       <div className="setting-text">
-        <div className="setting-label">
-          {action.label}
-          {hasMultiple && <span className="shortcut-badge">{bindings.length} shortcuts</span>}
-        </div>
-        {description && <div className={`setting-description${problem ? " is-problem" : ""}`}>{description}</div>}
+        <div className="setting-label">{action.label}</div>
+        {description && <div className={`setting-description${problem || (hasConflict && !isCapturing) ? " is-problem" : ""}`}>{description}</div>}
       </div>
       <div className="setting-control shortcut-control">
         {bindings.map((binding) => (
@@ -183,7 +195,50 @@ const ShortcutsEditor = () => {
   return <>{BINDABLE_ACTIONS.map((action) => <ShortcutRow key={action.id} action={action} keybinds={keybinds} />)}</>;
 };
 
-const SECTIONS: SettingsSection[] = [
+const UpdatesEditor = () => {
+  const { about, isChecking, load } = useAbout();
+  useEffect(() => void load(), [load]);
+  if (!about) return <SettingRow label="Version" description="Loading…" />;
+  const checked = about.checkedAt ? `Last checked ${formatAgo(Date.now() - about.checkedAt)}.` : "Not checked yet.";
+  const version = about.update?.version ?? about.installedVersion;
+  return (
+    <>
+      <SettingRow label={`Branchboard v${about.version}`} description={describeUpdateStatus(about)}>
+        {version && <a href={releaseNotesUrl(version)} target="_blank" rel="noreferrer">Release notes</a>}
+      </SettingRow>
+      <SettingRow label="Check for updates" description={`${checked}${about.checkError ? ` The last check failed: ${about.checkError}.` : ""}`}>
+        <button disabled={isChecking || about.isOffline} onClick={() => void load(true)}>{isChecking ? "Checking…" : "Check now"}</button>
+      </SettingRow>
+      <SettingRow label="How to update" description={`Run this in a terminal, or run “branchboard update”. Branchboard cannot restart itself, so stop it (Ctrl+C) and start it again afterwards.`}>
+        <button onClick={() => copyUpdateCommand(version ?? "latest")} title={updateCommand(version ?? "latest")}>Copy update command</button>
+      </SettingRow>
+    </>
+  );
+};
+
+const API_RUNTIME_IDS = RUNTIME_IDS.filter(isApiRuntime);
+
+const KeyEntry = ({ runtimeId }: { runtimeId: RuntimeId }) => {
+  const { catalog, refresh } = useRuntimeCatalog(runtimeId);
+  const status = catalog?.credential;
+  return (
+    <div className="key-entry">
+      <div className="key-entry-header">
+        <div className="setting-label">{RUNTIMES[runtimeId].label}</div>
+        {catalog && <span className={`key-status ${catalog.health.ok ? "is-ready" : ""}`}>{catalog.health.ok ? "Ready" : status?.saved ? "Not working" : "No key"}</span>}
+      </div>
+      <CredentialForm runtimeId={runtimeId} status={status} onChanged={() => void refresh(true)} />
+    </div>
+  );
+};
+
+const KeysEditor = () => (
+  <>
+    {API_RUNTIME_IDS.map((runtimeId) => <KeyEntry key={runtimeId} runtimeId={runtimeId} />)}
+  </>
+);
+
+const ALL_SECTIONS: SettingsSection[] = [
   {
     id: "ai",
     label: "AI",
@@ -195,6 +250,14 @@ const SECTIONS: SettingsSection[] = [
       { kind: "boardShare", label: "Summarise long context", description: "When the context that has to be re-sent passes this share of the model window, the biggest finished stretch of the conversation is summarised first. Applies to the open board. 0 turns it off." },
       { kind: "boardToggle", label: "Tell agents about charts and tables", description: "Adds a short system note (about 350 tokens) to every run so agents know how to write chart, table and file-link blocks. Applies to the open board." },
     ],
+  },
+  {
+    id: "keys",
+    label: "API keys",
+    icon: "key",
+    summary: "Keys for the Anthropic and OpenAI-compatible API runtimes. A saved key is stored on this computer. Replace or remove it to change it.",
+    fields: [],
+    Editor: KeysEditor,
   },
   {
     id: "nodes",
@@ -258,7 +321,7 @@ const SECTIONS: SettingsSection[] = [
     id: "shortcuts",
     label: "Shortcuts",
     icon: "keyboard",
-    summary: "Each action can have several shortcuts. Actions with more than one are highlighted.",
+    summary: "Each action can have several shortcuts. A shortcut that another action also uses is highlighted.",
     fields: [],
     Editor: ShortcutsEditor,
   },
@@ -301,7 +364,28 @@ const SECTIONS: SettingsSection[] = [
       },
     ],
   },
+  {
+    id: "updates",
+    label: "Version and updates",
+    icon: "update",
+    summary: "Which version is running, whether a newer one exists and how to install it.",
+    fields: [],
+    Editor: UpdatesEditor,
+    isPinnedToBottom: true,
+  },
 ];
+
+const SECTIONS = ALL_SECTIONS.filter((section) => API_RUNTIMES_ARE_SHOWN || section.id !== "keys");
+
+const SettingRow = ({ label, description, children }: { label: string; description: string; children?: ReactNode }) => (
+  <div className="setting-row">
+    <div className="setting-text">
+      <div className="setting-label">{label}</div>
+      <div className="setting-description">{description}</div>
+    </div>
+    {children && <div className="setting-control">{children}</div>}
+  </div>
+);
 
 const ToggleSwitch = ({ checked, label, disabled, onChange }: { checked: boolean; label: string; disabled?: boolean; onChange: (checked: boolean) => void }) => (
   <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} className={`switch ${checked ? "on" : ""}`} onClick={() => onChange(!checked)}>
@@ -401,18 +485,32 @@ const CONTROLS: { [K in SettingField["kind"]]: (props: { field: Extract<SettingF
 const FieldRow = ({ field }: { field: SettingField }) => {
   const Control = CONTROLS[field.kind] as (props: { field: SettingField }) => ReactElement;
   return (
-    <div className="setting-row">
-      <div className="setting-text">
-        <div className="setting-label">{field.label}</div>
-        <div className="setting-description">{field.description}</div>
-      </div>
-      <div className="setting-control"><Control field={field} /></div>
-    </div>
+    <SettingRow label={field.label} description={field.description}>
+      <Control field={field} />
+    </SettingRow>
+  );
+};
+
+const RESET_CONFIRMATION = "Restore every setting, including your shortcuts, to its default? This cannot be undone.";
+
+const SectionButton = ({ section, isActive, onSelect }: { section: SettingsSection; isActive: boolean; onSelect: () => void }) => (
+  <button className={isActive ? "active" : ""} aria-current={isActive} onClick={onSelect}>
+    <Icon name={section.icon} />
+    {section.label}
+  </button>
+);
+
+const VersionLink = ({ section, isActive, onSelect }: { section: SettingsSection; isActive: boolean; onSelect: () => void }) => {
+  const version = useAbout((state) => state.about?.version);
+  return (
+    <button className={`settings-version${isActive ? " active" : ""}`} aria-current={isActive} onClick={onSelect} title={section.label}>
+      {version ? `Version ${version}` : section.label}
+    </button>
   );
 };
 
 export const SettingsDialog = ({ onClose }: { onClose: () => void }) => {
-  const [sectionId, setSectionId] = useState(SECTIONS[0].id);
+  const [sectionId, setSectionId] = useState(useBoard.getState().settingsSectionId ?? SECTIONS[0].id);
   const reset = useSettings((state) => state.reset);
   const section = SECTIONS.find((candidate) => candidate.id === sectionId) ?? SECTIONS[0];
   useEffect(() => {
@@ -425,14 +523,10 @@ export const SettingsDialog = ({ onClose }: { onClose: () => void }) => {
       <div className="dialog settings-dialog" role="dialog" aria-label="Settings">
         <nav className="settings-nav">
           <h3>Settings</h3>
-          {SECTIONS.map((candidate) => (
-            <button key={candidate.id} className={candidate.id === section.id ? "active" : ""} aria-current={candidate.id === section.id} onClick={() => setSectionId(candidate.id)}>
-              <Icon name={candidate.icon} />
-              {candidate.label}
-            </button>
-          ))}
+          {SECTIONS.filter((candidate) => !candidate.isPinnedToBottom).map((candidate) => <SectionButton key={candidate.id} section={candidate} isActive={candidate.id === section.id} onSelect={() => setSectionId(candidate.id)} />)}
           <span className="spacer" />
-          <button className="settings-reset" onClick={reset} title="Restore every setting to its default">Reset to defaults</button>
+          {SECTIONS.filter((candidate) => candidate.isPinnedToBottom).map((candidate) => <VersionLink key={candidate.id} section={candidate} isActive={candidate.id === section.id} onSelect={() => setSectionId(candidate.id)} />)}
+          <button className="settings-reset" onClick={() => confirm(RESET_CONFIRMATION) && reset()} title="Restore every setting to its default">Reset to defaults</button>
         </nav>
         <div className="settings-content">
           <header className="settings-header">

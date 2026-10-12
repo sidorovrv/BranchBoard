@@ -121,7 +121,7 @@ const groupedByDay = (runs: RunInfo[]): { label: string; runs: RunInfo[] }[] =>
 
 const LIST_BOTTOM_PADDING_PX = 5;
 
-const runKeyOf =(run: RunInfo): string => `${run.boardId}/${run.nodeId}`;
+const runKeyOf = (run: RunInfo): string => `${run.boardId}/${run.nodeId}`;
 
 const hideKeyOf = (run: RunInfo): string => `${runKeyOf(run)}@${run.startedAt ?? 0}`;
 

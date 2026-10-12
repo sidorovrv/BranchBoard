@@ -1,20 +1,24 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { type Server } from "node:http";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
-import { WebSocketServer } from "ws";
-import { describeContext, encoders, type Id } from "@branchboard/core";
+import { WebSocketServer, type WebSocket } from "ws";
+import { homedir } from "node:os";
+import { describeContext, embedFiles, encoders, isSensitivePath, redactSecrets, SENSITIVE_COMMANDS, summariseCommand, updateFor, isNewerVersion, type AboutInfo, type Id } from "@branchboard/core";
 import { createAttachmentStore, MAX_ATTACHMENT_BYTES } from "./attachments";
+import { BODY_CAPS, commandCapOf, readCappedBody } from "./bodies";
 import { createCodeFileSync } from "./codeFileSync";
 import { createBoardService, RefusedError, SensitiveFilesError } from "./boards";
 import { dispatchCommand, type CommandContext } from "./commands";
 import { openRepository } from "./db";
-import { pickFolder } from "./folderPicker";
+import { pickPath } from "./folderPicker";
+import { browseFolder, insideWorkspace } from "./pathBrowser";
 import { createHub } from "./hub";
 import { currentLogFile, log, readLogTail } from "./log";
-import { downloadNameOf, existingWorkspaceFile, searchWorkspaceFiles, servedFileOf } from "./workspaceFiles";
+import { downloadNameOf, existingWorkspaceFile, PREVIEW_POLICY, previewContentTypeOf, searchWorkspaceFiles, servedFileOf } from "./workspaceFiles";
+import { buildReport } from "./report";
 import { createRunLog } from "./runLog";
 import { createPerfLog } from "./perfLog";
 import { createRunService, type Runtimes } from "./run/pipeline";
@@ -23,14 +27,24 @@ import { createCostStore } from "./costs";
 import { createLimitsStore } from "./limits";
 import { createClaudeRuntime } from "./runtimes/claude";
 import { createApprovalBroker, type ApprovalBroker } from "./runtimes/claudeApprovals";
-import { opencodeRuntime } from "./runtimes/opencode";
-import { isUpgradeAllowed, noFramingMiddleware, securityMiddleware, type SecurityConfig } from "./security";
+import { opencodeRuntime } from "./runtimes/opencodeAuto";
+import { opencode2Runtime } from "./runtimes/opencode2";
+import { createCapabilityStore } from "./capabilities";
+import { createCredentialStore } from "./credentials";
+import { createApiRuntime } from "./runtimes/apiRuntime";
+import { anthropicProvider } from "./runtimes/anthropicApi";
+import { openaiProvider } from "./runtimes/openaiApi";
+import { createRemoteChannel } from "./channel";
+import { dataDirectoryId } from "./dataDirectory";
+import { VERSION, installedVersionOf } from "./version";
+import { INSTANCE_PATH, isUpgradeAllowed, noFramingMiddleware, securityMiddleware, type SecurityConfig } from "./security";
 import { createTrashService } from "./trash";
 
 export interface AppOptions {
   databasePath: string;
   security: SecurityConfig;
   webRoot?: string;
+  version?: string;
   runtimes?: Runtimes;
   approvals?: ApprovalBroker;
 }
@@ -38,14 +52,30 @@ export interface AppOptions {
 const errorStatus = (error: unknown): 409 | 500 => (error instanceof RefusedError || error instanceof SyntaxError ? 409 : 500);
 
 export const createApp = (options: AppOptions) => {
+  const currentVersion = options.version ?? VERSION;
   const repository = openRepository(options.databasePath);
   const hub = createHub();
   const boards = createBoardService(repository, hub);
   const approvals = options.approvals ?? createApprovalBroker();
   const limitsDirectory = dirname(options.databasePath);
   const limits = options.runtimes ? createLimitsStore() : createLimitsStore(join(limitsDirectory, "limits.json"), join(limitsDirectory, "limits-history.jsonl"));
-  const claudeRuntime = createClaudeRuntime({ approvals, limits, serverUrl: `http://127.0.0.1:${options.security.port}` });
-  const runtimes: Runtimes = options.runtimes ?? { fake: fakeRuntime, opencode: opencodeRuntime, claude: claudeRuntime };
+  const channel = createRemoteChannel({ dataDirectory: limitsDirectory });
+  const claudeRuntime = createClaudeRuntime({
+    approvals,
+    limits,
+    serverUrl: `http://127.0.0.1:${options.security.port}`,
+    extraModels: () => [...channel.contents().claudeModels, ...channel.seenModels()],
+    noteModelSeen: channel.recordSeenModel,
+  });
+  const credentials = createCredentialStore(limitsDirectory);
+  const runtimes: Runtimes = options.runtimes ?? {
+    fake: fakeRuntime,
+    opencode: opencodeRuntime,
+    opencode2: opencode2Runtime,
+    claude: claudeRuntime,
+    anthropic: createApiRuntime(anthropicProvider, { credentials }),
+    openai: createApiRuntime(openaiProvider, { credentials }),
+  };
   const attachments = createAttachmentStore(join(dirname(options.databasePath), "attachments"));
   const runLog = createRunLog(join(dirname(options.databasePath), "run-logs"));
   const perfLog = createPerfLog(join(dirname(options.databasePath), "perf"));
@@ -56,7 +86,9 @@ export const createApp = (options: AppOptions) => {
   const trash = createTrashService(repository, boards, attachments);
   trash.purgeExpired();
   trash.sweepAttachments();
-  const context: CommandContext = { boards, runs, runtimes, attachments, trash };
+  const capabilities = createCapabilityStore();
+  const context: CommandContext = { boards, runs, runtimes, attachments, trash, capabilities, credentials, dataDirectory: limitsDirectory, databasePath: options.databasePath };
+  const redactionContext = () => ({ secrets: [...(options.security.accessToken ? [options.security.accessToken] : []), ...credentials.secretValues()], homeDirectory: homedir() });
 
   const app = new Hono();
   app.use("*", noFramingMiddleware);
@@ -74,30 +106,35 @@ export const createApp = (options: AppOptions) => {
   });
 
   app.post("/api/commands", async (honoContext) => {
-    const command = await honoContext.req.json();
-    log.info("command", `${command.type}${command.boardId ? ` board=${command.boardId}` : ""}`, command.type === "importBoard" ? undefined : command);
+    const command = (await readCappedBody(honoContext.req.raw, commandCapOf(honoContext.req.raw), "json")) as Record<string, unknown> & { type: string };
+    log.info("command", `${command.type}${command.boardId ? ` board=${command.boardId}` : ""}`, summariseCommand(command));
+    if (!SENSITIVE_COMMANDS.has(command.type)) log.debug("command", `${command.type} (full)`, command.type === "importBoard" ? undefined : command);
     return honoContext.json(await dispatchCommand(context, command));
   });
   app.post("/api/perf", async (honoContext) => {
-    if (!perfLog.recordWebSample(await honoContext.req.json().catch(() => undefined))) throw new RefusedError("Not a usable performance sample");
+    const sample = await readCappedBody(honoContext.req.raw, BODY_CAPS.perf, "json").catch(() => undefined);
+    if (!perfLog.recordWebSample(sample)) throw new RefusedError("Not a usable performance sample");
     return honoContext.body(null, 204);
   });
   app.post("/mcp/:secret", async (honoContext) => {
-    const reply = await approvals.handle(honoContext.req.param("secret"), await honoContext.req.json());
+    const reply = await approvals.handle(honoContext.req.param("secret"), await readCappedBody(honoContext.req.raw, BODY_CAPS.mcp, "json"));
     return reply.body === undefined ? honoContext.body(null, reply.status) : honoContext.json(reply.body, reply.status);
   });
   app.on(["GET", "DELETE"], "/mcp/:secret", (honoContext) => honoContext.body(null, 405));
-  app.post("/api/pick-folder", async (honoContext) => {
-    log.info("folder-picker", "Opening the system folder dialog");
-    const path = (await pickFolder()) ?? null;
-    log.info("folder-picker", path ? `Selected ${path}` : "Dialog closed without a selection");
+  app.post("/api/pick-path", async (honoContext) => {
+    const kind = honoContext.req.query("kind") === "file" ? "file" : "folder";
+    const boardId = honoContext.req.query("board");
+    const workspacePath = boardId ? boards.stateOf(boardId).board.workspacePath : undefined;
+    log.info("folder-picker", `Opening the system ${kind} dialog`);
+    const picked = await pickPath(kind, workspacePath);
+    log.info("folder-picker", picked ? `Selected ${picked}` : "Dialog closed without a selection");
+    const path = picked && workspacePath && kind === "file" ? insideWorkspace(workspacePath, picked) : (picked ?? null);
     return honoContext.json({ path });
   });
+  app.get("/api/browse", (honoContext) => honoContext.json(browseFolder(honoContext.req.query("path"), honoContext.req.query("files") === "1")));
   app.post("/api/boards/:id/attachments", async (honoContext) => {
     boards.stateOf(honoContext.req.param("id"));
-    const declaredSize = Number(honoContext.req.header("content-length") ?? 0);
-    if (declaredSize > MAX_ATTACHMENT_BYTES) throw new RefusedError("That file is too large");
-    const bytes = new Uint8Array(await honoContext.req.arrayBuffer());
+    const bytes = await readCappedBody(honoContext.req.raw, BODY_CAPS.attachments, "bytes");
     const attachment = attachments.save(honoContext.req.query("name") ?? "file", honoContext.req.header("content-type") ?? "", bytes);
     log.info("attachment", `Stored ${attachment.name} (${attachment.mime}, ${attachment.size} bytes) as ${attachment.id}`);
     return honoContext.json(attachment);
@@ -112,6 +149,27 @@ export const createApp = (options: AppOptions) => {
       "content-security-policy": "sandbox",
     });
   });
+  app.get("/api/about", async (honoContext) => {
+    if (honoContext.req.query("fresh") === "1") await channel.refresh({ force: true });
+    const { tags, minimumVersion } = channel.contents();
+    const { checkedAt, error, isOffline } = channel.status();
+    const installedVersion = installedVersionOf(options.webRoot);
+    const about: AboutInfo = {
+      version: currentVersion,
+      installedVersion: installedVersion && isNewerVersion(installedVersion, currentVersion) ? installedVersion : null,
+      platform: process.platform,
+      dataDirectory: limitsDirectory,
+      update: updateFor(tags, currentVersion),
+      channelVersion: tags.latest ?? null,
+      isUnsupported: minimumVersion !== undefined && isNewerVersion(minimumVersion, currentVersion),
+      minimumVersion: minimumVersion ?? null,
+      isOffline,
+      checkedAt,
+      checkError: error ?? null,
+    };
+    return honoContext.json(about);
+  });
+  app.get(INSTANCE_PATH, (honoContext) => honoContext.json({ app: "branchboard", dataDirId: dataDirectoryId(dirname(options.databasePath)) }));
   app.get("/api/boards", (honoContext) => honoContext.json(boards.listBoards()));
   app.get("/api/limits", (honoContext) => honoContext.json(limits.current() ?? null));
   app.get("/api/costs", (honoContext) => honoContext.json(costs.lastHour()));
@@ -122,6 +180,26 @@ export const createApp = (options: AppOptions) => {
   app.get("/api/workspace/files", (honoContext) => {
     const board = boards.stateOf(honoContext.req.query("board") ?? "").board;
     return honoContext.json(searchWorkspaceFiles(board.workspacePath, honoContext.req.query("q") ?? ""));
+  });
+  app.get("/preview/:secret/*", (honoContext) => {
+    const boardId = capabilities.resolve("preview", honoContext.req.param("secret"));
+    const requested = (() => {
+      try {
+        return honoContext.req.path.split("/").slice(3).map(decodeURIComponent).join("/");
+      } catch {
+        return "";
+      }
+    })();
+    const path = boardId && !isSensitivePath(requested) ? existingWorkspaceFile(boards.stateOf(boardId).board.workspacePath, requested) : undefined;
+    const contentType = path ? previewContentTypeOf(path) : undefined;
+    if (!path || !contentType || statSync(path).size > MAX_ATTACHMENT_BYTES) return honoContext.body(null, 404);
+    return honoContext.body(readFileSync(path), 200, {
+      "content-type": contentType,
+      "x-content-type-options": "nosniff",
+      "cache-control": "no-store",
+      "x-frame-options": "SAMEORIGIN",
+      "content-security-policy": PREVIEW_POLICY,
+    });
   });
   app.get("/api/boards/:id/files", (honoContext) => {
     const board = boards.stateOf(honoContext.req.param("id")).board;
@@ -136,25 +214,49 @@ export const createApp = (options: AppOptions) => {
       ...(served.policy ? { "content-security-policy": served.policy } : {}),
     });
   });
-  app.get("/api/health", async (honoContext) => {
-    const requested = honoContext.req.query("runtime");
-    const workspaceQuery = honoContext.req.query("workspace");
+  const workspaceOf = (query: (name: string) => string | undefined): string => {
+    const [boardId, projectId, folder] = [query("board"), query("project"), query("workspace")];
+    if (boardId) return boards.stateOf(boardId).board.workspacePath;
+    if (projectId) {
+      const project = boards.listProjects().find((candidate) => candidate.id === projectId);
+      if (!project) throw new RefusedError("That project no longer exists");
+      return project.workspacePath;
+    }
+    if (folder === undefined) return process.cwd();
+    if (!isAbsolute(folder) || /^[\\/]{2}/.test(folder) || !existsSync(folder) || !statSync(folder).isDirectory()) throw new RefusedError("That is not an existing local folder");
+    return folder;
+  };
+  const collectHealth = async (requested?: string, workspacePath?: string, isFresh = false) => {
     const targets = requested
-      ? [{ mode: requested as keyof Runtimes, workspacePath: workspaceQuery ?? process.cwd() }]
+      ? [{ mode: requested as keyof Runtimes, workspacePath: workspacePath ?? process.cwd() }]
       : [...new Map(boards.listProjects().filter((project) => project.mode !== "fake").map((project) => [project.mode, { mode: project.mode, workspacePath: project.workspacePath }])).values()];
     const entries = await Promise.all(
       targets.map(async ({ mode, workspacePath }) => {
         const runtime = runtimes[mode];
         if (!runtime) throw new RefusedError(`Unknown runtime ${mode}`);
-        const [catalog, diagnostics] = await Promise.all([runs.catalogOf(mode, workspacePath), runtime.diagnostics?.(workspacePath).catch(() => ({}))]);
-        return { id: mode, workspacePath, isOk: catalog?.health.ok ?? false, detail: catalog?.health.detail ?? "The runtime did not answer", ...diagnostics };
+        const [catalog, diagnostics] = await Promise.all([runs.catalogOf(mode, workspacePath, isFresh), runtime.diagnostics?.(workspacePath).catch(() => ({}))]);
+        return { id: mode, workspacePath, isOk: catalog?.health.ok ?? false, detail: catalog?.health.detail ?? "The runtime did not answer", credential: catalog?.credential, ...diagnostics };
       }),
     );
-    return honoContext.json({ runtimes: entries, logFile: currentLogFile() ?? null });
+    return { runtimes: entries, logFile: currentLogFile() ?? null, version: currentVersion, dataDirectory: limitsDirectory };
+  };
+  app.get("/api/health", async (honoContext) => honoContext.json(await collectHealth(honoContext.req.query("runtime"), workspaceOf((name) => honoContext.req.query(name)), honoContext.req.query("fresh") === "1")));
+  app.get("/api/report", async (honoContext) => {
+    const projects = boards.listProjects();
+    const report = buildReport({
+      dataDirectory: limitsDirectory,
+      version: currentVersion,
+      health: await collectHealth(),
+      counts: { projects: projects.length, boards: boards.listBoards().length },
+      redaction: redactionContext(),
+    });
+    honoContext.header("content-disposition", `attachment; filename="branchboard-report-${new Date().toISOString().slice(0, 10)}.json"`);
+    return honoContext.body(JSON.stringify(report, null, 2), 200, { "content-type": "application/json" });
   });
-  app.get("/api/logs", (honoContext) =>
-    honoContext.json({ lines: readLogTail(Math.min(1000, Number(honoContext.req.query("tail") ?? 300) || 300), honoContext.req.query("filter") || undefined) }),
-  );
+  app.get("/api/logs", (honoContext) => {
+    const lines = readLogTail(Math.min(1000, Number(honoContext.req.query("tail") ?? 300) || 300), honoContext.req.query("filter") || undefined);
+    return honoContext.json({ lines: lines.map((line) => redactSecrets(line, redactionContext())) });
+  });
   app.get("/api/boards/:id/graph", (honoContext) => {
     const state = boards.stateOf(honoContext.req.param("id"));
     return honoContext.json({ board: state.board, graph: state.graph, parts: state.parts, requests: state.requests, savedAt: state.board.updatedAt });
@@ -171,10 +273,21 @@ export const createApp = (options: AppOptions) => {
     const mode = (board?.mode ?? honoContext.req.query("mode") ?? "fake") as keyof Runtimes;
     const runtime = runtimes[mode];
     if (!runtime) throw new RefusedError(`Unknown runtime ${mode}`);
-    return honoContext.json(await runtime.catalog(board?.workspacePath ?? honoContext.req.query("workspace") ?? process.cwd()));
+    if (honoContext.req.query("fresh") === "1") {
+      runtime.forgetCaches?.();
+      runs.forgetCatalogs();
+    }
+    return honoContext.json(await runtime.catalog(workspaceOf((name) => honoContext.req.query(name))));
   });
   app.get("/api/boards/:id/export", (honoContext) => {
-    const document = boards.exportDocument(honoContext.req.param("id"));
+    const plain = boards.exportDocument(honoContext.req.param("id"));
+    const document = (() => {
+      try {
+        return honoContext.req.query("files") === "0" ? plain : embedFiles(plain, { sizeOf: attachments.sizeOf, read: attachments.asDocumentFile });
+      } catch (error) {
+        throw new RefusedError(error instanceof Error ? error.message : String(error));
+      }
+    })();
     honoContext.header("content-disposition", `attachment; filename="${document.board.title.replace(/[^\w-]+/g, "_")}.branchboard.json"`);
     return honoContext.body(encoders.json(document), 200, { "content-type": "application/json" });
   });
@@ -184,6 +297,8 @@ export const createApp = (options: AppOptions) => {
     app.use("/*", serveStatic({ root: webRoot }));
     app.get("*", (honoContext) => honoContext.html(readFileSync(join(webRoot, "index.html"), "utf8")));
   }
+
+  const openClients = new Set<WebSocket>();
 
   const listen = (port: number, hostname = "127.0.0.1") =>
     new Promise<Server>((resolve, reject) => {
@@ -203,7 +318,9 @@ export const createApp = (options: AppOptions) => {
         sockets.handleUpgrade(request, socket, head, (client) => {
           log.debug("websocket", `Client connected to board ${boardId}`);
           const unsubscribe = hub.subscribe(boardId, { send: (message) => client.readyState === client.OPEN && client.send(message) });
+          openClients.add(client);
           client.on("close", () => {
+            openClients.delete(client);
             log.debug("websocket", `Client left board ${boardId}`);
             unsubscribe();
           });
@@ -218,7 +335,8 @@ export const createApp = (options: AppOptions) => {
       return { activeRuns: runs.listRuns().length, socketClients: clients, socketMessages: messages };
     });
 
-  return { app, listen, boards, runs, trash, perfLog, startPerfSampling, codeFileSync, close: () => {
+  return { app, listen, boards, runs, trash, perfLog, channel, startPerfSampling, codeFileSync, close: () => {
+      openClients.forEach((client) => client.terminate());
       boards.flushPartsAndStopSaving();
       repository.close();
     } };

@@ -1,4 +1,4 @@
-import type { Part } from "./types";
+import type { GitChanges, Part } from "./types";
 
 export interface LineChange {
   added: number;
@@ -62,15 +62,49 @@ const middleRows = (left: string[], right: string[]): DiffRow[] => {
   return rows;
 };
 
-export const diffRows = (before: string, after: string): DiffRow[] => {
+export const diffRows = (before: string, after: string, contextLines = CONTEXT_LINES): DiffRow[] => {
   const left = linesOf(before);
   const right = linesOf(after);
   const prefix = commonLength(left, right, false);
   const suffix = commonLength(left.slice(prefix), right.slice(prefix), true);
   const middle = middleRows(left.slice(prefix, left.length - suffix), right.slice(prefix, right.length - suffix));
-  const contextBefore = left.slice(Math.max(0, prefix - CONTEXT_LINES), prefix).map((text): DiffRow => ({ kind: "same", text }));
-  const contextAfter = left.slice(left.length - suffix, left.length - suffix + CONTEXT_LINES).map((text): DiffRow => ({ kind: "same", text }));
+  const contextBefore = left.slice(Math.max(0, prefix - contextLines), prefix).map((text): DiffRow => ({ kind: "same", text }));
+  const contextAfter = left.slice(left.length - suffix, left.length - suffix + contextLines).map((text): DiffRow => ({ kind: "same", text }));
   return [...contextBefore, ...middle, ...contextAfter];
+};
+
+export const gitChangesOf = (rows: DiffRow[]): GitChanges => {
+  const added: number[] = [];
+  const removedBlocks: GitChanges["removedBlocks"] = [];
+  let line = 0;
+  for (const row of rows) {
+    if (row.kind === "remove") {
+      const last = removedBlocks[removedBlocks.length - 1];
+      if (last && last.after === line) last.lines.push(row.text);
+      else removedBlocks.push({ after: line, lines: [row.text] });
+    } else if (row.kind !== "gap") {
+      line += 1;
+      if (row.kind === "add") added.push(line);
+    }
+  }
+  return { added, removed: removedBlocks.reduce((sum, block) => sum + block.lines.length, 0), removedBlocks };
+};
+
+export const rowsOfGitChanges = (content: string, changes: GitChanges): DiffRow[] => {
+  const added = new Set(changes.added);
+  const removedAfter = (after: number): DiffRow[] => changes.removedBlocks.filter((block) => block.after === after).flatMap((block) => block.lines.map((text): DiffRow => ({ kind: "remove", text })));
+  const lines = linesOf(content);
+  return [...removedAfter(0), ...lines.flatMap((text, index): DiffRow[] => [{ kind: added.has(index + 1) ? "add" : "same", text }, ...removedAfter(index + 1)])];
+};
+
+export const collapseUnchanged = (rows: DiffRow[], contextLines: number): DiffRow[] => {
+  const changedIndexes = rows.flatMap((row, index) => (row.kind === "same" ? [] : [index]));
+  const isNearChange = (index: number) => changedIndexes.some((changed) => Math.abs(changed - index) <= contextLines);
+  return rows.reduce<DiffRow[]>((kept, row, index) => {
+    if (row.kind !== "same" || isNearChange(index)) kept.push(row);
+    else if (kept[kept.length - 1]?.kind !== "gap") kept.push({ kind: "gap", text: "" });
+    return kept;
+  }, []);
 };
 
 const changeOfRows = (rows: DiffRow[]): LineChange => ({ added: rows.filter((row) => row.kind === "add").length, removed: rows.filter((row) => row.kind === "remove").length });
@@ -112,6 +146,55 @@ export const fileEditsOf = (parts: Part[]): FileEdit[] => {
     byPath.set(edit.path, known ? { path: edit.path, rows: joinWithGaps([known.rows, edit.rows]), ...sumChanges([known, edit]) } : edit);
   }
   return [...byPath.values()];
+};
+
+export interface EditStep {
+  tool: "edit" | "write" | "multiedit";
+  input: Record<string, unknown>;
+  wasCreated: boolean;
+}
+
+const CREATED_PATTERN = /\bcreated\b/i;
+
+export const editStepsByPath = (parts: Part[]): Map<string, EditStep[]> => {
+  const byPath = new Map<string, EditStep[]>();
+  for (const part of parts) {
+    if (part.type !== "tool" || part.meta?.status === "error") continue;
+    const edit = fileEditOf(part.meta?.tool, part.meta?.input);
+    if (!edit) continue;
+    const input = part.meta!.input as Record<string, unknown>;
+    const step: EditStep = { tool: String(part.meta!.tool).toLowerCase() as EditStep["tool"], input, wasCreated: CREATED_PATTERN.test(String(part.meta?.output ?? "")) };
+    byPath.set(edit.path, [...(byPath.get(edit.path) ?? []), step]);
+  }
+  return byPath;
+};
+
+const undoReplacement = (content: string, record: Record<string, unknown>): string | undefined => {
+  const oldText = textOf(record, ["old_string", "oldString"]);
+  const newText = textOf(record, ["new_string", "newString"]);
+  const replaceAll = record.replace_all === true || record.replaceAll === true;
+  const occurrences = newText === "" ? 0 : content.split(newText).length - 1;
+  if (occurrences === 0 || (occurrences > 1 && !replaceAll)) return undefined;
+  return replaceAll ? content.split(newText).join(oldText) : content.replace(newText, () => oldText);
+};
+
+export const contentBeforeSteps = (steps: EditStep[], finalContent: string | null): string | null | undefined => {
+  let content = finalContent;
+  for (const step of [...steps].reverse()) {
+    if (step.tool === "write") {
+      if (!step.wasCreated) return undefined;
+      content = null;
+      continue;
+    }
+    const records = step.tool === "edit" ? [step.input] : editRecordsOf(step.input.edits);
+    for (const record of [...records].reverse()) {
+      if (content === null) return undefined;
+      const undone = undoReplacement(content, record);
+      if (undone === undefined) return undefined;
+      content = undone;
+    }
+  }
+  return content;
 };
 
 export const totalChange = (edits: LineChange[]): LineChange => sumChanges(edits);

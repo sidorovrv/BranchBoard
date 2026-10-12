@@ -5,6 +5,7 @@ export interface BindableAction {
   label: string;
   kind: BindingKind;
   defaults: string[];
+  area: "Board" | "Nodes" | "Selection" | "Canvas" | "Navigation";
 }
 
 export type Keybinds = Record<string, string[]>;
@@ -31,15 +32,16 @@ const POINTER_NAMES_BY_BUTTON: Record<number, string> = { 0: CLICK_NAME, 1: "Mid
 const POINTER_NAMES = Object.values(POINTER_NAMES_BY_BUTTON);
 
 export const BINDABLE_ACTIONS: BindableAction[] = [
-  { id: "undo", label: "Undo", kind: "key", defaults: ["Ctrl+Z"] },
-  { id: "redo", label: "Redo", kind: "key", defaults: ["Ctrl+Shift+Z", "Ctrl+Y"] },
-  { id: "newChat", label: "New chat node", kind: "key", defaults: ["Alt+N"] },
-  { id: "newNote", label: "New note", kind: "key", defaults: ["Alt+M"] },
-  { id: "newCode", label: "New code node", kind: "key", defaults: ["Alt+C"] },
-  { id: "newFile", label: "New file node", kind: "key", defaults: ["Alt+F"] },
-  { id: "reader", label: "Open or close the reader", kind: "key", defaults: ["Alt+R"] },
-  { id: "search", label: "Search nodes", kind: "key", defaults: ["Ctrl+K"] },
-  { id: "focusNode", label: "Zoom in on a node", kind: "click", defaults: ["Alt+Click"] },
+  { id: "undo", label: "Undo", kind: "key", defaults: ["Ctrl+Z"], area: "Board" },
+  { id: "redo", label: "Redo", kind: "key", defaults: ["Ctrl+Shift+Z", "Ctrl+Y"], area: "Board" },
+  { id: "newChat", label: "New chat node", kind: "key", defaults: ["Alt+N"], area: "Nodes" },
+  { id: "newNote", label: "New note", kind: "key", defaults: ["Alt+M"], area: "Nodes" },
+  { id: "newCode", label: "New code node", kind: "key", defaults: ["Alt+C"], area: "Nodes" },
+  { id: "newFile", label: "New file node", kind: "key", defaults: ["Alt+F"], area: "Nodes" },
+  { id: "reader", label: "Open or close the reader", kind: "key", defaults: ["Alt+R"], area: "Navigation" },
+  { id: "search", label: "Search inside nodes", kind: "key", defaults: ["Ctrl+F"], area: "Navigation" },
+  { id: "focusNode", label: "Zoom in on a node", kind: "click", defaults: ["Alt+Click"], area: "Canvas" },
+  { id: "showShortcuts", label: "Show the shortcuts", kind: "key", defaults: ["Shift+?"], area: "Navigation" },
 ];
 
 const MODIFIER_ORDER = ["Ctrl", "Alt", "Shift"];
@@ -107,13 +109,18 @@ export const boundActionId = (keybinds: Keybinds, binding: string): string | und
 
 export const bindingProblem = (keybinds: Keybinds, actionId: string, binding: string): string | undefined => {
   if (RESERVED_BINDINGS[binding]) return `${binding} is reserved for ${RESERVED_BINDINGS[binding]}`;
-  const owner = boundActionId(keybinds, binding);
-  if (owner === actionId) return `${binding} is already added here`;
-  if (owner) return `${binding} is already used by “${actionOf(owner)!.label}”`;
+  if (keybinds[actionId]?.includes(binding)) return `${binding} is already added here`;
   return undefined;
 };
 
-export const hasMultipleBindings = (keybinds: Keybinds, actionId: string): boolean => (keybinds[actionId]?.length ?? 0) > 1;
+export const sharedBindingOwners = (keybinds: Keybinds, actionId: string): Record<string, string[]> => {
+  const shared: Record<string, string[]> = {};
+  for (const binding of keybinds[actionId] ?? []) {
+    const others = BINDABLE_ACTIONS.filter((action) => action.id !== actionId && keybinds[action.id]?.includes(binding)).map((action) => action.label);
+    if (others.length > 0) shared[binding] = others;
+  }
+  return shared;
+};
 
 export const isDefaultBinding = (keybinds: Keybinds, actionId: string): boolean => {
   const current = keybinds[actionId] ?? [];

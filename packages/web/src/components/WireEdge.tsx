@@ -20,7 +20,7 @@ export const WireEdge = ({ id, sourceX, sourceY, targetX, targetY, sourcePositio
   const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition });
   const wireClasses = ["wire", `kind-${sourceKind ?? "turn"}`, isDimmed && "dimmed", (isHighlighted || selected) && "highlighted", isFlowing && "flowing"].filter(Boolean).join(" ");
   return (
-    <g className={wireClasses} onMouseEnter={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)}>
+    <g data-tour="wire" className={wireClasses} onMouseEnter={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)}>
       <BaseEdge id={id} path={path} markerEnd={markerEnd} interactionWidth={24} className={wireClasses} />
       {canFitRemoveButton && !isHovered && !selected && <circle className="wire-midpoint" cx={labelX} cy={labelY} r={4} />}
       {(isHovered || selected) && canFitRemoveButton && (

@@ -1,6 +1,6 @@
 {
   "name": "branchboard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A whiteboard where every AI chat turn is a node and the wiring decides what each node knows. Runs locally on top of the claude or opencode command you already have.",
   "keywords": ["ai", "chat", "whiteboard", "claude", "opencode", "local-first"],
   "license": "MIT",
@@ -22,13 +22,11 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "build:binary": "node scripts/build-binary.mjs"
+    "build": "node scripts/build.mjs"
   },
   "devDependencies": {
     "@branchboard/core": "*",
     "@branchboard/server": "*",
-    "esbuild": "^0.28.2",
-    "postject": "^1.0.0-alpha.6"
+    "esbuild": "^0.28.2"
   }
 }

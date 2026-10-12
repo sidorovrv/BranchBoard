@@ -4,6 +4,7 @@ import { activeRollOf, cacheReadShareOf, childIdsOf, describeToolGroup, edgesAtS
 import { availableNodeActions, commitGraphEdit, createAndFocus } from "../actions";
 import { attachToNode, droppedFiles, hasFiles } from "../attachments";
 import { useAutosavedText } from "../autosave";
+import { useCommentHighlights } from "../commentAnchors";
 import { clearGuides, snapResize } from "../dragSnap";
 import { SEEN_DWELL_MS, useIsUnseenResult, usePageVisible, useSeenResults } from "../seenResults";
 import { useGraphWithLiveMoves } from "../liveMoves";
@@ -21,6 +22,7 @@ import { Markdown } from "./Markdown";
 import { NodeRequests } from "./NodeRequests";
 import { PromptBlock } from "./PromptBlock";
 import { PromptEditor, type PromptEditorHandle } from "./PromptEditor";
+import { RecoveryButton } from "./RecoveryButton";
 import { Selectable } from "./Selectable";
 
 const STATUS_LABELS: Record<GraphNode["status"], string> = {
@@ -102,10 +104,10 @@ const ToolGroup = ({ parts }: { parts: Part[] }) => {
   );
 };
 
-const PartView = ({ part, isFinished, isLast }: { part: Part; isFinished: boolean; isLast: boolean }) => {
+const PartView = ({ part, isFinished, isLast, node }: { part: Part; isFinished: boolean; isLast: boolean; node?: GraphNode }) => {
   if (part.type === "todo") return <TodoList part={part} />;
   if (part.type === "tool") return <ToolCard part={part} />;
-  if (part.type === "error") return <div className="part-error"><Selectable>{part.text}</Selectable></div>;
+  if (part.type === "error") return <div className="part-error"><Selectable>{part.text}</Selectable>{node && <RecoveryButton node={node} part={part} />}</div>;
   if (part.type === "reasoning" && part.text.trim() === "") return isFinished || !isLast ? null : <div className="thinking-note">Thinking…</div>;
   if (part.type === "reasoning") return <details className="reasoning"><summary>Reasoning</summary><div><Selectable>{part.text}</Selectable></div></details>;
   return <Markdown text={part.text} isStreaming={!isFinished} />;
@@ -219,12 +221,12 @@ const FileBody = ({ node }: { node: GraphNode }) => (
   </div>
 );
 
-const NodeBody = ({ node, parts, isViewingEarlier }: { node: GraphNode; parts: Part[]; isViewingEarlier: boolean }) => {
+const NodeBody = ({ node, parts, roll }: { node: GraphNode; parts: Part[]; roll: number }) => {
   if (node.kind === "context") return <NoteBody node={node} />;
   if (node.kind === "file") return <FileBody node={node} />;
   if (node.kind === "code") return <CodeBody node={node} />;
-  if (node.kind === "subagent") return <ChatBody node={node} parts={parts} isViewingEarlier={isViewingEarlier} />;
-  return node.status === "idle" ? <Composer node={node} /> : <ChatBody node={node} parts={parts} isViewingEarlier={isViewingEarlier} />;
+  if (node.kind === "subagent") return <ChatBody node={node} parts={parts} roll={roll} />;
+  return node.status === "idle" ? <Composer node={node} /> : <ChatBody node={node} parts={parts} roll={roll} />;
 };
 
 const FOLLOW_TOLERANCE_PX = 24;
@@ -273,12 +275,13 @@ const useInlineSubagents = (node: GraphNode): GraphNode[] => {
   return useMemo(() => (isInline && node.kind === "turn" ? satelliteIdsOf(graph, node.id).map((id) => graph.nodes[id]) : []), [isInline, graph, node.id, node.kind]);
 };
 
-const ChatBody = ({ node, parts, isViewingEarlier }: { node: GraphNode; parts: Part[]; isViewingEarlier: boolean }) => {
-  const isFinished = SETTLED_STATUSES.includes(node.status) || isViewingEarlier;
+const ChatBody = ({ node, parts, roll }: { node: GraphNode; parts: Part[]; roll: number }) => {
+  const isFinished = SETTLED_STATUSES.includes(node.status) || roll !== activeRollOf(node);
   const { element, trackUserScroll } = useFollowScroll(isInFlight(node), parts);
   const inlineSubagents = useInlineSubagents(node);
   const fileEdits = useMemo(() => fileEditsOf(parts), [parts]);
   const isGrouping = useSettings((state) => state.settings.groupToolCalls);
+  useCommentHighlights(node, roll, element);
   const runs = useMemo(() => groupToolRuns(parts), [parts]);
   useLayoutEffect(() => {
     if (isFinished && element.current) element.current.scrollTop = element.current.scrollHeight;
@@ -288,12 +291,12 @@ const ChatBody = ({ node, parts, isViewingEarlier }: { node: GraphNode; parts: P
       {node.quoteText && <div className="quote-chip"><Selectable>Regarding: {node.quoteText}</Selectable></div>}
       <PromptBlock node={node} />
       <NodeRequests nodeId={node.id} />
-      <div className="answer nowheel" ref={element} onScroll={trackUserScroll}>
+      <div className="answer nowheel" ref={element} data-roll={roll} onScroll={trackUserScroll}>
         {isGrouping
-          ? runs.map((run, index) => (run.kind === "tools" ? <ToolGroup key={run.parts[0].id} parts={run.parts} /> : <PartView key={run.part.id} part={run.part} isFinished={isFinished} isLast={index === runs.length - 1} />))
-          : parts.map((part, index) => <PartView key={part.id} part={part} isFinished={isFinished} isLast={index === parts.length - 1} />)}
+          ? runs.map((run, index) => (run.kind === "tools" ? <ToolGroup key={run.parts[0].id} parts={run.parts} /> : <PartView key={run.part.id} part={run.part} isFinished={isFinished} isLast={index === runs.length - 1} node={node} />))
+          : parts.map((part, index) => <PartView key={part.id} part={part} isFinished={isFinished} isLast={index === parts.length - 1} node={node} />)}
         {inlineSubagents.map((satellite) => <SubagentInline key={satellite.id} satellite={satellite} />)}
-        {isFinished && <FileEditsSummary edits={fileEdits} />}
+        {isFinished && <FileEditsSummary edits={fileEdits} node={node} />}
         {node.stopped && <div className="stopped-note">stopped</div>}
       </div>
     </>
@@ -351,7 +354,7 @@ const RollSwitcher = ({ node, isViewOnly, shownRoll, onView }: RollSwitcherProps
   const title = isViewOnly ? "Browsing earlier answers (view only while running)" : "Regenerated answers; only the shown one feeds child nodes";
   return (
     <div className="card-footer">
-      <span className="roll-switcher nodrag" title={title}>
+      <span data-tour="rolls" className="roll-switcher nodrag" title={title}>
         <button disabled={position <= 0} onClick={() => select(-1)} aria-label="Previous roll">‹</button>
         <span>{position + 1}/{rolls.length}</span>
         <button disabled={position >= rolls.length - 1} onClick={() => select(1)} aria-label="Next roll">›</button>
@@ -374,7 +377,7 @@ const Badges = ({ node, stale, isBlocked, summaryState }: { node: GraphNode; sta
     {node.kind === "turn" && isChosen(node.effort) && <span className="badge" title="Effort">{node.effort}</span>}
     {node.kind === "turn" && isChosen(node.permissionMode) && <span className="badge" title="Permission mode">{node.permissionMode}</span>}
     {node.contextMode && <span className={`badge fidelity-${node.contextMode}`}>{node.contextMode}</span>}
-    {stale && <span className="badge stale">context changed</span>}
+    {stale && <span data-tour="stale" className="badge stale">context changed</span>}
     {node.usage && <span className="badge">{node.usage.inputTokens + node.usage.outputTokens} tok</span>}
     {node.usage?.costUsd !== undefined && <span className="badge" title="Cost reported by the runtime for this run">{formatCost(node.usage.costUsd)}</span>}
     {node.usage?.contextTokens !== undefined && node.usage.contextWindow && (
@@ -399,7 +402,7 @@ const NodeActions = ({ node }: { node: GraphNode }) => {
   return (
     <div className="node-actions">
       {available.map(({ action, title }) => (
-        <button key={action.id} className={action.isActive?.({ node }) ? "active" : ""} aria-pressed={action.isActive ? action.isActive({ node }) : undefined} title={title} aria-label={action.label({ node })} onClick={() => void action.run({ node })}>
+        <button key={action.id} data-tour={action.id === "reply" ? "branch" : undefined} className={action.isActive?.({ node }) ? "active" : ""} aria-pressed={action.isActive ? action.isActive({ node }) : undefined} title={title} aria-label={action.label({ node })} onClick={() => void action.run({ node })}>
           <IconRow names={action.icons({ node })} />
         </button>
       ))}
@@ -542,7 +545,7 @@ const NodeShellComponent = ({ data, selected }: NodeProps<BranchNode>) => {
     if (event.type === "drop") void attachToNode(node.id, droppedFiles(event));
   };
   return (
-    <div className={`node-wrapper ${selected ? "selected" : ""} ${isDropTarget ? "drop-target" : ""}`} onDragOver={acceptDrop} onDragLeave={() => setIsDropTarget(false)} onDrop={acceptDrop}>
+    <div data-tour="node" data-node-title={node.title} className={`node-wrapper ${selected ? "selected" : ""} ${isDropTarget ? "drop-target" : ""}`} onDragOver={acceptDrop} onDragLeave={() => setIsDropTarget(false)} onDrop={acceptDrop}>
       <div className={`node-card kind-${node.kind} status-${node.status} ${isLowDetail ? "is-low-detail" : ""} ${isLowDetail && blinksForAttention && node.status === "awaiting_approval" ? "is-attention-blink" : ""} ${stale ? "is-stale" : ""} ${isBlocked ? "is-blocked" : ""} ${isUnseen ? "is-unseen" : ""}`} style={{ width: Math.max(size.w, minSizeOf(node.kind).w), height: Math.max(size.h, minSizeOf(node.kind).h), ...tintStyleOf(node.title), ...(isUnseen || node.status === "running" || node.status === "queued" ? ({ "--glow": Math.min(UNSEEN_GLOW_MAX_SCALE, Math.max(1, 1 / zoom)) } as CSSProperties) : {}) }}>
         <FlowHandles node={node} />
         <div className="node-head">
@@ -551,7 +554,7 @@ const NodeShellComponent = ({ data, selected }: NodeProps<BranchNode>) => {
         </div>
         {(node.kind === "turn" || node.kind === "subagent") && <Badges node={node} stale={stale} isBlocked={isBlocked} summaryState={summaryState} />}
         {isLowDetail && <div className="lod-title" style={{ fontSize: Math.min(LOW_DETAIL_FONT_SCREEN_PX / zoom, Math.sqrt((node.w * node.h * LOW_DETAIL_FILL) / (Math.max(node.title.length, 1) * LOW_DETAIL_CHAR_ASPECT))) }}>{node.title}</div>}
-        {!isLowDetail && <NodeBody node={node} parts={parts} isViewingEarlier={shownRoll !== activeRollOf(node)} />}
+        {!isLowDetail && <NodeBody node={node} parts={parts} roll={shownRoll} />}
         {!isLowDetail && <RollSwitcher node={node} isViewOnly={isViewOnly} shownRoll={shownRoll} onView={setViewedRoll} />}
         {hiddenCount > 0 && <div className="collapsed-note">{hiddenCount} collapsed</div>}
         {!node.pinned && RESIZE_HANDLES.map(({ className, title, axes }) => <div key={className} className={`resize-handle ${className} nodrag nopan`} onPointerDown={(event) => beginResize(event, axes)} title={title}><span /></div>)}

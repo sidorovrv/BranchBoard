@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { activeRollOf, answerText, encodeAnswers, isStale, liveEdges, REJECTED_ANSWER, type BoardView, type GraphNode } from "@branchboard/core";
-import { ACCESS_COOKIE, ACCESS_QUERY, cookieValueOf, loadAccessToken } from "../packages/server/src/accessToken";
+import { ACCESS_QUERY, accessCookieName, cookieValueOf, loadAccessToken } from "../packages/server/src/accessToken";
 import { createApp } from "../packages/server/src/app";
 import { isUpgradeAllowed } from "../packages/server/src/security";
 
@@ -90,7 +90,7 @@ describe("security", () => {
 describe("access key", () => {
   const accessToken = "ab".repeat(32);
   const locked = createApp({ databasePath: join(directory, "locked.db"), security: { port: PORT, extraOrigins: [], accessToken }, webRoot: join(directory, "none") });
-  const cookie = `${ACCESS_COOKIE}=${accessToken}`;
+  const cookie = `${accessCookieName(PORT)}=${accessToken}`;
   const lockedRequest = async (path: string, init: { method?: string; headers?: Record<string, string>; body?: unknown } = {}) =>
     locked.app.request(`http://127.0.0.1:${PORT}${path}`, { method: init.method ?? "GET", headers: { host: trusted.host, ...init.headers }, body: init.body ? JSON.stringify(init.body) : undefined });
 
@@ -112,7 +112,7 @@ describe("access key", () => {
 
   it("refuses a wrong key and a cookie of the wrong value", async () => {
     expect((await lockedRequest(`/?${ACCESS_QUERY}=${"cd".repeat(32)}`)).status).toBe(401);
-    expect((await lockedRequest("/api/boards", { headers: { cookie: `${ACCESS_COOKIE}=wrong` } })).status).toBe(401);
+    expect((await lockedRequest("/api/boards", { headers: { cookie: `${accessCookieName(PORT)}=wrong` } })).status).toBe(401);
     expect((await lockedRequest("/api/boards", { headers: { cookie: `other=${accessToken}` } })).status).toBe(401);
   });
 
@@ -121,7 +121,7 @@ describe("access key", () => {
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe("/some/page?board=1");
     const setCookie = response.headers.get("set-cookie")!;
-    expect(setCookie).toContain(`${ACCESS_COOKIE}=${accessToken}`);
+    expect(setCookie).toContain(`${accessCookieName(PORT)}=${accessToken}`);
     expect(setCookie).toContain("HttpOnly");
     expect(setCookie).toContain("SameSite=Strict");
   });
@@ -155,7 +155,7 @@ describe("access key", () => {
     const config = { port: PORT, extraOrigins: [], accessToken };
     const upgrade = (headers: Record<string, string>) => ({ headers: { host: trusted.host, origin: trusted.origin, ...headers } }) as IncomingMessage;
     expect(isUpgradeAllowed(config, upgrade({}))).toBe(false);
-    expect(isUpgradeAllowed(config, upgrade({ cookie: `${ACCESS_COOKIE}=nope` }))).toBe(false);
+    expect(isUpgradeAllowed(config, upgrade({ cookie: `${accessCookieName(PORT)}=nope` }))).toBe(false);
     expect(isUpgradeAllowed(config, upgrade({ cookie }))).toBe(true);
     expect(isUpgradeAllowed({ ...config, accessToken: undefined }, upgrade({}))).toBe(true);
   });
@@ -170,8 +170,8 @@ describe("access key", () => {
   });
 
   it("reads one cookie out of several", () => {
-    expect(cookieValueOf(`a=1; ${ACCESS_COOKIE}=${accessToken}; b=2`, ACCESS_COOKIE)).toBe(accessToken);
-    expect(cookieValueOf(undefined, ACCESS_COOKIE)).toBeUndefined();
+    expect(cookieValueOf(`a=1; ${accessCookieName(PORT)}=${accessToken}; b=2`, accessCookieName(PORT))).toBe(accessToken);
+    expect(cookieValueOf(undefined, accessCookieName(PORT))).toBeUndefined();
   });
 });
 

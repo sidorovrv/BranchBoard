@@ -1,0 +1,380 @@
+{
+  "format": "branchboard",
+  "version": 2,
+  "board": {
+    "id": "sample-board",
+    "title": "Sample board",
+    "workspacePath": "",
+    "mode": "fake",
+    "createdAt": 1760000000000,
+    "updatedAt": 1760000000000,
+    "deleted": false
+  },
+  "nodes": [
+    {
+      "id": "root",
+      "boardId": "sample-board",
+      "kind": "turn",
+      "status": "done",
+      "title": "Plan a CSV tool",
+      "prompt": "Plan a small command-line tool that converts a CSV file to JSON.",
+      "x": 0,
+      "y": 0,
+      "w": 700,
+      "h": 360,
+      "collapsed": false,
+      "forceAssemble": false,
+      "rev": 0,
+      "createdAt": 1760000000000,
+      "deleted": false,
+      "startedAt": 1760000000000,
+      "completedAt": 1760000004000,
+      "contextMode": "assembled",
+      "activeRoll": 1,
+      "rollCount": 1,
+      "usage": {
+        "inputTokens": 26,
+        "outputTokens": 118
+      },
+      "contextHash": "811c9dc5",
+      "contextNodeIds": []
+    },
+    {
+      "id": "note",
+      "boardId": "sample-board",
+      "kind": "context",
+      "status": "idle",
+      "title": "Constraints",
+      "prompt": "Constraints for every version: no external dependencies, and keep the whole tool under 60 lines.",
+      "x": 740,
+      "y": 190,
+      "w": 225,
+      "h": 120,
+      "collapsed": false,
+      "forceAssemble": false,
+      "rev": 0,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "python",
+      "boardId": "sample-board",
+      "kind": "turn",
+      "status": "done",
+      "title": "CSV tool in Python",
+      "prompt": "Write it in Python.",
+      "x": 900,
+      "y": -300,
+      "w": 700,
+      "h": 360,
+      "collapsed": false,
+      "forceAssemble": false,
+      "rev": 0,
+      "createdAt": 1760000000000,
+      "deleted": false,
+      "startedAt": 1760000000000,
+      "completedAt": 1760000004000,
+      "contextMode": "assembled",
+      "activeRoll": 2,
+      "rollCount": 2,
+      "usage": {
+        "inputTokens": 190,
+        "outputTokens": 240
+      },
+      "rolls": {
+        "1": {
+          "status": "done",
+          "startedAt": 1760000000000,
+          "completedAt": 1760000003000,
+          "usage": {
+            "inputTokens": 180,
+            "outputTokens": 90
+          }
+        }
+      },
+      "contextHash": "26b8fd0b",
+      "contextNodeIds": [
+        "root",
+        "note"
+      ],
+      "summary": {
+        "text": "Plan for a CSV-to-JSON command-line tool (standard library only, under 60 lines). The Python version reads the file with csv.DictReader and prints indented JSON.",
+        "coveredNodeIds": [
+          "root",
+          "python"
+        ],
+        "contextHash": "26b8fd0b",
+        "rev": 0,
+        "tokens": 40
+      }
+    },
+    {
+      "id": "code",
+      "boardId": "sample-board",
+      "kind": "code",
+      "status": "idle",
+      "title": "converter.py",
+      "prompt": "import csv\nimport json\nimport sys\n\n\ndef main(path):\n    with open(path, newline=\"\", encoding=\"utf-8\") as handle:\n        rows = list(csv.DictReader(handle))\n    json.dump(rows, sys.stdout, indent=2)\n\n\nif __name__ == \"__main__\":\n    if len(sys.argv) != 2:\n        sys.exit(\"usage: converter.py FILE.csv\")\n    main(sys.argv[1])\n",
+      "x": 1700,
+      "y": -300,
+      "w": 700,
+      "h": 360,
+      "collapsed": false,
+      "forceAssemble": false,
+      "rev": 0,
+      "createdAt": 1760000000000,
+      "deleted": false,
+      "filePath": "converter.py"
+    },
+    {
+      "id": "node",
+      "boardId": "sample-board",
+      "kind": "turn",
+      "status": "done",
+      "title": "CSV tool in Node.js",
+      "prompt": "Write it in Node.js.",
+      "x": 900,
+      "y": 450,
+      "w": 700,
+      "h": 360,
+      "collapsed": false,
+      "forceAssemble": false,
+      "rev": 0,
+      "createdAt": 1760000000000,
+      "deleted": false,
+      "startedAt": 1760000000000,
+      "completedAt": 1760000004000,
+      "contextMode": "assembled",
+      "activeRoll": 1,
+      "rollCount": 1,
+      "usage": {
+        "inputTokens": 180,
+        "outputTokens": 210
+      },
+      "contextHash": "26b8fd0b",
+      "contextNodeIds": [
+        "root",
+        "note"
+      ]
+    },
+    {
+      "id": "note2",
+      "boardId": "sample-board",
+      "kind": "context",
+      "status": "idle",
+      "title": "Testing",
+      "prompt": "Use the built-in node:test runner and nothing else.",
+      "x": 1740,
+      "y": 190,
+      "w": 225,
+      "h": 120,
+      "collapsed": false,
+      "forceAssemble": false,
+      "rev": 1,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "test",
+      "boardId": "sample-board",
+      "kind": "turn",
+      "status": "done",
+      "title": "Test for an empty file",
+      "prompt": "Add a test for an empty file.",
+      "x": 1700,
+      "y": 450,
+      "w": 700,
+      "h": 360,
+      "collapsed": false,
+      "forceAssemble": false,
+      "rev": 0,
+      "createdAt": 1760000000000,
+      "deleted": false,
+      "startedAt": 1760000000000,
+      "completedAt": 1760000004000,
+      "contextMode": "assembled",
+      "activeRoll": 1,
+      "rollCount": 1,
+      "usage": {
+        "inputTokens": 400,
+        "outputTokens": 160
+      },
+      "contextHash": "fcaf3c7b",
+      "contextNodeIds": [
+        "root",
+        "note",
+        "node",
+        "note2"
+      ]
+    },
+    {
+      "id": "compare",
+      "boardId": "sample-board",
+      "kind": "turn",
+      "status": "done",
+      "title": "Compare the versions",
+      "prompt": "Compare both versions in a table and a chart.",
+      "x": 2600,
+      "y": 100,
+      "w": 760,
+      "h": 760,
+      "collapsed": false,
+      "forceAssemble": false,
+      "rev": 0,
+      "createdAt": 1760000000000,
+      "deleted": false,
+      "startedAt": 1760000000000,
+      "completedAt": 1760000004000,
+      "contextMode": "assembled",
+      "activeRoll": 1,
+      "rollCount": 1,
+      "usage": {
+        "inputTokens": 520,
+        "outputTokens": 310
+      },
+      "contextHash": "18990cb9",
+      "contextNodeIds": [
+        "root",
+        "note",
+        "python",
+        "node"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "boardId": "sample-board",
+      "fromId": "root",
+      "toId": "python",
+      "seq": 0,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "e2",
+      "boardId": "sample-board",
+      "fromId": "note",
+      "toId": "python",
+      "seq": 1,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "e4",
+      "boardId": "sample-board",
+      "fromId": "python",
+      "toId": "code",
+      "seq": 0,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "e5",
+      "boardId": "sample-board",
+      "fromId": "root",
+      "toId": "node",
+      "seq": 0,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "e6",
+      "boardId": "sample-board",
+      "fromId": "note",
+      "toId": "node",
+      "seq": 1,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "e7",
+      "boardId": "sample-board",
+      "fromId": "node",
+      "toId": "test",
+      "seq": 0,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "e8",
+      "boardId": "sample-board",
+      "fromId": "note2",
+      "toId": "test",
+      "seq": 1,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "e9",
+      "boardId": "sample-board",
+      "fromId": "python",
+      "toId": "compare",
+      "seq": 0,
+      "createdAt": 1760000000000,
+      "deleted": false
+    },
+    {
+      "id": "e10",
+      "boardId": "sample-board",
+      "fromId": "node",
+      "toId": "compare",
+      "seq": 1,
+      "createdAt": 1760000000000,
+      "deleted": false
+    }
+  ],
+  "parts": [
+    {
+      "id": "root:1:text",
+      "nodeId": "root",
+      "roll": 1,
+      "seq": 0,
+      "type": "text",
+      "text": "Here is a plan:\n\n1. Read the file given as the first argument.\n2. Treat the first row as the column names.\n3. Print a JSON array with one object per row.\n4. Exit with a clear message when the file is missing or a row has the wrong number of columns.\n\nThe two branches write the same tool in different languages from this one plan."
+    },
+    {
+      "id": "python:1:text",
+      "nodeId": "python",
+      "roll": 1,
+      "seq": 0,
+      "type": "text",
+      "text": "Here is a first version using only the standard library:\n\n```python\nimport csv, json, sys\nprint(json.dumps(list(csv.DictReader(open(sys.argv[1])))))\n```\n\nIt works, but it prints everything on one line and does not close the file."
+    },
+    {
+      "id": "python:2:text",
+      "nodeId": "python",
+      "roll": 2,
+      "seq": 0,
+      "type": "text",
+      "text": "This version reads the file with `csv.DictReader`, so the first row becomes the keys, and prints indented JSON.\n\n```python\nimport csv\nimport json\nimport sys\n\n\ndef main(path):\n    with open(path, newline=\"\", encoding=\"utf-8\") as handle:\n        rows = list(csv.DictReader(handle))\n    json.dump(rows, sys.stdout, indent=2)\n\n\nif __name__ == \"__main__\":\n    if len(sys.argv) != 2:\n        sys.exit(\"usage: converter.py FILE.csv\")\n    main(sys.argv[1])\n```\n\nIt stays well under 60 lines and needs nothing beyond the standard library."
+    },
+    {
+      "id": "node:1:text",
+      "nodeId": "node",
+      "roll": 1,
+      "seq": 0,
+      "type": "text",
+      "text": "The Node.js version does the same job with the built-in `fs` module.\n\n```javascript\nimport { readFileSync } from \"node:fs\";\n\nconst [path] = process.argv.slice(2);\nif (!path) throw new Error(\"usage: node converter.mjs FILE.csv\");\n\nconst [header, ...lines] = readFileSync(path, \"utf8\").trim().split(/\\r?\\n/);\nconst names = header.split(\",\");\nconst rows = lines.map((line) => Object.fromEntries(line.split(\",\").map((value, index) => [names[index], value])));\nconsole.log(JSON.stringify(rows, null, 2));\n```\n\nQuoted fields that contain commas are not handled."
+    },
+    {
+      "id": "test:1:text",
+      "nodeId": "test",
+      "roll": 1,
+      "seq": 0,
+      "type": "text",
+      "text": "I would use Jest for this.\n\n```javascript\ntest(\"an empty file gives an empty array\", () => {\n  expect(convert(\"\")).toEqual([]);\n});\n```\n\nInstall it with `npm install --save-dev jest`."
+    },
+    {
+      "id": "compare:1:text",
+      "nodeId": "compare",
+      "roll": 1,
+      "seq": 0,
+      "type": "text",
+      "text": "Both versions use only the standard library and stay under 60 lines.\n\n```table\n{\"title\":\"The two versions\",\"columns\":[{\"key\":\"version\",\"label\":\"Version\"},{\"key\":\"lines\",\"label\":\"Lines\",\"type\":\"number\"},{\"key\":\"dependencies\",\"label\":\"Dependencies\"},{\"key\":\"quoted\",\"label\":\"Quoted fields\"}],\"rows\":[{\"version\":\"Python\",\"lines\":15,\"dependencies\":\"None\",\"quoted\":\"Handled\"},{\"version\":\"Node.js\",\"lines\":9,\"dependencies\":\"None\",\"quoted\":\"Not handled\"}]}\n```\n\n```chart\n{\"title\":\"Lines of code\",\"data\":{\"values\":[{\"version\":\"Python\",\"lines\":15},{\"version\":\"Node.js\",\"lines\":9}]},\"mark\":\"bar\",\"encoding\":{\"x\":{\"field\":\"version\",\"type\":\"nominal\",\"title\":\"Version\",\"axis\":{\"labelAngle\":0}},\"y\":{\"field\":\"lines\",\"type\":\"quantitative\",\"title\":\"Lines\"},\"color\":{\"field\":\"version\",\"type\":\"nominal\",\"legend\":null}}}\n```\n\nThe Python version also handles quoted fields, so it is the safer choice for real CSV files."
+    }
+  ],
+  "staleNodeIds": [
+    "test"
+  ]
+}

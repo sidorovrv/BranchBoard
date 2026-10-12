@@ -3,15 +3,16 @@ import { CodeFence, CopyButton } from "./CodeFence";
 
 interface BlockFrameProps {
   label: string;
+  tourAnchor?: string;
   source: string;
   language: string;
   children: ReactNode;
 }
 
-export const BlockFrame = ({ label, source, language, children }: BlockFrameProps) => {
+export const BlockFrame = ({ label, tourAnchor, source, language, children }: BlockFrameProps) => {
   const [isSourceShown, setIsSourceShown] = useState(false);
   return (
-    <div className="code-block rich-block">
+    <div className="code-block rich-block" data-tour={tourAnchor}>
       <div className="code-head">
         <span>{label}</span>
         <span className="rich-actions">

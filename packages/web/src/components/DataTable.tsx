@@ -84,7 +84,7 @@ export const DataTable = ({ table, cellNodes }: DataTableProps) => {
 export const TableBlock = ({ source }: { source: string }) => {
   const parsed = useMemo(() => parseTableSpec(source), [source]);
   return (
-    <BlockFrame label="table" source={source} language="json">
+    <BlockFrame label="table" tourAnchor="table" source={source} language="json">
       {"error" in parsed ? <BlockError message={parsed.error} /> : <DataTable table={parsed.table} />}
     </BlockFrame>
   );

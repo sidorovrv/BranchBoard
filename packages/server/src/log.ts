@@ -51,6 +51,7 @@ export const readLogTail = (maxLines: number, filter?: string): string[] => {
 const writeToFile = (line: string) => {
   if (!logFilePath) return;
   try {
+    mkdirSync(dirname(logFilePath), { recursive: true });
     rotateIfLarge(logFilePath);
     appendFileSync(logFilePath, `${line}\n`);
   } catch {

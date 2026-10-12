@@ -78,7 +78,7 @@ export const snapResizedEdges = (box: Box, axes: { horizontal: boolean; vertical
   };
 };
 
-export const snapMovingBoxes =(movingBoxes: Box[], others: Box[], threshold: number): SnapResult => {
+export const snapMovingBoxes = (movingBoxes: Box[], others: Box[], threshold: number): SnapResult => {
   if (movingBoxes.length === 0 || others.length === 0) return { dx: 0, dy: 0, guides: [] };
   const moving = boundsOf(movingBoxes);
   const fixedX = others.flatMap(xAnchorsOf);

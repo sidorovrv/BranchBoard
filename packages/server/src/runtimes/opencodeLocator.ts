@@ -3,11 +3,11 @@ import { locateExecutable, npmGlobalDirectories, shimNames, type LocatorEnvironm
 
 export type { LocatorEnvironment, Location } from "./executableLocator";
 
-export const locateOpencode = (environment?: LocatorEnvironment): Location =>
+const locatorFor = (command: string, overrideVariable: string) => (environment?: LocatorEnvironment): Location =>
   locateExecutable(
     {
-      overrideVariable: "BRANCHBOARD_OPENCODE_PATH",
-      names: (platform) => shimNames("opencode", platform),
+      overrideVariable,
+      names: (platform) => shimNames(command, platform),
       knownDirectories: (current) => {
         const common = [join(current.home, ".opencode", "bin"), join(current.home, ".bun", "bin"), join(current.home, ".local", "bin")];
         return current.platform === "win32" ? [...npmGlobalDirectories(current), ...common] : [...common, ...npmGlobalDirectories(current)];
@@ -15,3 +15,7 @@ export const locateOpencode = (environment?: LocatorEnvironment): Location =>
     },
     environment,
   );
+
+export const locateOpencode = locatorFor("opencode", "BRANCHBOARD_OPENCODE_PATH");
+
+export const locateOpencode2 = locatorFor("opencode2", "BRANCHBOARD_OPENCODE2_PATH");

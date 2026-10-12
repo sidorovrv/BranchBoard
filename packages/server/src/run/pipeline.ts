@@ -24,11 +24,14 @@ import {
   now,
   isUsageLimitMessage,
   orderedAncestorIds,
+  partsOfRoll,
   placeSatellite,
   planSession,
+  recoveryOfMessage,
   renderInput,
   satelliteIdsOf,
   summarySource,
+  type ApiRuntimeId,
   type Catalog,
   type Id,
   type NodeStatus,
@@ -42,14 +45,16 @@ import {
 } from "@branchboard/core";
 import type { AttachmentStore } from "../attachments";
 import { RefusedError, type BoardService } from "../boards";
+import { snapshotWorkspace } from "../git";
 import { log } from "../log";
 import type { CostStore } from "../costs";
+import { fileHashesAfterRun } from "../revert";
 import type { RunLog } from "../runLog";
 import { askOnce } from "./askOnce";
 import { resolveMentions } from "./mentions";
 import { createAnswerWaiters } from "./requests";
 import { shortName, suggestTitle } from "./titles";
-import type { RunFile, RunScope, RuntimeSteps } from "./types";
+import { RecoverableError, type RunFile, type RunScope, type RuntimeSteps } from "./types";
 
 interface ActiveRun {
   boardId: Id;
@@ -69,7 +74,7 @@ interface RunOutcome {
   satellites: Map<string, Id>;
 }
 
-export type Runtimes = Record<RuntimeId, RuntimeSteps>;
+export type Runtimes = Record<"fake" | "opencode" | "claude", RuntimeSteps> & Partial<Record<ApiRuntimeId | "opencode2", RuntimeSteps>>;
 
 const finalStatusOf = (outcome: RunOutcome): NodeStatus => (outcome.errors.length > 0 && !outcome.stopped ? "error" : "done");
 
@@ -95,11 +100,17 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
   const waiters = createAnswerWaiters();
   const catalogCache = new Map<string, { at: number; catalog: Promise<Catalog | undefined> }>();
 
-  const catalogOf = (runtimeId: RuntimeId, workspacePath: string): Promise<Catalog | undefined> => {
+  const runtimeOf = (runtimeId: RuntimeId): RuntimeSteps => {
+    const runtime = runtimes[runtimeId];
+    if (!runtime) throw new RefusedError(`The ${runtimeId} runtime is not available`);
+    return runtime;
+  };
+
+  const catalogOf = (runtimeId: RuntimeId, workspacePath: string, isFresh = false): Promise<Catalog | undefined> => {
     const key = `${runtimeId}|${workspacePath}`;
     const cached = catalogCache.get(key);
-    if (cached && now() - cached.at < CATALOG_CACHE_MS) return cached.catalog;
-    const catalog = runtimes[runtimeId].catalog(workspacePath).then(
+    if (cached && !isFresh && now() - cached.at < CATALOG_CACHE_MS) return cached.catalog;
+    const catalog = runtimeOf(runtimeId).catalog(workspacePath).then(
       (result) => result,
       (error) => (log.warn("run", `Could not read the ${runtimeId} catalog`, error), undefined),
     );
@@ -185,7 +196,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     if (event.type === "done") outcome.stopped = event.stopped ?? false;
     if (event.type === "error") outcome.errors.push(event.message);
     if (event.type === "part.delta" && event.partType === "text") outcome.answerChars += event.text.length;
-    boards.recordRunEvent(boardId, nodeId, event);
+    boards.recordRunEvent(boardId, nodeId, event.type === "error" ? { ...event, recovery: event.recovery ?? recoveryOfMessage(event.message) } : event);
   };
 
   const resolveContext = (boardId: Id, nodeId: Id) => {
@@ -274,7 +285,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     const hash = contextHash(state.graph, nodeId);
     const rev = node.rev;
     const output = (await askOnce({
-      runtime: runtimes[state.board.mode],
+      runtime: runtimeOf(state.board.mode),
       scope: { boardId, nodeId, workspacePath: state.board.workspacePath, agent: node.agent, model: node.model },
       input: summaryInstruction(text),
       purpose: "summary",
@@ -339,7 +350,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     const state = boards.stateOf(boardId);
     const node = state.graph.nodes[nodeId];
     if (!node || node.deleted || node.status !== "queued") return;
-    const runtime = runtimes[state.board.mode];
+    const runtime = runtimeOf(state.board.mode);
     const controller = new AbortController();
     const outcome: RunOutcome = { stopped: false, answerChars: 0, errors: [], satellites: new Map() };
     const roll = activeRollOf(node);
@@ -363,7 +374,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     };
     activeRuns.set(nodeId, { boardId, isStopping: false, isWaitingForSlot: false, controller, scope, runtime });
     const started = now();
-    patchNode(boardId, nodeId, { status: "running", stopped: false, usage: undefined, startedAt: started, completedAt: undefined });
+    patchNode(boardId, nodeId, { status: "running", stopped: false, usage: undefined, startedAt: started, completedAt: undefined, workspaceSnapshot: null, fileHashes: null, reverted: null });
     let status: NodeStatus = "done";
     log.info("run", `Starting node ${nodeId} on board ${boardId} (runtime=${state.board.mode}, agent=${node.agent}, model=${node.model}, workspace=${scope.workspacePath})`);
     try {
@@ -390,6 +401,8 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
         prompt: node.prompt,
         input,
       });
+      const snapshot = controller.signal.aborted || !runtime.editsFiles ? undefined : await snapshotWorkspace(scope.workspacePath);
+      if (snapshot) patchNode(boardId, nodeId, { workspaceSnapshot: snapshot });
       if (!controller.signal.aborted) await streamRun(runtime, plan, input, scope, outcome);
       if (controller.signal.aborted) outcome.stopped = true;
       if (finalStatusOf(outcome) === "error") status = "error";
@@ -400,12 +413,13 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
         log.error("run", `Node ${nodeId} failed`, error);
         const message = error instanceof Error ? error.message : String(error);
         outcome.errors.push(message);
-        boards.recordRunEvent(boardId, nodeId, { type: "error", message });
+        boards.recordRunEvent(boardId, nodeId, { type: "error", message, recovery: error instanceof RecoverableError ? error.recovery : recoveryOfMessage(message) });
       }
     } finally {
       closeOpenRequests(boardId, nodeId, "reject");
       finishOpenSatellites(boardId, outcome, status === "error" ? "error" : "done");
       activeRuns.delete(nodeId);
+      recordFileHashes(boardId, nodeId, roll, scope.workspacePath);
       runLog.append({ event: "end", boardId, nodeId, roll, status, stopped: outcome.stopped, durationMs: now() - started, answerChars: outcome.answerChars, errors: outcome.errors, usage: outcome.usage, runtimeRef: outcome.runtimeRef });
       persistRun(boardId, nodeId, status, outcome);
       recordCost(boardId, nodeId, outcome);
@@ -413,6 +427,15 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       pump(boardId);
       flagUsageLimit(boardId, status, outcome);
       flagUnseenResult(boardId, outcome.stopped);
+    }
+  };
+
+  const recordFileHashes = (boardId: Id, nodeId: Id, roll: number, workspacePath: string) => {
+    try {
+      const fileHashes = fileHashesAfterRun(workspacePath, partsOfRoll(boards.stateOf(boardId).parts[nodeId], roll));
+      if (Object.keys(fileHashes).length > 0) patchNode(boardId, nodeId, { fileHashes });
+    } catch (error) {
+      log.warn("run", `Could not record the file state after node ${nodeId}`, error);
     }
   };
 
@@ -459,7 +482,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
   const enqueue = (boardId: Id, nodeId: Id) => {
     refuseIfOverBudget(boardId);
     boards.commitRunPatch(boardId, { type: "queue", nodeId });
-    void nameNode(boardId, nodeId, runtimes[boards.stateOf(boardId).board.mode]).catch((error) => log.warn("run", `Naming failure for node ${nodeId}`, error));
+    void nameNode(boardId, nodeId, runtimeOf(boards.stateOf(boardId).board.mode)).catch((error) => log.warn("run", `Naming failure for node ${nodeId}`, error));
     pump(boardId);
   };
 
@@ -483,7 +506,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     log.info("run", `Answering request ${requestId} with "${answer}"`);
     const ownerId = ownerOf(boardId, request.nodeId);
     const active = activeRuns.get(ownerId);
-    const runtime = active?.runtime ?? runtimes[boards.stateOf(boardId).board.mode];
+    const runtime = active?.runtime ?? runtimeOf(boards.stateOf(boardId).board.mode);
     await runtime.answerRequest(request, answer, active?.scope);
     waiters.resolve(requestId, answer);
     boards.saveRequest({ ...request, status: "closed", answer });
@@ -539,7 +562,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       .sort((first, second) => (second.completedAt ?? 0) - (first.completedAt ?? 0))
       .slice(0, FINISHED_RUNS_LIMIT);
 
-  return { enqueue, abort, listRuns, listFinishedRuns, answerRequest, summarise, catalogOf, isActive: (nodeId: Id) => activeRuns.has(nodeId) };
+  return { enqueue, abort, listRuns, listFinishedRuns, answerRequest, summarise, catalogOf, forgetCatalogs: () => catalogCache.clear(), isActive: (nodeId: Id) => activeRuns.has(nodeId) };
 };
 
 export type RunService = ReturnType<typeof createRunService>;

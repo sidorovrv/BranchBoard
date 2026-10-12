@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import type { MiddlewareHandler } from "hono";
-import { ACCESS_COOKIE, ACCESS_QUERY, accessCookieHeader, cookieValueOf, tokensMatch } from "./accessToken";
+import { ACCESS_QUERY, accessCookieName, accessCookieHeader, cookieValueOf, tokensMatch } from "./accessToken";
+import { CAPABILITY_KINDS, capabilityOfPath } from "./capabilities";
 import { log } from "./log";
 
 export interface SecurityConfig {
@@ -16,17 +17,18 @@ export const allowedHosts = (config: SecurityConfig): string[] => loopbackNames.
 export const allowedOrigins = (config: SecurityConfig): string[] => [...loopbackNames.map((name) => `http://${name}:${config.port}`), ...config.extraOrigins];
 
 const hasAccess = (config: SecurityConfig, cookieHeader: string | undefined): boolean =>
-  config.accessToken === undefined || tokensMatch(config.accessToken, cookieValueOf(cookieHeader, ACCESS_COOKIE));
+  config.accessToken === undefined || tokensMatch(config.accessToken, cookieValueOf(cookieHeader, accessCookieName(config.port)));
 
 export const isUpgradeAllowed = (config: SecurityConfig, request: IncomingMessage): boolean =>
   allowedHosts(config).includes(request.headers.host ?? "") && allowedOrigins(config).includes(request.headers.origin ?? "") && hasAccess(config, request.headers.cookie);
 
 const SAFE_METHODS = ["GET", "HEAD"];
 
-export const LOCAL_PROCESS_PATH_PREFIX = "/mcp/";
+export const INSTANCE_PATH = "/api/instance";
 
 export const noFramingMiddleware: MiddlewareHandler = async (context, next) => {
   await next();
+  if (capabilityOfPath(context.req.path)?.kind === "preview" && context.res.status === 200) return;
   context.res.headers.set("x-frame-options", "DENY");
   if (!context.res.headers.has("content-security-policy")) context.res.headers.set("content-security-policy", "frame-ancestors 'none'");
 };
@@ -45,16 +47,19 @@ export const securityMiddleware = (config: SecurityConfig): MiddlewareHandler =>
     return context.json({ error: "Host not allowed" }, 403);
   }
   const origin = context.req.header("origin") ?? "";
-  if (context.req.path.startsWith(LOCAL_PROCESS_PATH_PREFIX)) {
-    if (origin) {
-      log.warn("security", `Rejected browser request with origin "${origin}" on ${context.req.path}`);
+  const capability = capabilityOfPath(context.req.path);
+  if (capability) {
+    if (origin && CAPABILITY_KINDS[capability.kind].rejectsOrigin) {
+      log.warn("security", `Rejected browser request with origin "${origin}" on /${capability.kind}/…`);
       return context.json({ error: "Origin not allowed" }, 403);
     }
+    if (!SAFE_METHODS.includes(context.req.method) && capability.kind === "preview") return context.json({ error: "Preview is read-only" }, 405);
     return next();
   }
+  if (context.req.path === INSTANCE_PATH && context.req.method === "GET") return next();
   const offered = new URL(context.req.url).searchParams.get(ACCESS_QUERY);
   if (config.accessToken !== undefined && context.req.method === "GET" && tokensMatch(config.accessToken, offered)) {
-    context.header("set-cookie", accessCookieHeader(config.accessToken));
+    context.header("set-cookie", accessCookieHeader(config.port, config.accessToken));
     return context.redirect(pathWithoutAccess(new URL(context.req.url)), 303);
   }
   if (!hasAccess(config, context.req.header("cookie"))) {

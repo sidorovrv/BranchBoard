@@ -56,7 +56,13 @@ export const isTextAttachment = (attachment: { name: string; mime: string; size:
 
 export const isMarkdownPath = (path: string): boolean => ["md", "markdown"].includes(extensionOfPath(path));
 
-export const looksLikeFilePath =(text: string): boolean => {
+export const isHtmlPath = (path: string): boolean => ["html", "htm"].includes(extensionOfPath(path));
+
+export type CodeViewId = "markdown" | "html" | "source";
+
+export const codeViewOfPath = (path: string): CodeViewId => (isMarkdownPath(path) ? "markdown" : isHtmlPath(path) ? "html" : "source");
+
+export const looksLikeFilePath = (text: string): boolean => {
   const match = PATH_PATTERN.exec(text.trim());
   return Boolean(match) && match![1].toLowerCase() in LANGUAGE_BY_EXTENSION;
 };
@@ -69,3 +75,5 @@ export const toolFilePathOf = (input: unknown): string | undefined => {
   const key = TOOL_PATH_KEYS.find((candidate) => typeof record[candidate] === "string" && looksLikeFilePath(record[candidate] as string));
   return key ? (record[key] as string) : undefined;
 };
+
+export const HTML_SANDBOX_FLAGS = ["allow-scripts", "allow-popups", "allow-forms", "allow-modals"] as const;

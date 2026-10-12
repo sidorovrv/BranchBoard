@@ -6,14 +6,18 @@ import { Canvas } from "./components/Canvas";
 import { ImagePreviewLayer } from "./components/ImagePreview";
 import { ModifierHints } from "./components/ModifierHints";
 import { RunsOverlay } from "./components/RunsOverlay";
+import { CommentMenu } from "./components/Comments";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { ContextPanel } from "./components/ContextPanel";
+import { ShortcutsDialog } from "./components/HelpMenu";
+import { TourOverlay } from "./components/TourOverlay";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
 import { ReaderPanel } from "./components/ReaderPanel";
 import { startPerfMonitor } from "./perfMonitor";
 import { resolveTheme, useSettings } from "./settings";
 import { useBoard } from "./store";
+import { startTour } from "./tour";
 
 const TOAST_MS = 4000;
 
@@ -69,8 +73,10 @@ export const App = () => {
     return () => query.removeEventListener("change", apply);
   }, [theme]);
   const isReaderOpen = useBoard((state) => state.isReaderOpen);
+  const isShortcutsOpen = useBoard((state) => state.isShortcutsOpen);
+  const isTourOpen = useBoard((state) => state.isTourOpen);
   return (
-    <div className="app">
+    <div className={`app${isTourOpen ? " is-touring" : ""}`}>
       <BoardBar />
       <div className="workspace">
         {isSidebarOpen && navigation !== "tabs" && <Sidebar />}
@@ -81,6 +87,7 @@ export const App = () => {
                 <Canvas key={board.id} />
               </ReactFlowProvider>
               <SelectionMenu />
+              <CommentMenu />
               <ModifierHints />
               <RunsOverlay />
             </main>
@@ -88,10 +95,15 @@ export const App = () => {
             {isContextPanelOpen && <ContextPanel />}
           </>
         ) : (
-          <div className="empty-state">Connect a project and create a board to start.</div>
+          <div className="empty-state">
+            <p>Connect a project and create a board to start.</p>
+            <button className="primary" onClick={startTour}>Take the tour</button>
+          </div>
         )}
       </div>
       {board && <Toolbar />}
+      {isShortcutsOpen && <ShortcutsDialog />}
+      {isTourOpen && <TourOverlay />}
       <Toast />
       <ImagePreviewLayer />
     </div>

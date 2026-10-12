@@ -1,19 +1,14 @@
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { copyFileSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { SCHEMA_STEPS, stepsAbove, type SchemaStep } from "@branchboard/core";
 
 export type Table = "boards" | "nodes" | "edges" | "parts" | "requests" | "projects";
 
 const TABLES: Table[] = ["boards", "nodes", "edges", "parts", "requests", "projects"];
 
-const FIRST_TABLES: Table[] = ["boards", "nodes", "edges", "parts", "requests"];
-
-const MIGRATIONS: string[][] = [
-  FIRST_TABLES.map((table) => `CREATE TABLE ${table} (id TEXT PRIMARY KEY, board_id TEXT NOT NULL, data TEXT NOT NULL)`).concat(
-    FIRST_TABLES.map((table) => `CREATE INDEX ${table}_board ON ${table}(board_id)`),
-  ),
-  ["CREATE TABLE projects (id TEXT PRIMARY KEY, board_id TEXT NOT NULL, data TEXT NOT NULL)"],
-];
+const KEPT_BACKUPS = 2;
+const BACKUP_SUFFIX = ".before-v";
 
 export interface Row {
   id: string;
@@ -42,23 +37,51 @@ const inTransaction = <T>(db: DatabaseSync, work: () => T): T => {
   }
 };
 
-const migrate = (db: DatabaseSync) => {
+const REWRITTEN_TABLES = ["nodes", "parts", "edges"] as const;
+
+const rewriteRows = (db: DatabaseSync, rewrite: NonNullable<SchemaStep["rewrite"]>) =>
+  REWRITTEN_TABLES.forEach((table) => {
+    const rewriteRow = rewrite[table] as ((row: unknown) => unknown) | undefined;
+    if (!rewriteRow) return;
+    const update = db.prepare(`UPDATE ${table} SET data = ? WHERE id = ?`);
+    (db.prepare(`SELECT id, data FROM ${table}`).all() as { id: string; data: string }[]).forEach((row) =>
+      update.run(JSON.stringify(rewriteRow(JSON.parse(row.data))), row.id),
+    );
+  });
+
+const backupBeforeMigrating = (db: DatabaseSync, path: string, targetVersion: number) => {
+  db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  copyFileSync(path, `${path}${BACKUP_SUFFIX}${targetVersion}`);
+  const stem = basename(path) + BACKUP_SUFFIX;
+  const versionOf = (name: string) => Number(name.slice(stem.length));
+  readdirSync(dirname(path))
+    .filter((name) => name.startsWith(stem) && Number.isInteger(versionOf(name)))
+    .sort((a, b) => versionOf(b) - versionOf(a))
+    .slice(KEPT_BACKUPS)
+    .forEach((name) => rmSync(join(dirname(path), name), { force: true }));
+};
+
+const migrate = (db: DatabaseSync, path: string, steps: SchemaStep[]) => {
   const current = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-  MIGRATIONS.slice(current).forEach((statements, offset) => {
-    inTransaction(db, () => {
-      statements.forEach((statement) => db.exec(statement));
-      db.exec(`PRAGMA user_version = ${current + offset + 1}`);
+  const pending = stepsAbove(current, steps);
+  if (!pending.length) return;
+  if (current > 0 && path !== ":memory:") backupBeforeMigrating(db, path, pending[0].to);
+  inTransaction(db, () => {
+    pending.forEach((step) => {
+      step.ddl?.forEach((statement) => db.exec(statement));
+      if (step.rewrite) rewriteRows(db, step.rewrite);
     });
+    db.exec(`PRAGMA user_version = ${pending[pending.length - 1].to}`);
   });
 };
 
 const parseRows = <T>(rows: unknown[]): T[] => (rows as { data: string }[]).map((row) => JSON.parse(row.data) as T);
 
-export const openRepository = (path: string): Repository => {
+export const openRepository = (path: string, steps: SchemaStep[] = SCHEMA_STEPS): Repository => {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL");
-  migrate(db);
+  migrate(db, path, steps);
   const upsertStatements = Object.fromEntries(
     TABLES.map((table) => [table, db.prepare(`INSERT INTO ${table}(id, board_id, data) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`)]),
   );

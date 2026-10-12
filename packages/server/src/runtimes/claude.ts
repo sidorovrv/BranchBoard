@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newId, decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, type Catalog, type CatalogCommand, type RunEvent } from "@branchboard/core";
+import { newId, decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type Catalog, type CatalogCommand, type RunEvent } from "@branchboard/core";
 import { listWorkspaceCommands, withBundledCommands } from "./claudeCommands";
+import { CLAUDE_ALIAS_MODELS, KNOWN_CLAUDE_MODELS, TITLE_MODEL } from "./claudeModels";
 import { createLimitsStore, type LimitsStore } from "../limits";
 import { log } from "../log";
-import { createChannel } from "../run/channel";
 import { createLimiter, type Limiter } from "../run/limiter";
-import type { RunScope, RuntimeDiagnostics, RuntimeSteps } from "../run/types";
+import { RecoverableError, type RunScope, type RuntimeDiagnostics, type RuntimeSteps } from "../run/types";
 import { createApprovalBroker, type ApprovalBroker, type ApprovalCall, type ApprovalHandler, type ApprovalVerdict } from "./claudeApprovals";
 import { locateClaude, CLAUDE_PATH_VARIABLE } from "./claudeLocator";
 import {
@@ -26,27 +26,17 @@ import {
   translateClaudeMessage,
   type StreamState,
 } from "./claudeStream";
-import { approvalOpened, questionOpened, streamEventMap, subagentEventMap, type LooseNative } from "./commonEvents";
+import { approvalOpened, doneEvents, questionOpened, streamEventMap, subagentEventMap, usageEvents, type LooseNative } from "./commonEvents";
 import type { Location } from "./executableLocator";
-import { launchProcess, readOutput, type LaunchProcess, type ProcessExit, type RunningProcess } from "./spawnProcess";
+import { launchProcess, readOutput, type LaunchProcess, type ProcessExit } from "./spawnProcess";
+import { createStreamRuntime } from "./streamRuntime";
 
 export const MAX_CONCURRENT_PROCESSES = 2;
 export const TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
-const PRIVATE_DIRECTORY_MODE = 0o700;
-const PRIVATE_FILE_MODE = 0o600;
-
 const SESSION_GONE_PATTERN = /no conversation found/i;
 const ALLOWED_ANSWERS = ["once", "always"];
-const MODELS = [
-  { id: DEFAULT_CHOICE, name: "CLI default" },
-  { id: "sonnet", name: "Sonnet (latest)" },
-  { id: "opus", name: "Opus (latest)" },
-  { id: "haiku", name: "Haiku (latest)" },
-  { id: "claude-opus-5-5", name: "Opus 5.5" },
-  { id: "claude-sonnet-5-5", name: "Sonnet 5.5" },
-  { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5" },
-];
+const MODELS = [{ id: DEFAULT_CHOICE, name: "CLI default" }, ...CLAUDE_ALIAS_MODELS, ...KNOWN_CLAUDE_MODELS];
 const EFFORTS = [DEFAULT_CHOICE, "low", "medium", "high", "xhigh", "max"];
 const DEFAULT_PERMISSION_MODE = "acceptEdits";
 const PERMISSION_MODES = [
@@ -57,7 +47,6 @@ const PERMISSION_MODES = [
   { id: "dontAsk", name: "Don't ask" },
 ];
 
-export const TITLE_MODEL = "haiku";
 const TITLE_SYSTEM_PROMPT = "You write very short titles. Reply with the title only.";
 const SUMMARY_SYSTEM_PROMPT = "You write faithful, compact summaries of conversations. Keep every decision, fact, name and open question. Reply with the summary only.";
 const ONE_SHOT_SYSTEM_PROMPTS = { title: TITLE_SYSTEM_PROMPT, summary: SUMMARY_SYSTEM_PROMPT };
@@ -88,6 +77,8 @@ export interface ClaudeDependencies {
   probeAuth: (executable: string, workspacePath: string) => Promise<string>;
   environment: () => NodeJS.ProcessEnv;
   suggestsTitles: boolean;
+  extraModels: () => { id: string; name: string }[];
+  noteModelSeen: (modelId: string) => void;
 }
 
 const listWorkspaceAgents = (workspacePath: string): string[] => {
@@ -138,27 +129,24 @@ const createApprovalHandler = (scope: RunScope, push: (native: LooseNative) => v
 };
 
 const describeExit = (exit: ProcessExit): string => {
-  if (SESSION_GONE_PATTERN.test(exit.stderrTail)) return "Claude no longer has the saved session of the parent node. Use assemble to resend the context as text.";
+  if (SESSION_GONE_PATTERN.test(exit.stderrTail)) return SESSION_GONE_MESSAGE;
   const detail = exit.stderrTail ? `: ${exit.stderrTail}` : "";
   return `The claude command exited with code ${exit.code} before finishing${detail}`;
 };
 
-const pumpOutput = async (running: RunningProcess, state: StreamState, push: (native: LooseNative) => void, signal: AbortSignal) => {
-  for await (const line of running.lines) {
-    const message = parseStreamLine(line);
-    if (message === undefined) log.debug("claude", `Ignored non-JSON output line: ${line.slice(0, 200)}`);
-    else translateClaudeMessage(message, state).forEach(push);
-  }
-  const exit = await running.exit;
-  if (!state.isFinished && !signal.aborted) push({ type: "failure", message: describeExit(exit) });
-};
+const exitFailure = (exit: ProcessExit): LooseNative => ({ type: "failure", message: describeExit(exit), recovery: SESSION_GONE_PATTERN.test(exit.stderrTail) ? "assemble" : "report" });
 
-const writeRunFile = (directory: string, fileName: string, content: string): string => {
-  mkdirSync(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
-  chmodSync(directory, PRIVATE_DIRECTORY_MODE);
-  const path = join(directory, fileName);
-  writeFileSync(path, content, { mode: PRIVATE_FILE_MODE });
-  return path;
+type ClaudeRunState = StreamState & { reportedModel?: string };
+
+const translateLine = (noteModelSeen: (modelId: string) => void) => (line: string, state: ClaudeRunState): LooseNative[] => {
+  const message = parseStreamLine(line);
+  if (message === undefined) {
+    log.debug("claude", `Ignored non-JSON output line: ${line.slice(0, 200)}`);
+    return [];
+  }
+  const natives = translateClaudeMessage(message, state);
+  if (state.model && state.model !== state.reportedModel) noteModelSeen((state.reportedModel = state.model));
+  return natives;
 };
 
 export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverUrl"> & Partial<ClaudeDependencies>): RuntimeSteps<LooseNative, ClaudeHandle> => {
@@ -176,13 +164,17 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     probeAuth: (executable, workspacePath) => readOutput(executable, ["auth", "status"], { cwd: workspacePath, env: process.env }),
     environment: () => ({ ...process.env, MCP_TOOL_TIMEOUT: String(TOOL_TIMEOUT_MS), CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: String(TOOL_TIMEOUT_MS) }),
     suggestsTitles: true,
+    extraModels: () => [],
+    noteModelSeen: () => undefined,
     ...overrides,
   };
   const alwaysAllowed = new Set<string>();
 
   const catalog = async (workspacePath: string): Promise<Catalog> => {
     const agents = [DEFAULT_CHOICE, ...dependencies.listAgents(workspacePath)];
-    const models = MODELS.map((model) => ({ ...model, provider: "claude", efforts: EFFORTS }));
+    const known = new Set(MODELS.map((model) => model.id));
+    const additions = dependencies.extraModels().filter((model) => !known.has(model.id) && known.add(model.id));
+    const models = [...MODELS, ...additions].map((model) => ({ ...model, provider: "claude", efforts: EFFORTS }));
     const located = dependencies.locate();
     if (!located.path) return { agents: [], models: [], health: { ok: false, detail: `The claude command was not found. Install it, sign in once by running claude yourself, or set ${CLAUDE_PATH_VARIABLE} to its full path.` } };
     try {
@@ -205,75 +197,38 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
 
   const openSession = async (plan: { spine?: { runtimeRef: { sessionId: string } } }, scope: RunScope): Promise<ClaudeHandle> => {
     const located = dependencies.locate();
-    if (!located.path) throw new Error(`The claude command was not found. Install it or set ${CLAUDE_PATH_VARIABLE} to its full path.`);
+    if (!located.path) throw new RecoverableError(`The claude command was not found. Install it or set ${CLAUDE_PATH_VARIABLE} to its full path.`, "setup");
     const forwardSubagentText = await supportsForwardedSubagentText(located.path, scope.workspacePath);
     return { executable: located.path, sessionId: randomUUID(), resumeFrom: plan.spine?.runtimeRef.sessionId, forwardSubagentText };
   };
 
-  async function* execute(handle: ClaudeHandle, input: string, scope: RunScope): AsyncGenerator<LooseNative> {
-    if (dependencies.limiter.isFull()) scope.setWaitingForSlot?.(true);
-    const release = await dependencies.limiter.acquire(scope.signal);
-    scope.setWaitingForSlot?.(false);
-    if (!release) return;
-    const channel = createChannel<LooseNative>();
-    const registration = dependencies.approvals.register(createApprovalHandler(scope, channel.push, alwaysAllowed));
-    const runFiles: string[] = [];
-    let running: RunningProcess | undefined;
-    const stop = () => running?.kill();
-    scope.signal.addEventListener("abort", stop, { once: true });
-    try {
-      if (scope.signal.aborted) return;
-      const configPath = writeRunFile(dependencies.temporaryDirectory, `${handle.sessionId}.mcp.json`, JSON.stringify(buildMcpConfig(`${dependencies.serverUrl}/mcp/${registration.secret}`)));
-      runFiles.push(configPath);
-      const systemNotePath = scope.systemNote ? writeRunFile(dependencies.temporaryDirectory, `${handle.sessionId}.system.md`, scope.systemNote) : undefined;
-      if (systemNotePath) runFiles.push(systemNotePath);
+  const execute = createStreamRuntime<ClaudeHandle, ClaudeRunState, { secret: string }>({
+    limiter: dependencies.limiter,
+    limits: dependencies.limits,
+    temporaryDirectory: dependencies.temporaryDirectory,
+    begin: (scope, push) => dependencies.approvals.register(createApprovalHandler(scope, push, alwaysAllowed)),
+    createState: createStreamState,
+    translate: translateLine(dependencies.noteModelSeen),
+    open: (handle, input, scope, { session, writeRunFile }) => {
+      const configPath = writeRunFile("mcp.json", JSON.stringify(buildMcpConfig(`${dependencies.serverUrl}/mcp/${session.secret}`)));
+      const systemNotePath = scope.systemNote ? writeRunFile("system.md", scope.systemNote) : undefined;
       const args = buildClaudeArguments({ ...handle, model: scope.model, agent: scope.agent, effort: scope.effort, permissionMode: isChosen(scope.permissionMode) ? scope.permissionMode : DEFAULT_PERMISSION_MODE, mcpConfigPath: configPath, systemNotePath, addDirectories: attachmentDirectories(scope.files), forwardSubagentText: handle.forwardSubagentText });
       log.info("claude", `Launching ${handle.executable} for node ${scope.nodeId} (${handle.resumeFrom ? `forking ${handle.resumeFrom}` : "new session"} as ${handle.sessionId})`);
       scope.setRuntimeRef({ sessionId: handle.sessionId });
-      running = dependencies.launch(handle.executable, args, { cwd: scope.workspacePath, env: dependencies.environment() });
+      const running = dependencies.launch(handle.executable, args, { cwd: scope.workspacePath, env: dependencies.environment() });
       running.writeInput(buildUserMessage(input, scope.files, dependencies.readBase64));
       running.endInput();
-      const state = createStreamState();
-      void pumpOutput(running, state, channel.push, scope.signal)
-        .catch((error) => channel.push({ type: "failure", message: error instanceof Error ? error.message : String(error) }))
-        .finally(channel.close);
-      for await (const native of channel.iterator) {
-        if (native.type === "session") scope.setRuntimeRef({ sessionId: native.sessionId });
-        else if (native.type === "limits") dependencies.limits.record(native.info, { boardId: scope.boardId, nodeId: scope.nodeId });
-        else if (native.type === "failure") throw new Error(native.message);
-        else yield native;
-        if (native.type === "done") return;
-      }
-    } finally {
-      scope.signal.removeEventListener("abort", stop);
-      stop();
-      registration.dispose();
-      runFiles.forEach((path) => rmSync(path, { force: true }));
-      release();
-    }
-  }
+      return { lines: running.lines, kill: () => running.kill(), endFailure: async () => exitFailure(await running.exit) };
+    },
+  });
 
   const eventMap: RuntimeSteps<LooseNative, ClaudeHandle>["eventMap"] = {
     ...streamEventMap,
     ...subagentEventMap(() => eventMap),
-    usage: (native) => [
-      {
-        type: "usage",
-        usage: {
-          inputTokens: native.inputTokens,
-          outputTokens: native.outputTokens,
-          contextTokens: native.contextTokens,
-          contextWindow: native.contextWindow,
-          cacheReadTokens: native.cacheReadTokens,
-          cacheCreationTokens: native.cacheCreationTokens,
-          firstCallCacheReadTokens: native.firstCallCacheReadTokens,
-          firstCallCacheCreationTokens: native.firstCallCacheCreationTokens,
-        },
-      },
-    ],
+    usage: usageEvents,
+    done: doneEvents,
     permission: (native) => approvalOpened({ id: native.requestId, title: native.title, detail: native.detail }),
     question: (native) => questionOpened({ id: native.requestId, questions: native.questions }),
-    done: (): RunEvent[] => [{ type: "done" }],
   };
 
   const runTitleProcess = async (executable: string, flags: string[], input: string, signal: AbortSignal, purpose: "title" | "summary"): Promise<{ text: string; exit: ProcessExit }> => {
@@ -330,5 +285,5 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     return { executable: located.path, processSlots, supportsSubagentText: supportsSubagentTextFlag, ...auth };
   };
 
-  return { id: "claude", canSuggestTitles: dependencies.suggestsTitles, generateTitle, diagnostics, catalog, openSession, execute, eventMap, answerRequest: async () => undefined };
+  return { id: "claude", editsFiles: true, canSuggestTitles: dependencies.suggestsTitles, generateTitle, diagnostics, catalog, openSession, execute, eventMap, answerRequest: async () => undefined };
 };

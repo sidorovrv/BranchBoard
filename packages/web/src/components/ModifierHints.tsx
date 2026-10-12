@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BINDABLE_ACTIONS, keyOfBinding, modifiersOfBinding, type Keybinds } from "@branchboard/core";
+import { BINDABLE_ACTIONS, FIXED_SHORTCUTS, keyOfBinding, modifiersOfBinding, type Keybinds } from "@branchboard/core";
 import { displayModifier, isMacPlatform } from "../platform";
 import { useSettings } from "../settings";
 
@@ -12,21 +12,8 @@ type GroupName = "Shift" | "Ctrl" | "Alt";
 
 const GROUP_ORDER: GroupName[] = ["Ctrl", "Alt", "Shift"];
 
-const SHIFT_HINTS: Hint[] = [
-  { keys: "Click", text: "add to selection" },
-  { keys: "Drag", text: "box-select nodes" },
-  { keys: "Enter", text: "new line in a prompt" },
-];
+const fixedHints = (group: GroupName): Hint[] => FIXED_SHORTCUTS.filter((row) => row.modifier === group).map(({ keys, text }) => ({ keys, text }));
 
-const CONTROL_HINTS: Hint[] = [
-  { keys: "Click", text: "add to selection" },
-  { keys: "A", text: "select all nodes" },
-  { keys: "C / V", text: "copy / paste nodes" },
-];
-
-const ALT_HINTS: Hint[] = [{ keys: "Drag", text: "align and snap to other nodes" }];
-
-const STATIC_HINTS: Record<GroupName, Hint[]> = { Shift: SHIFT_HINTS, Ctrl: CONTROL_HINTS, Alt: ALT_HINTS };
 
 const boundHints = (keybinds: Keybinds, group: GroupName, held: GroupName[]): Hint[] =>
   BINDABLE_ACTIONS.flatMap((action) =>
@@ -62,7 +49,7 @@ export const ModifierHints = () => {
   if (heldGroups.length === 0) return null;
   return (
     <div className="modifier-hints" role="note">
-      {heldGroups.map((group) => <HintGroup key={group} title={group} hints={[...STATIC_HINTS[group], ...boundHints(keybinds, group, heldGroups)]} />)}
+      {heldGroups.map((group) => <HintGroup key={group} title={group} hints={[...fixedHints(group), ...boundHints(keybinds, group, heldGroups)]} />)}
     </div>
   );
 };

@@ -14,3 +14,5 @@ export const resolveRelativePath = (fromFilePath: string, reference: string): st
   }
   return segments.join("/");
 };
+
+export const escapesFolder = (relativePath: string): boolean => /^\.\.(?:[\\/]|$)|^[a-zA-Z]:[\\/]|^[\\/]/.test(relativePath);

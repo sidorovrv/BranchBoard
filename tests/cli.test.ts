@@ -9,7 +9,7 @@ import { browserLaunchOf } from "../packages/cli/src/browser";
 
 describe("command line arguments", () => {
   it("runs with defaults and opens the browser", () => {
-    expect(parseArguments([])).toEqual({ kind: "run", shouldOpenBrowser: true });
+    expect(parseArguments([])).toEqual({ kind: "run", shouldOpenBrowser: true, shouldAutoUpdate: true });
   });
 
   it("reads each option", () => {
@@ -18,7 +18,9 @@ describe("command line arguments", () => {
       port: 5000,
       dataDirectory: "D:\\boards",
       shouldOpenBrowser: false,
+      shouldAutoUpdate: true,
     });
+    expect(parseArguments(["--no-auto-update"])).toEqual({ kind: "run", shouldOpenBrowser: true, shouldAutoUpdate: false });
     expect(parseArguments(["--enable-claude"]).kind).toBe("error");
   });
 

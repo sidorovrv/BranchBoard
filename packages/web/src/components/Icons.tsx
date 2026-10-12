@@ -38,6 +38,7 @@ import darkMode from "@material-symbols/svg-400/rounded/dark_mode.svg";
 import deleteForever from "@material-symbols/svg-400/rounded/delete_forever.svg";
 import keep from "@material-symbols/svg-400/rounded/keep.svg";
 import keepOff from "@material-symbols/svg-400/rounded/keep_off.svg";
+import helpIcon from "@material-symbols/svg-400/rounded/help.svg";
 import menuBook from "@material-symbols/svg-400/rounded/menu_book.svg";
 import monitorHeart from "@material-symbols/svg-400/rounded/monitor_heart.svg";
 import pending from "@material-symbols/svg-400/rounded/pending.svg";
@@ -51,12 +52,15 @@ import download from "@material-symbols/svg-400/rounded/download.svg";
 import upload from "@material-symbols/svg-400/rounded/upload.svg";
 import dragIndicator from "@material-symbols/svg-400/rounded/drag_indicator.svg";
 import zoomIn from "@material-symbols/svg-400/rounded/zoom_in.svg";
+import commentIcon from "@material-symbols/svg-400/rounded/comment.svg";
 import contentCopy from "@material-symbols/svg-400/rounded/content_copy.svg";
 import check from "@material-symbols/svg-400/rounded/check.svg";
 import tune from "@material-symbols/svg-400/rounded/tune.svg";
 import psychology from "@material-symbols/svg-400/rounded/psychology.svg";
 import palette from "@material-symbols/svg-400/rounded/palette.svg";
 import keyboard from "@material-symbols/svg-400/rounded/keyboard.svg";
+import systemUpdate from "@material-symbols/svg-400/rounded/update.svg";
+import vpnKey from "@material-symbols/svg-400/rounded/vpn_key.svg";
 import fileOpen from "@material-symbols/svg-400/rounded/file_open.svg";
 import folderOpen from "@material-symbols/svg-400/rounded/folder_open.svg";
 import type { CSSProperties } from "react";
@@ -103,6 +107,7 @@ const ICON_URLS = {
   purge: deleteForever,
   reader: menuBook,
   health: monitorHeart,
+  help: helpIcon,
   budget: toll,
   todoDone: checkBox,
   todoOpen: checkBoxOutlineBlank,
@@ -116,11 +121,14 @@ const ICON_URLS = {
   zoom: zoomIn,
   theme: darkMode,
   copy: contentCopy,
+  comment: commentIcon,
   check,
   tune,
   psychology,
   palette,
   keyboard,
+  update: systemUpdate,
+  key: vpnKey,
   extract: fileOpen,
   reveal: folderOpen,
 };

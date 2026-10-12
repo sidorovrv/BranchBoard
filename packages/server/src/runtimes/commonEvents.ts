@@ -20,6 +20,24 @@ export const streamEventMap: EventMap<LooseNative> = {
   "tool-done": (native) => [{ type: "tool.done", partKey: native.partId, output: native.output, isError: native.isError }],
 };
 
+export const usageEvents = (native: LooseNative): RunEvent[] => [
+  {
+    type: "usage",
+    usage: {
+      inputTokens: native.inputTokens,
+      outputTokens: native.outputTokens,
+      contextTokens: native.contextTokens,
+      contextWindow: native.contextWindow,
+      cacheReadTokens: native.cacheReadTokens,
+      cacheCreationTokens: native.cacheCreationTokens,
+      firstCallCacheReadTokens: native.firstCallCacheReadTokens,
+      firstCallCacheCreationTokens: native.firstCallCacheCreationTokens,
+    },
+  },
+];
+
+export const doneEvents = (): RunEvent[] => [{ type: "done" }];
+
 type RequestFields = Omit<PendingRequest, "boardId" | "nodeId" | "status" | "createdAt">;
 
 export const requestOpened = (request: RequestFields): RunEvent[] => [{ type: "request.opened", request }];

@@ -1,14 +1,16 @@
 import { useEffect, useState } from "react";
-import { formatAgo } from "@branchboard/core";
+import { formatAgo, isApiRuntime } from "@branchboard/core";
 import { actionById, titleWithShortcut } from "../actions";
 import { fetchCatalog } from "../api";
 import { useSettings } from "../settings";
 import { sendBoardCommand, useBoard } from "../store";
 import { BoardTabs } from "./BoardTabs";
-import { HealthDialog } from "./HealthDialog";
+import { HelpButton } from "./HelpMenu";
 import { IconRow } from "./Icons";
 import { CostMeter, LimitsMeter } from "./LimitsMeter";
 import { SettingsDialog } from "./SettingsDialog";
+import { TrashDialog } from "./TrashDialog";
+import { UpdateBanner } from "./UpdateBanner";
 
 const SAVED_REFRESH_MS = 15000;
 
@@ -66,14 +68,16 @@ const useRuntimeHealth = (boardId: string | undefined) => {
 export const BoardBar = () => {
   const board = useBoard((state) => state.board);
   const project = useBoard((state) => state.projects.find((candidate) => candidate.id === state.board?.projectId));
-  useRuntimeHealth(board?.id);
+  const isTourOpen = useBoard((state) => state.isTourOpen);
+  useRuntimeHealth(isTourOpen ? undefined : board?.id);
   const showMeters = useSettings((state) => state.settings.showTopbarMeters);
   const isSidebarOpen = useSettings((state) => state.settings.isSidebarOpen);
   const isContextPanelOpen = useSettings((state) => state.settings.isContextPanelOpen);
   const keybinds = useSettings((state) => state.settings.keybinds);
   const updateSetting = useSettings((state) => state.update);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isHealthOpen, setIsHealthOpen] = useState(false);
+  const isSettingsOpen = useBoard((state) => state.isSettingsOpen);
+  const setSettingsOpen = useBoard((state) => state.setSettingsOpen);
+  const [isTrashOpen, setIsTrashOpen] = useState(false);
   const isReaderOpen = useBoard((state) => state.isReaderOpen);
 
   const navigation = useSettings((state) => state.settings.boardNavigation);
@@ -102,11 +106,12 @@ export const BoardBar = () => {
       )}
       {!board && !hasTabs && <strong className="brand">Branchboard</strong>}
       <span className="spacer" />
+      <UpdateBanner />
       {board && (
         <>
-          {showMeters && (
+          {showMeters && !isApiRuntime(board.mode) && (
             <>
-              {board.mode === "opencode" ? <CostMeter /> : <LimitsMeter />}
+              {board.mode === "opencode" || board.mode === "opencode2" ? <CostMeter /> : <LimitsMeter />}
               <span className="bar-divider" />
             </>
           )}
@@ -119,9 +124,10 @@ export const BoardBar = () => {
           ))}
         </>
       )}
+      <button onClick={() => setIsTrashOpen(true)} title="Trash: restore deleted nodes, boards and projects" aria-label="Trash"><IconRow names={["trash"]} /></button>
       <span className="bar-divider" />
-      <button onClick={() => setIsHealthOpen(true)} title="Runtime health and logs" aria-label="Runtime health and logs"><IconRow names={["health"]} /></button>
-      <button onClick={() => setIsSettingsOpen(true)} title="Settings" aria-label="Settings"><IconRow names={["settings"]} /></button>
+      <HelpButton />
+      <button onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Settings"><IconRow names={["settings"]} /></button>
       <button
         onClick={() => useBoard.getState().setReaderOpen(!isReaderOpen)}
         title={titleWithShortcut("reader", keybinds)}
@@ -138,8 +144,8 @@ export const BoardBar = () => {
       >
         <IconRow names={[isContextPanelOpen ? "contextPanelClose" : "contextPanelOpen"]} />
       </button>
-      {isSettingsOpen && <SettingsDialog onClose={() => setIsSettingsOpen(false)} />}
-      {isHealthOpen && <HealthDialog onClose={() => setIsHealthOpen(false)} />}
+      {isSettingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+      {isTrashOpen && <TrashDialog onClose={() => setIsTrashOpen(false)} />}
     </header>
   );
 };

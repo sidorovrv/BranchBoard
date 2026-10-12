@@ -1,10 +1,12 @@
 import { contextHash, isStale } from "./context";
 import { liveEdges, liveNodes } from "./graph";
 import { indexBy, newId } from "./helpers";
-import type { Board, BoardDocument, BoardGraph, GraphEdge, GraphNode, Id, Part } from "./types";
-import { hasCycle, MAX_UNTRUSTED_EDGES, MAX_UNTRUSTED_NODES, MAX_UNTRUSTED_PARTS, sanitiseEdge, sanitiseList, sanitiseNode, sanitisePart } from "./untrusted";
+import { LATEST_SCHEMA_VERSION, migrateDocumentWith } from "./migrations";
+import type { Attachment, Board, BoardDocument, BoardGraph, DocumentFile, GraphEdge, GraphNode, Id, Part } from "./types";
+import { hasCycle, MAX_EXPORT_FILE_BYTES, MAX_UNTRUSTED_EDGES, MAX_UNTRUSTED_NODES, MAX_UNTRUSTED_PARTS, megabytesLabel, sanitiseEdge, sanitiseFiles, sanitiseList, sanitiseNode, sanitisePart } from "./untrusted";
 
-const DOCUMENT_VERSION = 1;
+const DOCUMENT_VERSION = LATEST_SCHEMA_VERSION;
+export const COMMAND_TYPE_HEADER = "x-command-type";
 const DOCUMENT_FORMAT = "branchboard";
 const LEGACY_DOCUMENT_FORMAT = "wanderboard";
 
@@ -25,6 +27,41 @@ export const collectBoard = ({ board, graph, parts }: BoardSnapshot): BoardDocum
     parts: nodes.flatMap((node) => parts[node.id] ?? []),
     staleNodeIds: nodes.filter((node) => isStale(graph, node)).map((node) => node.id),
   };
+};
+
+export interface FileSource {
+  sizeOf: (attachmentId: Id) => number | undefined;
+  read: (attachmentId: Id) => DocumentFile;
+}
+
+export const attachmentIdsOf = (nodes: GraphNode[]): Id[] => [
+  ...new Set(nodes.flatMap((node) => [...(node.attachments ?? []).map((attachment) => attachment.id), ...(node.sourceAttachmentId ? [node.sourceAttachmentId] : [])])),
+];
+
+export const embedFiles = (document: BoardDocument, source: FileSource, capBytes = MAX_EXPORT_FILE_BYTES): BoardDocument => {
+  const sizes = attachmentIdsOf(document.nodes).flatMap((id): [Id, number][] => {
+    const size = source.sizeOf(id);
+    return size === undefined ? [] : [[id, size]];
+  });
+  const total = sizes.reduce((sum, [, size]) => sum + size, 0);
+  if (total > capBytes) throw new Error(`The attached files add up to ${megabytesLabel(total)} and exports are limited to ${megabytesLabel(capBytes)}. Export without files, or remove large attachments.`);
+  return sizes.length === 0 ? document : { ...document, files: Object.fromEntries(sizes.map(([id]) => [id, source.read(id)])) };
+};
+
+export type RestoreFile = (file: DocumentFile) => Attachment | undefined;
+
+export const restoreFiles = (document: BoardDocument, restore: RestoreFile): BoardDocument => {
+  const files = document.files ?? {};
+  const restored = new Map<Id, Attachment | undefined>();
+  const restoredBy = (id: Id): Attachment | undefined => {
+    if (!restored.has(id)) restored.set(id, files[id] ? restore(files[id]) : undefined);
+    return restored.get(id);
+  };
+  const nodes = document.nodes.map((node) => {
+    const attachments = (node.attachments ?? []).flatMap((attachment) => restoredBy(attachment.id) ?? []);
+    return { ...node, attachments: attachments.length > 0 ? attachments : undefined, sourceAttachmentId: node.sourceAttachmentId ? restoredBy(node.sourceAttachmentId)?.id : undefined };
+  });
+  return { ...document, nodes, files: undefined };
 };
 
 export const encoders: Record<string, (document: BoardDocument) => string> = {
@@ -53,17 +90,7 @@ export const validateDocument = (value: unknown): BoardDocument => {
   return { ...value, format: DOCUMENT_FORMAT };
 };
 
-const migrations: Record<number, (document: BoardDocument) => BoardDocument> = {};
-
-export const migrateDocument = (document: BoardDocument): BoardDocument => {
-  let current = document;
-  while (current.version < DOCUMENT_VERSION) {
-    const step = migrations[current.version];
-    if (!step) throw new Error(`No migration from version ${current.version}`);
-    current = { ...step(current), version: current.version + 1 };
-  }
-  return current;
-};
+export const migrateDocument = (document: BoardDocument): BoardDocument => migrateDocumentWith(document);
 
 const STALE_MARKER = "imported-stale";
 const MAX_TITLE_CHARS = 200;
@@ -86,7 +113,7 @@ export const sanitiseDocument = (document: BoardDocument): BoardDocument => {
   const parts = sanitiseList(document.parts, sanitisePart, MAX_UNTRUSTED_PARTS, "parts").filter((part) => nodeIds.has(part.nodeId));
   const staleNodeIds = (Array.isArray(document.staleNodeIds) ? document.staleNodeIds : []).filter((id): id is Id => typeof id === "string");
   const title = typeof document.board?.title === "string" ? document.board.title.slice(0, MAX_TITLE_CHARS) : "";
-  return { ...document, board: { ...document.board, title }, nodes, edges, parts, staleNodeIds };
+  return { ...document, board: { ...document.board, title }, nodes, edges, parts, staleNodeIds, files: sanitiseFiles(document.files) };
 };
 
 export const reidentifyDocument = (document: BoardDocument, title?: string): ImportedBoard => {
@@ -98,7 +125,6 @@ export const reidentifyDocument = (document: BoardDocument, title?: string): Imp
     id: remap(node.id),
     boardId,
     runtimeRef: undefined,
-    attachments: undefined,
     satelliteOf: node.satelliteOf === undefined ? undefined : nodeIds.get(node.satelliteOf),
     contextNodeIds: node.contextNodeIds?.map(remap),
     contextHash: node.contextHash === undefined ? undefined : STALE_MARKER,
@@ -108,13 +134,19 @@ export const reidentifyDocument = (document: BoardDocument, title?: string): Imp
   const parts: Part[] = document.parts.map((part) => ({ ...part, id: part.id.replace(part.nodeId, remap(part.nodeId)), nodeId: remap(part.nodeId) }));
   const graph: BoardGraph = { nodes: indexBy(nodes, (node) => node.id), edges: indexBy(edges, (edge) => edge.id) };
   const staleIds = new Set(document.staleNodeIds.map(remap));
-  const settled = nodes.map((node) =>
-    node.contextHash === STALE_MARKER && !staleIds.has(node.id) ? { ...node, contextHash: contextHash(graph, node.id) } : node,
-  );
+  const sourceGraph: BoardGraph = { nodes: indexBy(document.nodes, (node) => node.id), edges: Object.fromEntries(document.edges.map((edge, index) => [String(index), edge])) };
+  const keepsSummary = (source: GraphNode): boolean => Boolean(source.summary) && source.summary!.rev === source.rev && source.summary!.contextHash === contextHash(sourceGraph, source.id);
+  const settled = nodes.map((node, index) => {
+    const source = document.nodes[index];
+    const withHash = node.contextHash === STALE_MARKER && !staleIds.has(node.id) ? { ...node, contextHash: contextHash(graph, node.id) } : node;
+    if (!node.summary) return withHash;
+    const summary = { ...node.summary, coveredNodeIds: node.summary.coveredNodeIds.map(remap), contextHash: keepsSummary(source) ? contextHash(graph, node.id) : "" };
+    return { ...withHash, summary };
+  });
   const partsByNode: Record<Id, Part[]> = {};
   parts.forEach((part) => (partsByNode[part.nodeId] = [...(partsByNode[part.nodeId] ?? []), part]));
   return { boardId, title: title ?? `${document.board.title} (imported)`, graph: { ...graph, nodes: indexBy(settled, (node) => node.id) }, parts: partsByNode };
 };
 
-export const importBoardDocument = (raw: string, format = "json", title?: string): ImportedBoard =>
-  reidentifyDocument(sanitiseDocument(migrateDocument(validateDocument(decoders[format](raw)))), title);
+export const importBoardDocument = (raw: string, format = "json", title?: string, restore: RestoreFile = () => undefined): ImportedBoard =>
+  reidentifyDocument(restoreFiles(sanitiseDocument(migrateDocument(validateDocument(decoders[format](raw)))), restore), title);

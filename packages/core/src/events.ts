@@ -41,7 +41,7 @@ const runReducers: { [T in RunEvent["type"]]: RunReducer<Extract<RunEvent, { typ
         : part,
     ),
   error: (parts, nodeId, roll, event) =>
-    upsertPart(parts, nodeId, roll, `error:${parts.length}`, () => ({ type: "error", text: event.message }), (part) => part),
+    upsertPart(parts, nodeId, roll, `error:${parts.length}`, () => ({ type: "error", text: event.message, ...(event.recovery ? { meta: { recovery: event.recovery } } : {}) }), (part) => part),
   todos: (parts, nodeId, roll, event) =>
     upsertPart(
       parts,

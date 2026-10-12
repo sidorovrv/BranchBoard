@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
-import { isSensitivePath } from "@branchboard/core";
+import { basename, extname, join, relative, resolve } from "node:path";
+import { escapesFolder, HTML_SANDBOX_FLAGS, isSensitivePath } from "@branchboard/core";
 
 const MIME_BY_EXTENSION: Record<string, string> = {
   ".png": "image/png",
@@ -15,7 +15,7 @@ const MIME_BY_EXTENSION: Record<string, string> = {
 const TEXT_EXTENSIONS = [".md", ".txt", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".css", ".html", ".py", ".sql", ".yaml", ".yml", ".toml", ".csv", ".sh", ".go", ".rs", ".java", ".c", ".h", ".cpp"];
 
 const PAGE_EXTENSIONS = [".html", ".htm"];
-const PAGE_SANDBOX = "sandbox allow-scripts allow-popups allow-forms allow-modals";
+const PAGE_SANDBOX = `sandbox ${HTML_SANDBOX_FLAGS.join(" ")}`;
 const INERT_SANDBOX = "sandbox";
 
 export const mimeOfPath = (path: string): string => {
@@ -26,7 +26,7 @@ export const mimeOfPath = (path: string): string => {
 
 const insideWorkspace = (workspacePath: string, candidate: string): boolean => {
   const path = relative(realpathSync(workspacePath), realpathSync(candidate));
-  return path !== "" && !path.startsWith("..") && !isAbsolute(path);
+  return path !== "" && !escapesFolder(path);
 };
 
 export const existingWorkspaceFile = (workspacePath: string, requested: string): string | undefined => {
@@ -53,6 +53,30 @@ export const servedFileOf = (path: string): ServedFile => {
   if (mime === "application/pdf") return { contentType: mime, disposition: "inline" };
   return { contentType: mime.startsWith("text/") ? `${mime}; charset=utf-8` : mime, disposition: "inline", policy: INERT_SANDBOX };
 };
+
+const PREVIEW_CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".json": "application/json",
+  ".map": "application/json",
+  ".txt": "text/plain; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+export const PREVIEW_POLICY = `${PAGE_SANDBOX}; frame-ancestors 'self'`;
+
+export const previewContentTypeOf = (path: string): string | undefined => PREVIEW_CONTENT_TYPES[extname(path).toLowerCase()];
 
 export const downloadNameOf = (path: string): string => encodeURIComponent(basename(path));
 

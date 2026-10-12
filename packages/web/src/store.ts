@@ -22,6 +22,15 @@ interface BoardStore {
   isSearchOpen: boolean;
   isReaderOpen: boolean;
   setReaderOpen: (isOpen: boolean) => void;
+  isSettingsOpen: boolean;
+  settingsSectionId?: string;
+  setSettingsOpen: (isOpen: boolean, sectionId?: string) => void;
+  isShortcutsOpen: boolean;
+  setShortcutsOpen: (isOpen: boolean) => void;
+  isTourOpen: boolean;
+  tourReturnBoardId?: Id;
+  beginTour: (sample: { board: Board; view: BoardView }) => void;
+  endTour: () => Promise<void>;
   focusNode: (id: Id) => void;
   registerFocus: (focus: (id: Id) => void) => void;
   loadBoards: () => Promise<void>;
@@ -107,6 +116,25 @@ export const useBoard = create<BoardStore>((set, get) => {
     isSearchOpen: false,
     isReaderOpen: false,
     setReaderOpen: (isOpen) => set({ isReaderOpen: isOpen }),
+    isSettingsOpen: false,
+    setSettingsOpen: (isOpen, sectionId) => set({ isSettingsOpen: isOpen, settingsSectionId: sectionId }),
+    isShortcutsOpen: false,
+    setShortcutsOpen: (isOpen) => set({ isShortcutsOpen: isOpen }),
+    isTourOpen: false,
+    beginTour: (sample) => {
+      if (get().isTourOpen) return;
+      const tourReturnBoardId = get().board?.id;
+      unsubscribe?.();
+      unsubscribe = undefined;
+      pendingEvents = [];
+      set({ board: sample.board, view: sample.view, selectedIds: [], catalog: undefined, isTourOpen: true, tourReturnBoardId });
+    },
+    endTour: async () => {
+      const { tourReturnBoardId } = get();
+      set({ isTourOpen: false, tourReturnBoardId: undefined, selectedIds: [] });
+      if (tourReturnBoardId) return get().openBoard(tourReturnBoardId);
+      set({ board: undefined, view: emptyView(), catalog: undefined });
+    },
     focusNode: (id) => focusHandler(id),
     registerFocus: (focus) => (focusHandler = focus),
     loadBoards: async () => {
@@ -123,11 +151,12 @@ export const useBoard = create<BoardStore>((set, get) => {
         await get().send({ type: "markBoardSeen", boardId });
         await get().loadBoards();
       }
-      unsubscribe =subscribeToBoard(boardId, queueEvent, () => void reload(boardId));
+      unsubscribe = subscribeToBoard(boardId, queueEvent, () => void reload(boardId));
       set({ catalog: await fetchCatalog(boardId) });
       localStorage.setItem("branchboard.lastBoard", boardId);
     },
     send: async (command) => {
+      if (get().isTourOpen) return undefined;
       try {
         return await sendCommand(command);
       } catch (error) {

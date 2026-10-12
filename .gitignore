@@ -6,12 +6,16 @@ coverage/
 .data/
 *.log
 *.db
+!tests/fixtures/**/*.db
 *.db-shm
 *.db-wal
 *.tgz
 
 .env
 .env.*
+
+test-results/
+playwright-report/
 
 .claude/settings.local.json
 

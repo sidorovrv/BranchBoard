@@ -6,11 +6,9 @@ export interface FileManagerLaunch {
   args: string[];
 }
 
-const FINDER_REVEAL_SCRIPT = ["on run argv", 'tell application "Finder"', "reveal POSIX file (item 1 of argv)", "activate", "end tell", "end run"];
-
 export const fileManagerLaunchOf = (path: string, platform: NodeJS.Platform = process.platform): FileManagerLaunch => {
   if (platform === "win32") return { command: "explorer.exe", args: [`/select,${path}`] };
-  if (platform === "darwin") return { command: "osascript", args: FINDER_REVEAL_SCRIPT.flatMap((line) => ["-e", line]).concat(path) };
+  if (platform === "darwin") return { command: "open", args: ["-R", path] };
   return { command: "xdg-open", args: [dirname(path)] };
 };
 

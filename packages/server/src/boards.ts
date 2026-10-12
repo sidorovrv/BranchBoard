@@ -179,7 +179,7 @@ export const createBoardService = (repository: Repository, hub: Hub) => {
     return { savedAt: stateOf(boardId).board.updatedAt };
   };
 
-  const announceBoard =(boardId: Id) => hub.broadcast(boardId, { type: "board", board: stateOf(boardId).board });
+  const announceBoard = (boardId: Id) => hub.broadcast(boardId, { type: "board", board: stateOf(boardId).board });
 
   const listProjects = () =>
     repository

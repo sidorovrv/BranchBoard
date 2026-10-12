@@ -22,7 +22,7 @@ export interface LaunchOptions {
 export type LaunchProcess = (executable: string, args: string[], options: LaunchOptions) => RunningProcess;
 
 const STDERR_TAIL_CHARS = 2000;
-const SHELL_UNSAFE = /["%^&|<>\r\n]/;
+const SHELL_UNSAFE = /["%^&|<>!\r\n]/;
 
 export const killTree = (child: ChildProcess) => {
   if (child.pid === undefined || child.exitCode !== null) return;
@@ -32,9 +32,10 @@ export const killTree = (child: ChildProcess) => {
 
 const needsShell = (executable: string): boolean => process.platform === "win32" && /\.(cmd|bat)$/i.test(executable);
 
-const assertShellSafe = (value: string) => {
+export const quoteForCmdShell = (value: string): string => {
   if (SHELL_UNSAFE.test(value)) throw new Error(`Refusing to pass "${value}" through the Windows command shell`);
-  return `"${value}"`;
+  const trailingBackslashes = /\\+$/.exec(value)?.[0] ?? "";
+  return `"${value}${trailingBackslashes}"`;
 };
 
 export const withoutCurrentDirectorySearch = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({ ...env, NoDefaultCurrentDirectoryInExePath: "1" });
@@ -42,7 +43,7 @@ export const withoutCurrentDirectorySearch = (env: NodeJS.ProcessEnv): NodeJS.Pr
 export const spawnExecutable = (executable: string, args: string[], options: LaunchOptions): ChildProcess => {
   const spawnOptions = { cwd: options.cwd, env: withoutCurrentDirectorySearch(options.env), stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
   if (!needsShell(executable)) return spawn(executable, args, spawnOptions);
-  return spawn(assertShellSafe(executable), args.map(assertShellSafe), { ...spawnOptions, shell: true });
+  return spawn(quoteForCmdShell(executable), args.map(quoteForCmdShell), { ...spawnOptions, shell: true });
 };
 
 export const launchProcess: LaunchProcess = (executable, args, options) => {

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { newId, type Attachment } from "@branchboard/core";
+import { newId, type Attachment, type DocumentFile } from "@branchboard/core";
 import { RefusedError } from "./boards";
 
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -44,7 +44,19 @@ export const createAttachmentStore = (directory: string) => {
     rmSync(metaPath(id), { force: true });
   };
 
+  const sizeOf = (id: string): number | undefined => (ID_PATTERN.test(id) && existsSync(metaPath(id)) && existsSync(dataPath(id)) ? statSync(dataPath(id)).size : undefined);
+
+  const asDocumentFile = (id: string): DocumentFile => {
+    const attachment = describe(id);
+    return { name: attachment.name, mime: attachment.mime, base64: readFileSync(dataPath(id)).toString("base64") };
+  };
+
+  const restoreDocumentFile = (file: DocumentFile): Attachment => save(file.name, file.mime, Buffer.from(file.base64, "base64"));
+
   return {
+    sizeOf,
+    asDocumentFile,
+    restoreDocumentFile,
     listStored,
     remove,
     save,

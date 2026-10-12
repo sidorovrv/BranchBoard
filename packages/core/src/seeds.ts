@@ -2,7 +2,9 @@ import { inheritChoices, withBoardDefaults, type RunChoices } from "./choices";
 import { BRANCH_TITLE_SEPARATOR, childIdsOf, makeNode, minSizeOf, NODE_HEIGHT, NODE_MAX_HEIGHT, NODE_MAX_WIDTH, NODE_WIDTH, NOTE_HEIGHT, NOTE_WIDTH, parentIdsOf, placeNode, type PlacementAnchor, type PlacementFlow } from "./graph";
 import { fileNameOf } from "./codeFiles";
 import { deriveTitle } from "./helpers";
-import type { Attachment, Board, BoardGraph, GraphEdit, GraphNode, Id } from "./types";
+import { commentsPrompt } from "./promptFormat";
+import { activeRollOf } from "./rolls";
+import type { Attachment, Board, BoardGraph, GraphEdit, GraphNode, Id, NodeComment } from "./types";
 
 export interface NodeSeed extends RunChoices {
   kind: GraphNode["kind"];
@@ -42,11 +44,25 @@ export interface SeedCommand extends RunChoices {
 const isPoint = (value: unknown): value is { x: number; y: number } =>
   typeof value === "object" && value !== null && Number.isFinite((value as { x: unknown }).x) && Number.isFinite((value as { y: unknown }).y);
 
+const activeCommentsOf = (graph: BoardGraph, parentIds: Id[]): NodeComment[] =>
+  parentIds.flatMap((id) => (graph.nodes[id]?.comments ?? []).filter((comment) => comment.roll === activeRollOf(graph.nodes[id])));
+
+const isPrefilledReply = (command: SeedCommand): boolean => command.type === "reply" && command.prompt === undefined;
+
+export const commentClearingEdits = (graph: BoardGraph, command: SeedCommand): Extract<GraphEdit, { type: "editComments" }>[] =>
+  !isPrefilledReply(command)
+    ? []
+    : (command.parentIds ?? []).flatMap((nodeId): Extract<GraphEdit, { type: "editComments" }>[] => {
+        const node = graph.nodes[nodeId];
+        const hasActiveComments = (node?.comments ?? []).some((comment) => comment.roll === activeRollOf(node));
+        return hasActiveComments ? [{ type: "editComments", nodeId, clearRoll: activeRollOf(node) }] : [];
+      });
+
 const seedsByKind: Record<SeedCommand["type"], (graph: BoardGraph, command: SeedCommand) => NodeSeed> = {
   reply: (graph, command) => ({
     kind: "turn",
     parentIds: command.parentIds ?? [],
-    prompt: command.prompt ?? "",
+    prompt: command.prompt ?? commentsPrompt(activeCommentsOf(graph, command.parentIds ?? [])),
     ...inheritChoices(command, graph.nodes[command.parentIds?.[0] ?? ""]),
     quoteText: command.quoteText,
     width: graph.nodes[command.parentIds?.[0] ?? ""]?.w ?? command.width,
@@ -138,7 +154,7 @@ const seedTitles: Record<GraphNode["kind"], (seed: NodeSeed) => string> = {
 };
 
 export const shouldAutoRun = (seed: NodeSeed, command: SeedCommand): boolean =>
-  seed.kind === "turn" && seed.prompt.trim() !== "" && command.run !== false;
+  seed.kind === "turn" && seed.prompt.trim() !== "" && command.run !== false && !isPrefilledReply(command);
 
 const seedSizeOf = (seed: NodeSeed): Partial<Pick<GraphNode, "w" | "h">> => ({
   ...(typeof seed.width === "number" && Number.isFinite(seed.width) ? { w: Math.min(NODE_MAX_WIDTH, Math.max(minSizeOf(seed.kind).w, Math.round(seed.width))) } : {}),

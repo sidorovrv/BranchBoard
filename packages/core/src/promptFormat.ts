@@ -1,3 +1,5 @@
+import type { NodeComment } from "./types";
+
 export interface FormattedText {
   text: string;
   caret: number;
@@ -70,7 +72,13 @@ export const quotedPrompt = (text: string): string => `${text.split("\n").map((l
 
 export const bulletOfQuote = (text: string): string => `${LIST_BULLET} “${collapseWhitespace(text)}”`;
 
-export const isBranchList = (prompt: string): boolean => prompt.trimStart().startsWith(`${LIST_BULLET} `);
+const commentBlock = ({ quote, text }: Pick<NodeComment, "quote" | "text">): string =>
+  [quote.split("\n").map((line) => `> ${line}`.trimEnd()).join("\n"), text.trim()].filter((part) => part !== "").join("\n");
+
+export const commentsPrompt = (comments: Pick<NodeComment, "quote" | "text">[]): string =>
+  comments.length === 0 ? "" : `${comments.map(commentBlock).join("\n\n")}\n\n`;
+
+export const isBranchList =(prompt: string): boolean => prompt.trimStart().startsWith(`${LIST_BULLET} `);
 
 export const withAddedBullet = (prompt: string, text: string): string => `${prompt.replace(/\s+$/, "")}\n${bulletOfQuote(text)}`;
 
@@ -141,7 +149,7 @@ export const highlightSpans = (text: string): HighlightSpan[] => {
   return spans;
 };
 
-export const normalizePastedLists =(text: string): string => {
+export const normalizePastedLists = (text: string): string => {
   let isInFence = false;
   return text
     .split("\n")

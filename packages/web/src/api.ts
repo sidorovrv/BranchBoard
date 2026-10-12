@@ -1,4 +1,4 @@
-import type { Attachment, Board, BoardEvent, BoardView, Catalog, CostSummary, Project, RateLimits, RunInfo, TrashListing } from "@branchboard/core";
+import { COMMAND_TYPE_HEADER, type AboutInfo, type Attachment, type Board, type BoardEvent, type BoardView, type Catalog, type CostSummary, type Project, type RateLimits, type RunInfo, type TrashListing } from "@branchboard/core";
 
 export class CommandRefused extends Error {
   constructor(message: string, readonly sensitiveFiles: string[] = []) {
@@ -13,12 +13,37 @@ const readJson = async (response: Response) => {
 };
 
 export const sendCommand = async <T = any>(command: Record<string, unknown>): Promise<T> =>
-  readJson(await fetch("/api/commands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(command) }));
+  readJson(
+    await fetch("/api/commands", {
+      method: "POST",
+      headers: { "content-type": "application/json", [COMMAND_TYPE_HEADER]: String(command.type) },
+      body: JSON.stringify(command),
+    }),
+  );
 
 export const getJson = async <T = any>(path: string): Promise<T> => readJson(await fetch(path));
 
-export const pickFolder = async (): Promise<string | null> =>
-  (await readJson(await fetch("/api/pick-folder", { method: "POST" }))).path;
+export const downloadFromApi = async (path: string, fileName: string): Promise<void> => {
+  const response = await fetch(path);
+  if (!response.ok) throw new CommandRefused((await response.json().catch(() => ({}))).error ?? `Request failed (${response.status})`);
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(await response.blob());
+  link.download = fileName;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 0);
+};
+
+export interface BrowsedFolder {
+  path: string;
+  parent: string | null;
+  entries: { name: string; isFolder: boolean }[];
+}
+
+export const pickPath = async (kind: "folder" | "file", boardId?: string): Promise<string | null> =>
+  (await readJson(await fetch(`/api/pick-path?kind=${kind}${boardId ? `&board=${boardId}` : ""}`, { method: "POST" }))).path;
+
+export const browseFolder = (path: string | undefined, includeFiles: boolean) =>
+  getJson<BrowsedFolder>(`/api/browse?files=${includeFiles ? 1 : 0}${path ? `&path=${encodeURIComponent(path)}` : ""}`);
 
 export const uploadAttachment = async (boardId: string, file: File): Promise<Attachment> =>
   readJson(
@@ -41,26 +66,15 @@ export const fetchLimits = () => getJson<RateLimits | null>("/api/limits");
 
 export const fetchCosts = () => getJson<CostSummary>("/api/costs");
 
-export const fetchProjects =() => getJson<Project[]>("/api/projects");
+export const fetchProjects = () => getJson<Project[]>("/api/projects");
 
 export const fetchTrash = () => getJson<TrashListing>("/api/trash");
 
-export interface RuntimeHealth {
-  id: string;
-  workspacePath: string;
-  isOk: boolean;
-  detail: string;
-  executable?: string;
-  authMethod?: string;
-  isSignedIn?: boolean;
-  processSlots?: { active: number; limit: number; waiting: number };
-  servers?: string[];
-  supportsSubagentText?: boolean;
-}
 
-export const fetchHealth = () => getJson<{ runtimes: RuntimeHealth[]; logFile: string | null }>("/api/health");
+export const fetchRuntimeCatalog = (mode: string, isFresh = false) => getJson<Catalog>(`/api/runtime/catalog?mode=${encodeURIComponent(mode)}${isFresh ? "&fresh=1" : ""}`);
 
-export const fetchLogs = (filter?: string) => getJson<{ lines: string[] }>(`/api/logs?tail=400${filter ? `&filter=${encodeURIComponent(filter)}` : ""}`);
+export const fetchAbout = (isFresh = false) => getJson<AboutInfo>(`/api/about${isFresh ? "?fresh=1" : ""}`);
+
 
 export const fetchWorkspaceFiles = (boardId: string, query: string) => getJson<string[]>(`/api/workspace/files?board=${boardId}&q=${encodeURIComponent(query)}`);
 
@@ -70,17 +84,13 @@ export const fetchCatalog = (boardId: string) => getJson<Catalog>(`/api/runtime/
 
 const RECONNECT_DELAY_MS = 1000;
 
-export const subscribeToBoard = (boardId: string, onEvent: (event: BoardEvent) => void, onReconnect: () => void): (() => void) => {
+export const subscribeToBoard = (boardId: string, onEvent: (event: BoardEvent) => void, onOpen: () => void): (() => void) => {
   let socket: WebSocket | undefined;
   let closed = false;
-  let hasConnectedBefore = false;
   const connect = () => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     socket = new WebSocket(`${scheme}://${location.host}/api/events?board=${boardId}`);
-    socket.onopen = () => {
-      if (hasConnectedBefore) onReconnect();
-      hasConnectedBefore = true;
-    };
+    socket.onopen = onOpen;
     socket.onmessage = (message) => onEvent(JSON.parse(message.data));
     socket.onclose = () => !closed && setTimeout(connect, RECONNECT_DELAY_MS);
   };

@@ -1,7 +1,7 @@
 import { RUN_CHOICE_KEYS } from "./choices";
 import { indexBy, isRefusal, mapValues, newId, now, refuse, sameMembers, sortBy, unique, type Refusal } from "./helpers";
 import { canSelectRoll, rollPatchForDiscard, rollPatchForQueue, rollPatchForSelect } from "./rolls";
-import type { BoardGraph, EdgePatch, GraphEdge, GraphEdit, GraphNode, Id, NodePatch, NodeStatus, Patch } from "./types";
+import type { BoardGraph, EdgePatch, GraphEdge, GraphEdit, GraphNode, Id, NodeComment, NodePatch, NodeStatus, Patch } from "./types";
 
 export const NODE_WIDTH = 700;
 export const NODE_HEIGHT = 360;
@@ -180,7 +180,7 @@ const refuseLocked = (graph: BoardGraph, ids: Id[]): string | undefined => {
   return ids.some((id) => locked.has(id)) ? LOCKED_REASON : undefined;
 };
 
-export const checkEdgeCandidate =(graph: BoardGraph, fromId: Id, toId: Id, ignoreEdgeId?: Id): string | undefined => {
+export const checkEdgeCandidate = (graph: BoardGraph, fromId: Id, toId: Id, ignoreEdgeId?: Id): string | undefined => {
   const from = graph.nodes[fromId];
   const to = graph.nodes[toId];
   if (!from || from.deleted || !to || to.deleted) return "That node no longer exists";
@@ -511,6 +511,28 @@ const selectRoll: EditKind<EditOf<"selectRoll">> = {
   toPatch: (graph, edit) => nodeFieldPatch(graph, [edit.nodeId], (node) => rollPatchForSelect(node, edit.roll)),
 };
 
+export const MAX_COMMENTS_PER_NODE = 200;
+export const MAX_COMMENT_CHARS = 20_000;
+
+const editedComments = (comments: NodeComment[], edit: EditOf<"editComments">): NodeComment[] =>
+  [
+    ...comments
+      .filter((comment) => comment.id !== edit.removeId && comment.roll !== edit.clearRoll)
+      .map((comment) => (comment.id === edit.update?.id ? { ...comment, text: edit.update.text } : comment)),
+    ...(edit.add ? [edit.add] : []),
+  ];
+
+const editComments: EditKind<EditOf<"editComments">> = {
+  check: (graph, edit) => {
+    const node = liveNode(graph, edit.nodeId);
+    if (!node) return "That node no longer exists";
+    const result = editedComments(node.comments ?? [], edit);
+    if (result.length > MAX_COMMENTS_PER_NODE) return "Too many comments on one node";
+    return result.some((comment) => comment.text.length > MAX_COMMENT_CHARS || comment.quote.length > MAX_COMMENT_CHARS) ? "That comment is too long" : undefined;
+  },
+  toPatch: (graph, edit) => nodeFieldPatch(graph, [edit.nodeId], (node) => ({ comments: editedComments(node.comments ?? [], edit) })),
+};
+
 const collapse: EditKind<EditOf<"collapse">> = {
   check: (graph, edit) => (liveNode(graph, edit.nodeId) ? undefined : "That node no longer exists"),
   toPatch: (graph, edit) => nodeFieldPatch(graph, [edit.nodeId], (node) => ({ collapsed: edit.collapsed ?? !node.collapsed })),
@@ -535,6 +557,7 @@ export const editKinds: { [T in GraphEdit["type"]]: EditKind<EditOf<T>> } = {
   queue,
   selectRoll,
   editNode,
+  editComments,
   collapse,
   pin,
   restoreNodes,

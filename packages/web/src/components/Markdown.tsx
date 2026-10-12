@@ -1,25 +1,18 @@
-import { Children, createContext, isValidElement, useContext, useDeferredValue, type ReactElement, type ReactNode, type ThHTMLAttributes } from "react";
+import { Children, cloneElement, createContext, isValidElement, useContext, useDeferredValue, type ReactElement, type ReactNode, type ThHTMLAttributes } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeRaw from "rehype-raw";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import type { PluggableList } from "unified";
 import { linkTargetOf, looksLikeFilePath, resolveRelativePath, tableFromText } from "@branchboard/core";
 import { workspaceFileUrl } from "../api";
+import { sanitizeSchema } from "../markdownSchema";
 import { boardId } from "../store";
 import { ChartBlock } from "./ChartBlock";
 import { CodeFence } from "./CodeFence";
 import { ExtractFileButton } from "./CodeNode";
 import { DataTable, TableBlock } from "./DataTable";
 import { Selectable } from "./Selectable";
-
-const DRIVE_LETTERS = "abcdefghijklmnopqrstuvwxyz".split("");
-
-const sanitizeSchema = {
-  ...defaultSchema,
-  attributes: { ...defaultSchema.attributes, "*": [...(defaultSchema.attributes?.["*"] ?? []), "align"] },
-  protocols: { ...defaultSchema.protocols, href: [...(defaultSchema.protocols?.href ?? []), "file", ...DRIVE_LETTERS] },
-};
 
 interface HastNode {
   type: string;
@@ -62,6 +55,18 @@ const selectableRuns = (children: ReactNode): ReactNode[] => {
 
 const withSelectableRuns = (Tag: "p" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "td" | "th") =>
   ({ children, align }: { children?: ReactNode; align?: ThHTMLAttributes<HTMLElement>["align"] }) => <Tag align={align}>{selectableRuns(children)}</Tag>;
+
+const ListItem = ({ children, number }: { children?: ReactNode; number?: number }) => (
+  <li>
+    {number !== undefined && <Selectable><span className="list-number">{number}.</span> </Selectable>}
+    {selectableRuns(children)}
+  </li>
+);
+
+const OrderedList = ({ children, start }: { children?: ReactNode; start?: number }) => {
+  let next = start ?? 1;
+  return <ol>{Children.map(children, (child) => (isValidElement(child) ? cloneElement(child as ReactElement<{ number?: number }>, { number: next++ }) : child))}</ol>;
+};
 
 const codeOf = (children: ReactNode): { language?: string; text: string } => {
   const code = Children.toArray(children).find(isValidElement) as ReactElement<{ className?: string; children?: ReactNode }> | undefined;
@@ -121,7 +126,8 @@ const components: Components = {
   code: InlineCode,
   table: ({ node, children }) => <MarkdownTable node={node as HastNode | undefined}>{children}</MarkdownTable>,
   p: withSelectableRuns("p"),
-  li: withSelectableRuns("li"),
+  li: ListItem,
+  ol: OrderedList,
   h1: withSelectableRuns("h1"),
   h2: withSelectableRuns("h2"),
   h3: withSelectableRuns("h3"),

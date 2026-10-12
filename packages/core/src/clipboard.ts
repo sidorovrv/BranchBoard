@@ -99,6 +99,7 @@ const pastedNodeFields = (node: GraphNode, id: Id, boardId: Id, offset: { x: num
     summary: undefined,
     satelliteOf: undefined,
     rolls: undefined,
+    comments: undefined,
     activeRoll: isSettled ? PASTED_ROLL : undefined,
     rollCount: isSettled ? PASTED_ROLL : undefined,
     contextNodeIds: node.contextNodeIds?.map(remap),

@@ -13,7 +13,7 @@ import { locateClaude } from "../packages/server/src/runtimes/claudeLocator";
 import { attachmentDirectories, buildClaudeArguments, buildUserMessage, createStreamState, supportsSubagentText, translateClaudeMessage } from "../packages/server/src/runtimes/claudeStream";
 import { BUNDLED_COMMANDS, listWorkspaceCommands, withBundledCommands } from "../packages/server/src/runtimes/claudeCommands";
 import { fakeRuntime } from "../packages/server/src/runtimes/fake";
-import { opencodeRuntime } from "../packages/server/src/runtimes/opencode";
+import { opencodeRuntime } from "../packages/server/src/runtimes/opencodeAuto";
 import type { ProcessExit, RunningProcess } from "../packages/server/src/runtimes/spawnProcess";
 
 const PORT = 47124;
@@ -473,7 +473,7 @@ describe("runtime availability", () => {
     const catalog = await runtime.catalog(workspace);
     expect(catalog.health).toEqual({ ok: true, detail: "found claude 2.9.9" });
     expect(catalog.agents).toEqual(["default", "reviewer"]);
-    expect(catalog.models.map((model) => model.id)).toEqual(["default", "sonnet", "opus", "haiku", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5-20251001"]);
+    expect(catalog.models.map((model) => model.id)).toEqual(["default", "sonnet", "opus", "haiku", "claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"]);
     expect(catalog.models.every((model) => model.efforts?.includes("high"))).toBe(true);
     expect(catalog.permissionModes?.map((mode) => mode.id)).toEqual(["manual", "plan", "acceptEdits", "auto", "dontAsk"]);
   });
@@ -595,7 +595,7 @@ describe("runs through the board", () => {
       },
     });
     server = createApp({ databasePath: join(directory, "test.db"), security: { port: PORT, extraOrigins: [] }, webRoot: join(directory, "none"), approvals, runtimes: { fake: fakeRuntime, opencode: opencodeRuntime, claude } });
-    boardId = (await command({ type: "createBoard", title: "Claude", workspacePath: process.cwd(), mode: "claude" })).json.id;
+    boardId = (await command({ type: "createBoard", title: "Claude", workspacePath: directory, mode: "claude" })).json.id;
   });
 
   afterAll(() => {
@@ -617,7 +617,7 @@ describe("runs through the board", () => {
     expect(launch.args).not.toContain("--resume");
     expect(launch.args.slice(launch.args.indexOf("--permission-mode"), launch.args.indexOf("--permission-mode") + 2)).toEqual(["--permission-mode", "acceptEdits"]);
     expect(launch.args[launch.args.indexOf("--session-id") + 1]).toMatch(/^[0-9a-f-]{36}$/);
-    expect(launch.cwd).toBe(process.cwd());
+    expect(launch.cwd).toBe(directory);
     await waitFor(() => launch.process.input.length > 0);
     expect(JSON.parse(launch.process.input).message.content[0].text).toContain("first question");
     answerWith(launch.process, "sess-root", "root answer");
@@ -745,7 +745,7 @@ describe("runs through the board", () => {
     const launch = await launchAt(8);
     launch.process.finish(1, "No conversation found with session ID: sess-root");
     await waitForStatus(node, "error");
-    expect((await view()).parts[node].some((part) => part.type === "error" && part.text.includes("assemble"))).toBe(true);
+    expect((await view()).parts[node].some((part) => part.type === "error" && part.text.includes("Resend the context as text") && part.meta?.recovery === "assemble")).toBe(true);
   });
 
   it("reports a crash without a result", async () => {

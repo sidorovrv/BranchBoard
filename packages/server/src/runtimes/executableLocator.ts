@@ -20,6 +20,8 @@ export interface ExecutableSpec {
   knownDirectories: (environment: LocatorEnvironment) => string[];
 }
 
+const ABSOLUTE_PATH = /^(?:[A-Za-z]:)?[\\/]/;
+
 const realIsFile = (path: string): boolean => existsSync(path) && statSync(path).isFile();
 
 export const defaultEnvironment = (): LocatorEnvironment => ({ platform: process.platform, env: process.env, home: homedir(), isFile: realIsFile });
@@ -35,7 +37,7 @@ export const locateExecutable = (spec: ExecutableSpec, environment: LocatorEnvir
   const { platform, env, isFile } = environment;
   const override = env[spec.overrideVariable];
   if (override) return { path: isFile(override) ? override : undefined, searched: [override] };
-  const pathDirectories = (env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean);
+  const pathDirectories = (env.PATH ?? env.Path ?? "").split(delimiter).filter((directory) => ABSOLUTE_PATH.test(directory));
   const directories = [...new Set([...pathDirectories, ...spec.knownDirectories(environment)])];
   const candidates = directories.flatMap((directory) => spec.names(platform).map((name) => join(directory, name)));
   return { path: candidates.find(isFile), searched: directories };

@@ -1,11 +1,11 @@
 import { useEffect, useState, type DragEvent } from "react";
 import { applyOrder, DEFAULT_BOARD_TITLE, formatAgo, moveWithin, type Board, type ListPlacement, type Project, type RunInfo } from "@branchboard/core";
+import { downloadFromApi } from "../api";
 import { useSidebarLayout } from "../sidebarLayout";
 import { useBoard } from "../store";
 import { useContextMenu } from "./ContextMenu";
 import { IconRow } from "./Icons";
 import { ProjectDialog } from "./ProjectDialog";
-import { TrashDialog } from "./TrashDialog";
 
 export const sendWorkspaceCommand = <T = any,>(command: Record<string, unknown>) => useBoard.getState().send<T>(command);
 
@@ -37,12 +37,13 @@ const deleteProject = async (project: Project) => {
   else useBoard.setState({ board: undefined });
 };
 
-export const exportBoard = (board: Board) => {
-  const link = document.createElement("a");
-  link.href = `/api/boards/${board.id}/export`;
-  link.download = "";
-  link.click();
-};
+export const exportBoard = (board: Board, includeFiles = true) =>
+  downloadFromApi(`/api/boards/${board.id}/export?files=${includeFiles ? 1 : 0}`, `${board.title.replace(/[^\w-]+/g, "_")}.branchboard.json`).catch((error) => useBoard.getState().notify(error.message));
+
+export const EXPORT_MENU_ITEMS = (board: Board) => [
+  { label: "Export board (with files)", run: () => void exportBoard(board) },
+  { label: "Export board without files", run: () => void exportBoard(board, false) },
+];
 
 const pickBoardFile = (): Promise<File | undefined> =>
   new Promise((resolve) => {
@@ -138,7 +139,7 @@ const BoardRow = ({ board, isActive, activity, orderedIds }: { board: Board; isA
   return (
     <li className={`sidebar-board ${isActive ? "active" : ""} ${placement ? `drop-${placement}` : ""}`} {...props} onContextMenu={open([
         { label: "Rename", run: () => setIsRenaming(true) },
-        { label: "Export board", run: () => exportBoard(board) },
+        ...EXPORT_MENU_ITEMS(board),
         { label: "Import board…", run: () => void importBoard(board.projectId ?? "") },
         { label: "Delete board", isDanger: true, run: () => void deleteBoard(board) },
       ])}>
@@ -216,7 +217,6 @@ export const Sidebar = () => {
   const boards = useBoard((state) => state.boards);
   const activeId = useBoard((state) => state.board?.id);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
-  const [isTrashOpen, setIsTrashOpen] = useState(false);
   const projectOrder = useSidebarLayout((state) => state.projectOrder);
   const orderedProjects = applyOrder(projects, projectOrder, false);
   return (
@@ -230,9 +230,7 @@ export const Sidebar = () => {
       {orderedProjects.map((project) => (
         <ProjectSection key={project.id} project={project} boards={boards.filter((board) => board.projectId === project.id)} activeId={activeId} orderedProjectIds={orderedProjects.map((candidate) => candidate.id)} />
       ))}
-      <button className="sidebar-trash" onClick={() => setIsTrashOpen(true)}><IconRow names={["trash"]} />Trash</button>
       {isDialogOpen && <ProjectDialog onClose={() => setIsDialogOpen(false)} />}
-      {isTrashOpen && <TrashDialog onClose={() => setIsTrashOpen(false)} />}
     </aside>
   );
 };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffLineCounts, diffRows,fileDisplayNames, fileEditOf, fileEditsOf, preferredModelId, totalChange, type Part } from "@branchboard/core";
+import { collapseUnchanged, diffLineCounts, diffRows, fileDisplayNames, gitChangesOf, rowsOfGitChanges, fileEditOf, fileEditsOf, preferredModelId, totalChange, type Part } from "@branchboard/core";
 
 const toolPart = (id: string, tool: string, input: unknown, status = "done"): Part => ({ id, nodeId: "n", seq: 0, type: "tool", text: "", meta: { tool, input, status } });
 
@@ -42,6 +42,29 @@ describe("file edit counters", () => {
       { kind: "same", text: "d" },
     ]);
     expect(diffRows("", "x")).toEqual([{ kind: "add", text: "x" }]);
+  });
+
+  it("diffs the whole file when the context is unlimited", () => {
+    const before = "a\nb\nc\nd\ne\nf\ng";
+    const after = "a\nb\nc\nD\ne\nf\ng";
+    expect(diffRows(before, after, Infinity).filter((row) => row.kind === "same")).toHaveLength(6);
+    expect(diffRows(before, after).filter((row) => row.kind === "same")).toHaveLength(4);
+  });
+
+  it("turns diff rows into added lines and removed blocks and back", () => {
+    const before = "one\ntwo\nthree\nfour\n";
+    const after = "zero\none\nthree\nfour\nfive\n";
+    const changes = gitChangesOf(diffRows(before, after, Infinity));
+    expect(changes).toEqual({ added: [1, 5], removed: 1, removedBlocks: [{ after: 2, lines: ["two"] }] });
+    const rows = rowsOfGitChanges(after, changes);
+    expect(rows.map((row) => `${row.kind}:${row.text}`)).toEqual(["add:zero", "same:one", "remove:two", "same:three", "same:four", "add:five"]);
+    expect(gitChangesOf(rows)).toEqual(changes);
+  });
+
+  it("collapses unchanged rows far from any change", () => {
+    const rows = diffRows("1\n2\n3\n4\n5\n6\n7\n8\n9", "1\n2\n3\n4\n5\n6\n7\n8\nnine", Infinity);
+    const collapsed = collapseUnchanged(rows, 2);
+    expect(collapsed.map((row) => row.kind)).toEqual(["gap", "same", "same", "remove", "add"]);
   });
 
   it("shows the parent folder only when file names collide", () => {

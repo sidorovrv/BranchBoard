@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { combinedPanDirection, isTextAttachment, panDirectionOf, bindingProblem, boundActionId, clickBindingOf, hasMultipleBindings, isDefaultBinding, isSidePointerButton, keyBindingOf, normaliseKeybinds, shortcutLabelOf } from "../packages/core/src";
+import { combinedPanDirection, isTextAttachment, panDirectionOf, bindingProblem, boundActionId, clickBindingOf, isDefaultBinding, isSidePointerButton, keyBindingOf, normaliseKeybinds, shortcutLabelOf, sharedBindingOwners } from "../packages/core/src";
 
 const none = { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
 
@@ -39,7 +39,7 @@ describe("keybinds", () => {
     expect(keybinds.focusNode).toEqual(["Mouse4"]);
     expect(keybinds.undo).toEqual(["Mouse5", "Ctrl+Z"]);
     expect(boundActionId(keybinds, "Mouse4")).toBe("focusNode");
-    expect(bindingProblem(keybinds, "redo", "Mouse5")).toContain("Undo");
+    expect(sharedBindingOwners({ ...keybinds, redo: [...keybinds.redo, "Mouse5"] }, "redo")).toEqual({ Mouse5: ["Undo"] });
   });
 
   it("allows a key with no modifier", () => {
@@ -51,8 +51,7 @@ describe("keybinds", () => {
     const keybinds = normaliseKeybinds(undefined);
     expect(keybinds.redo).toEqual(["Ctrl+Shift+Z", "Ctrl+Y"]);
     expect(keybinds.focusNode).toEqual(["Alt+Click"]);
-    expect(hasMultipleBindings(keybinds, "redo")).toBe(true);
-    expect(hasMultipleBindings(keybinds, "undo")).toBe(false);
+    expect(sharedBindingOwners(keybinds, "redo")).toEqual({});
     expect(shortcutLabelOf(keybinds, "redo")).toBe("Ctrl+Shift+Z / Ctrl+Y");
   });
 
@@ -61,7 +60,7 @@ describe("keybinds", () => {
     expect(keybinds.undo).toEqual(["Ctrl+Z"]);
     expect(keybinds.reader).toEqual([]);
     expect(keybinds.focusNode).toEqual(["Ctrl+Alt+Click"]);
-    expect(keybinds.search).toEqual(["Ctrl+K"]);
+    expect(keybinds.search).toEqual(["Ctrl+F"]);
     expect(isDefaultBinding(keybinds, "undo")).toBe(true);
     expect(isDefaultBinding(keybinds, "reader")).toBe(false);
   });
@@ -73,10 +72,11 @@ describe("keybinds", () => {
     expect(boundActionId(keybinds, "Alt+Q")).toBeUndefined();
   });
 
-  it("refuses reserved and taken bindings", () => {
+  it("refuses reserved and repeated bindings and reports bindings shared with other actions", () => {
     const keybinds = normaliseKeybinds({});
     expect(bindingProblem(keybinds, "undo", "Ctrl+C")).toContain("reserved");
-    expect(bindingProblem(keybinds, "undo", "Alt+N")).toContain("New chat node");
+    expect(bindingProblem(keybinds, "undo", "Alt+N")).toBeUndefined();
+    expect(sharedBindingOwners({ ...keybinds, undo: ["Ctrl+Z", "Alt+N"] }, "undo")).toEqual({ "Alt+N": ["New chat node"] });
     expect(bindingProblem(keybinds, "newChat", "Alt+N")).toContain("already added");
     expect(bindingProblem(keybinds, "focusNode", "Shift+Click")).toContain("reserved");
     expect(bindingProblem(keybinds, "undo", "Alt+Q")).toBeUndefined();

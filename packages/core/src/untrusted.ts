@@ -1,5 +1,5 @@
-import { NODE_MAX_HEIGHT, NODE_MAX_WIDTH } from "./graph";
-import type { Attachment, ContextMode, GraphEdge, GraphNode, Id, NodeKind, NodeStatus, NodeSummary, Part, PartType, RollSnapshot, Usage } from "./types";
+import { MAX_COMMENT_CHARS, MAX_COMMENTS_PER_NODE, NODE_MAX_HEIGHT, NODE_MAX_WIDTH } from "./graph";
+import type { Attachment, ContextMode, DocumentFile, GraphEdge, GraphNode, Id, NodeComment, NodeKind, NodeStatus, NodeSummary, Part, PartType, RollSnapshot, Usage } from "./types";
 
 export const MAX_UNTRUSTED_NODES = 2000;
 export const MAX_UNTRUSTED_PARTS = 50000;
@@ -33,6 +33,8 @@ const countOf = (value: unknown): number | undefined => {
 const clampedOf = (value: unknown, min: number, max: number, fallback: number): number => Math.min(max, Math.max(min, numberOf(value) ?? fallback));
 
 const choiceOf = (value: unknown): string | undefined => (typeof value === "string" && CHOICE_PATTERN.test(value) ? value : undefined);
+
+export const isSafeChoice = (value: unknown): value is string => choiceOf(value) !== undefined;
 
 const oneOf = <T extends string>(value: unknown, allowed: T[]): T | undefined => allowed.find((candidate) => candidate === value);
 
@@ -84,6 +86,19 @@ const rollsOf = (value: unknown): Record<number, RollSnapshot> | undefined => {
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 };
 
+const commentOf = (value: unknown): NodeComment | undefined => {
+  if (!isRecord(value)) return undefined;
+  const [id, roll, start, end, quote, text] = [textOf(value.id), countOf(value.roll), countOf(value.start), countOf(value.end), textOf(value.quote, MAX_COMMENT_CHARS), textOf(value.text, MAX_COMMENT_CHARS)];
+  if (id === undefined || roll === undefined || start === undefined || end === undefined || quote === undefined || text === undefined) return undefined;
+  return { id, roll, start, end, quote, text };
+};
+
+const commentsOf = (value: unknown): NodeComment[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const comments = value.slice(0, MAX_COMMENTS_PER_NODE).flatMap((item) => commentOf(item) ?? []);
+  return comments.length > 0 ? comments : undefined;
+};
+
 export const sanitiseNode = (raw: unknown): GraphNode | undefined => {
   if (!isRecord(raw)) return undefined;
   const [id, kind, status, title, prompt] = [textOf(raw.id), oneOf(raw.kind, NODE_KINDS), oneOf(raw.status, NODE_STATUSES), textOf(raw.title), textOf(raw.prompt, MAX_TEXT_CHARS)];
@@ -99,6 +114,7 @@ export const sanitiseNode = (raw: unknown): GraphNode | undefined => {
     prompt,
     quoteText: textOf(raw.quoteText, MAX_TEXT_CHARS),
     filePath: textOf(raw.filePath),
+    sourceAttachmentId: textOf(raw.sourceAttachmentId),
     attachments: attachmentsOf(raw.attachments),
     x: clampedOf(raw.x, -MAX_COORDINATE, MAX_COORDINATE, 0),
     y: clampedOf(raw.y, -MAX_COORDINATE, MAX_COORDINATE, 0),
@@ -118,11 +134,46 @@ export const sanitiseNode = (raw: unknown): GraphNode | undefined => {
     activeRoll: countOf(raw.activeRoll),
     rollCount: countOf(raw.rollCount),
     rolls: rollsOf(raw.rolls),
+    comments: commentsOf(raw.comments),
     pinned: raw.pinned === true ? true : undefined,
     satelliteOf: textOf(raw.satelliteOf),
     summary: summaryOf(raw.summary),
     deleted: false,
   };
+};
+
+export const MAX_FILE_BYTES = 25 * 1024 * 1024;
+export const MAX_EXPORT_FILE_BYTES = 150 * 1024 * 1024;
+export const MAX_UNTRUSTED_FILES = 1000;
+
+const FILE_ID_PATTERN = /^[0-9a-f-]{36}$/;
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+const MEGABYTE = 1024 * 1024;
+
+export const base64ByteLength = (base64: string): number => Math.floor((base64.length * 3) / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
+
+export const megabytesLabel = (bytes: number): string => `${(bytes / MEGABYTE).toFixed(1)} MB`;
+
+const fileOf = (raw: unknown): DocumentFile | undefined => {
+  if (!isRecord(raw)) return undefined;
+  const [name, mime, base64] = [textOf(raw.name), textOf(raw.mime), typeof raw.base64 === "string" ? raw.base64 : undefined];
+  if (name === undefined || mime === undefined || base64 === undefined || base64.length % 4 !== 0 || !BASE64_PATTERN.test(base64)) return undefined;
+  const size = base64ByteLength(base64);
+  return size > 0 && size <= MAX_FILE_BYTES ? { name: name.replace(/[\\/\0]/g, "_") || "file", mime, base64 } : undefined;
+};
+
+export const sanitiseFiles = (raw: unknown): Record<Id, DocumentFile> => {
+  if (raw === undefined) return {};
+  if (!isRecord(raw)) throw new Error("The embedded files are malformed");
+  const entries = Object.entries(raw);
+  if (entries.length > MAX_UNTRUSTED_FILES) throw new Error(`Too many embedded files (limit ${MAX_UNTRUSTED_FILES})`);
+  const kept = entries.flatMap(([id, file]): [Id, DocumentFile][] => {
+    const clean = FILE_ID_PATTERN.test(id) ? fileOf(file) : undefined;
+    return clean ? [[id, clean]] : [];
+  });
+  const total = kept.reduce((sum, [, file]) => sum + base64ByteLength(file.base64), 0);
+  if (total > MAX_EXPORT_FILE_BYTES) throw new Error(`The embedded files add up to ${megabytesLabel(total)}; the limit is ${megabytesLabel(MAX_EXPORT_FILE_BYTES)}`);
+  return Object.fromEntries(kept);
 };
 
 export const sanitisePart = (raw: unknown): Part | undefined => {

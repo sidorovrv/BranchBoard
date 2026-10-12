@@ -1,5 +1,7 @@
-import { newId, parseTodoItems, REJECTED_ANSWER, type QuestionSpec } from "@branchboard/core";
+import { newId, parseTodoItems, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type QuestionSpec, type RecoveryId } from "@branchboard/core";
+import { existsSync } from "node:fs";
 import type { EventMap, RunScope, RuntimeSteps } from "../run/types";
+import { resolveInsideWorkspace, writeWorkspaceFile } from "../workspaceWrites";
 import { subagentEventMap, type LooseNative } from "./commonEvents";
 
 type FakeEvent =
@@ -10,7 +12,8 @@ type FakeEvent =
   | { type: "question"; id: string; questions: QuestionSpec[] }
   | { type: "tool-result"; id: string; output: string; isError: boolean }
   | { type: "usage"; inputTokens: number; outputTokens: number }
-  | { type: "failure"; message: string }
+  | { type: "file-write"; id: string; path: string; content: string; existed: boolean }
+  | { type: "failure"; message: string; recovery?: RecoveryId }
   | { type: "todos"; items: { content: string; status: string }[] }
   | { type: "subagent-start"; key: string; title: string }
   | { type: "subagent-done"; key: string }
@@ -62,8 +65,19 @@ async function* execute(session: FakeSession, input: string, scope: RunScope): A
     const reply = await scope.waitForAnswer(id);
     yield { type: "tool-result", id, output: reply, isError: reply === REJECTED_ANSWER };
   }
+  const write = /^\/write (\S+) :: (.*)$/.exec(prompt);
+  if (write) {
+    const [, path, content] = write;
+    const existed = existsSync(resolveInsideWorkspace(scope.workspacePath, path));
+    writeWorkspaceFile(scope.workspacePath, path, content.replace(/\\n/g, "\n"));
+    yield { type: "file-write", id: newId(), path, content, existed };
+  }
   if (prompt.startsWith("/fail")) {
     yield { type: "failure", message: "The provider failed" };
+    return;
+  }
+  if (prompt.startsWith("/gone")) {
+    yield { type: "failure", message: SESSION_GONE_MESSAGE, recovery: "assemble" };
     return;
   }
   if (prompt.startsWith("/limit")) {
@@ -95,10 +109,21 @@ async function* execute(session: FakeSession, input: string, scope: RunScope): A
 
 const eventMap: EventMap<FakeEvent> = {
   ...(subagentEventMap(() => eventMap as unknown as EventMap<LooseNative>) as unknown as EventMap<FakeEvent>),
-  failure: (native) => [{ type: "error", message: (native as Extract<FakeEvent, { type: "failure" }>).message }],
+  failure: (native) => {
+    const { message, recovery } = native as Extract<FakeEvent, { type: "failure" }>;
+    return [{ type: "error", message, recovery }];
+  },
   todos: (native) => [{ type: "todos", items: parseTodoItems((native as Extract<FakeEvent, { type: "todos" }>).items) }],
   chunk: (native) => [{ type: "part.delta", partKey: "text", partType: "text", text: (native as Extract<FakeEvent, { type: "chunk" }>).text }],
   reasoning: (native) => [{ type: "part.delta", partKey: "reasoning", partType: "reasoning", text: (native as Extract<FakeEvent, { type: "reasoning" }>).text }],
+  "file-write": (native) => {
+    const { id, path, content, existed } = native as Extract<FakeEvent, { type: "file-write" }>;
+    const partKey = `write:${id}`;
+    return [
+      { type: "tool.started", partKey, tool: "write", description: `Write ${path}`, input: { file_path: path, content: content.replace(/\\n/g, "\n") } },
+      { type: "tool.done", partKey, output: existed ? `The file ${path} has been updated successfully.` : `File created successfully at: ${path}` },
+    ];
+  },
   tool: (native) => {
     const { id, description } = native as Extract<FakeEvent, { type: "tool" }>;
     return [{ type: "tool.started", partKey: `tool:${id}`, tool: "read", description }];

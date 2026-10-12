@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { RefusedError } from "./boards";
 import { log } from "./log";
@@ -8,7 +9,6 @@ export interface PickerCommand {
   args: string[];
 }
 
-const TITLE = "Choose a workspace folder";
 const PICKER_TIMEOUT_MS = 5 * 60 * 1000;
 
 const EXPLORER_PICKER_SOURCE = `
@@ -68,12 +68,12 @@ public static class ExplorerFolderPicker
     private const uint FILESYSPATH = 0x80058000;
     private const int CANCELLED = unchecked((int)0x800704C7);
 
-    public static string Pick(string title)
+    public static string Pick(string title, bool folders)
     {
         IFileDialog dialog = (IFileDialog)new FileOpenDialogClass();
         uint options;
         dialog.GetOptions(out options);
-        dialog.SetOptions(options | PICK_FOLDERS | FORCE_FILESYSTEM | PATH_MUST_EXIST);
+        dialog.SetOptions(options | (folders ? PICK_FOLDERS : 0) | FORCE_FILESYSTEM | PATH_MUST_EXIST);
         dialog.SetTitle(title);
         int result = dialog.Show(GetForegroundWindow());
         if (result == CANCELLED) return "";
@@ -87,23 +87,34 @@ public static class ExplorerFolderPicker
 }
 `;
 
-const WINDOWS_SCRIPT = `
+export type PickKind = "folder" | "file";
+
+const TITLES: Record<PickKind, string> = { folder: "Choose a workspace folder", file: "Choose a file" };
+
+const windowsScript = (kind: PickKind) => `
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 Add-Type -TypeDefinition @"
 ${EXPLORER_PICKER_SOURCE}
 "@
-[Console]::Out.Write([ExplorerFolderPicker]::Pick("${TITLE}"))
+[Console]::Out.Write([ExplorerFolderPicker]::Pick("${TITLES[kind]}", ${kind === "folder" ? "$true" : "$false"}))
 `;
 
-export const pickerCommands = (platform: NodeJS.Platform): PickerCommand[] => {
+const appleScriptQuoted = (text: string) => `"${text.replace(/[\\"]/g, "\\$&")}"`;
+
+export const pickerCommands = (platform: NodeJS.Platform, kind: PickKind = "folder", start: string = homedir()): PickerCommand[] => {
+  const title = TITLES[kind];
+  const isFolder = kind === "folder";
+  const startWithSlash = /[\\/]$/.test(start) ? start : `${start}/`;
   if (platform === "win32")
-    return [{ command: "powershell.exe", args: ["-NoProfile", "-STA", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(WINDOWS_SCRIPT, "utf16le").toString("base64")] }];
-  if (platform === "darwin") return [{ command: "osascript", args: ["-e", `POSIX path of (choose folder with prompt "${TITLE}")`] }];
+    return [{ command: "powershell.exe", args: ["-NoProfile", "-STA", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(windowsScript(kind), "utf16le").toString("base64")] }];
+  if (platform === "darwin") {
+    return [{ command: "osascript", args: ["-e", `POSIX path of (choose ${isFolder ? "folder" : "file"} with prompt ${appleScriptQuoted(title)} default location (POSIX file ${appleScriptQuoted(start)}))`] }];
+  }
   return [
-    { command: "zenity", args: ["--file-selection", "--directory", `--title=${TITLE}`] },
-    { command: "kdialog", args: ["--getexistingdirectory", homedir(), "--title", TITLE] },
+    { command: "zenity", args: ["--file-selection", ...(isFolder ? ["--directory"] : []), `--title=${title}`, `--filename=${startWithSlash}`] },
+    { command: "kdialog", args: [isFolder ? "--getexistingdirectory" : "--getopenfilename", start, "--title", title] },
   ];
 };
 
@@ -130,13 +141,13 @@ const run = ({ command, args }: PickerCommand): Promise<RunOutcome> =>
     child.stdin?.end();
   });
 
-export const pickFolder = async (platform: NodeJS.Platform = process.platform): Promise<string | undefined> => {
-  const candidates = pickerCommands(platform);
+export const pickPath = async (kind: PickKind, start?: string, platform: NodeJS.Platform = process.platform): Promise<string | undefined> => {
+  const candidates = pickerCommands(platform, kind, start && existsSync(start) ? start : homedir());
   for (const candidate of candidates) {
     const outcome = await run(candidate);
     if (outcome.kind === "selected") return outcome.path;
-    if (outcome.kind === "failed") throw new RefusedError(`Folder dialog failed: ${outcome.message}`);
+    if (outcome.kind === "failed") throw new RefusedError(`File dialog failed: ${outcome.message}`);
     log.warn("folder-picker", `${candidate.command} is not installed`);
   }
-  throw new RefusedError(`No folder dialog is available (tried ${candidates.map((candidate) => candidate.command).join(", ")}). Install one or type the path.`);
+  throw new RefusedError(`No file dialog is available (tried ${candidates.map((candidate) => candidate.command).join(", ")}). Install one or type the path.`);
 };

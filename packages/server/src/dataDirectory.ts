@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export interface DataDirectoryEnvironment {
   platform: NodeJS.Platform;
@@ -10,6 +11,8 @@ export interface DataDirectoryEnvironment {
 }
 
 const LEGACY_NAME = "WanderBoard";
+
+export const dataDirectoryId = (directory: string): string => createHash("sha256").update(resolve(directory).toLowerCase()).digest("hex").slice(0, 12);
 
 export const firstExisting = (candidates: string[], exists: (path: string) => boolean = existsSync): string => candidates.find(exists) ?? candidates[0];
 

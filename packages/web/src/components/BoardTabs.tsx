@@ -5,7 +5,7 @@ import { useBoard } from "../store";
 import { useContextMenu, type MenuItem } from "./ContextMenu";
 import { IconRow } from "./Icons";
 import { ProjectDialog } from "./ProjectDialog";
-import { ACTIVITY_TITLES, activityOf, createBoardIn, deleteBoard, EditableName, exportBoard, importBoard, sendWorkspaceCommand } from "./Sidebar";
+import { ACTIVITY_TITLES, activityOf, createBoardIn, deleteBoard, EditableName, EXPORT_MENU_ITEMS, importBoard, sendWorkspaceCommand } from "./Sidebar";
 
 const MAX_CLOSED_BOARDS_LISTED = 12;
 
@@ -27,7 +27,7 @@ const BoardTab = ({ board, isActive, canClose }: { board: Board; isActive: boole
   };
   const menu: MenuItem[] = [
     { label: "Rename", run: () => setIsRenaming(true) },
-    { label: "Export board", run: () => exportBoard(board) },
+    ...EXPORT_MENU_ITEMS(board),
     { label: "Import board…", run: () => void importBoard(board.projectId ?? "") },
     ...(canClose ? [{ label: "Close tab", run: () => void close() }] : []),
     { label: "Delete board", isDanger: true, run: () => void deleteBoard(board) },

@@ -252,11 +252,23 @@ export const actions: Action[] = [
   },
   {
     id: "search",
-    label: () => "Search nodes",
+    label: () => "Search inside nodes",
     icons: () => ["search"],
     scope: "global",
     isAvailable: () => true,
-    run: () => useBoard.getState().setSearchOpen(!useBoard.getState().isSearchOpen),
+    run: () => {
+      const input = document.querySelector<HTMLInputElement>(".search-box input");
+      if (input) return input.select();
+      useBoard.getState().setSearchOpen(true);
+    },
+  },
+  {
+    id: "showShortcuts",
+    label: () => "Show the shortcuts",
+    icons: () => ["help"],
+    scope: "global",
+    isAvailable: () => true,
+    run: () => useBoard.getState().setShortcutsOpen(!useBoard.getState().isShortcutsOpen),
   },
 ];
 
@@ -287,10 +299,12 @@ const runGlobalAction = (actionId: string | undefined): boolean => {
 };
 
 export const handleShortcut = (event: KeyboardEvent): boolean => {
+  if (useBoard.getState().isTourOpen) return false;
   const target = event.target as HTMLElement | null;
-  if (target && (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable)) return false;
+  const isTyping = Boolean(target && (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable));
   const pressed = keyBindingOf(event);
   const actionId = pressed ? boundActionId(currentKeybinds(), pressed) : undefined;
+  if (isTyping && !(actionId === "search" && pressed?.startsWith("Ctrl+"))) return false;
   if (!runGlobalAction(actionId)) return false;
   event.preventDefault();
   return true;

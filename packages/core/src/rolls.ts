@@ -3,7 +3,7 @@ import type { GraphNode, Part, RollSnapshot } from "./types";
 const FIRST_ROLL = 1;
 const NO_ROLL = 0;
 
-const SNAPSHOT_FIELDS = ["status", "runtimeRef", "contextHash", "contextNodeIds", "contextMode", "usage", "stopped", "startedAt", "completedAt"] as const;
+const SNAPSHOT_FIELDS = ["status", "runtimeRef", "contextHash", "contextNodeIds", "contextMode", "usage", "stopped", "startedAt", "completedAt", "workspaceSnapshot", "fileHashes", "reverted"] as const;
 
 const hasLegacyRun = (node: GraphNode): boolean => node.runtimeRef !== undefined || node.completedAt !== undefined;
 
@@ -44,6 +44,6 @@ export const rollPatchForSelect = (node: GraphNode, roll: number): Partial<Graph
 };
 
 export const rollPatchForDiscard = (node: GraphNode): Partial<GraphNode> =>
-  rollCountOf(node) === 0 ? {} : { rolls: {}, activeRoll: NO_ROLL, rollCount: rollCountOf(node) };
+  rollCountOf(node) === 0 ? {} : { rolls: {}, activeRoll: NO_ROLL, rollCount: rollCountOf(node), comments: [] };
 
 export const canSelectRoll = (node: GraphNode, roll: number): boolean => roll !== activeRollOf(node) && node.rolls?.[roll] !== undefined;

@@ -1,15 +1,36 @@
 import { execFile } from "node:child_process";
-import { relative } from "node:path";
-import type { GitBranches, GitChanges } from "@branchboard/core";
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative, resolve } from "node:path";
+import { diffRows, gitChangesOf, type GitBranches, type GitChanges } from "@branchboard/core";
 
 const GIT_TIMEOUT_MS = 8000;
 const GIT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const BRANCH_NAME_PATTERN = /^[\w./@+-]+$/;
-const HUNK_HEADER = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+const TREE_ID_PATTERN = /^[0-9a-f]{40,64}$/;
 
-const runGit = (workspacePath: string, args: string[]): Promise<string> =>
+const SNAPSHOT_TIMEOUT_MS = 60 * 1000;
+const MISSING_PATH_PATTERN = /does not exist|exists on disk, but not in/i;
+
+interface GitOptions {
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+}
+
+class GitFailure extends Error {
+  constructor(
+    message: string,
+    readonly stderr: string,
+  ) {
+    super(message);
+  }
+}
+
+const runGit = (workspacePath: string, args: string[], { env, timeoutMs = GIT_TIMEOUT_MS }: GitOptions = {}): Promise<string> =>
   new Promise((resolve, reject) => {
-    execFile("git", args, { cwd: workspacePath, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_OUTPUT_BYTES, windowsHide: true }, (error, stdout) => (error ? reject(error) : resolve(stdout)));
+    execFile("git", args, { cwd: workspacePath, timeout: timeoutMs, maxBuffer: GIT_MAX_OUTPUT_BYTES, windowsHide: true, env: env ? { ...process.env, ...env } : undefined }, (error, stdout, stderr) =>
+      error ? reject(new GitFailure(error.message, String(stderr))) : resolve(stdout),
+    );
   });
 
 const linesOf = (output: string): string[] => output.split("\n").map((line) => line.trim()).filter(Boolean);
@@ -34,29 +55,66 @@ const workspaceRelative = (workspacePath: string, absolutePath: string): string 
 export const readFileAtBranch = (workspacePath: string, absolutePath: string, ref: string): Promise<string> =>
   runGit(workspacePath, ["show", `${ref}:./${workspaceRelative(workspacePath, absolutePath)}`]);
 
-export const changedLinesOf = (diff: string): GitChanges => {
-  const added: number[] = [];
-  const removedAfter: number[] = [];
-  let removed = 0;
-  for (const line of diff.split("\n")) {
-    const header = HUNK_HEADER.exec(line);
-    if (!header) continue;
-    const removedCount = Number(header[1] ?? 1);
-    const start = Number(header[2]);
-    const count = Number(header[3] ?? 1);
-    removed += removedCount;
-    if (removedCount > 0) removedAfter.push(count === 0 ? start : start - 1);
-    for (let offset = 0; offset < count; offset += 1) added.push(start + offset);
+export const snapshotWorkspace = async (workspacePath: string): Promise<string | undefined> => {
+  let scratch: string | undefined;
+  try {
+    if ((await runGit(workspacePath, ["rev-parse", "--is-inside-work-tree"])).trim() !== "true") return undefined;
+    const realIndex = resolve(workspacePath, (await runGit(workspacePath, ["rev-parse", "--git-path", "index"])).trim());
+    scratch = mkdtempSync(join(tmpdir(), "branchboard-index-"));
+    const temporaryIndex = join(scratch, "index");
+    if (existsSync(realIndex)) copyFileSync(realIndex, temporaryIndex);
+    const env = { GIT_INDEX_FILE: temporaryIndex };
+    await runGit(workspacePath, ["add", "-A"], { env, timeoutMs: SNAPSHOT_TIMEOUT_MS });
+    return (await runGit(workspacePath, ["write-tree"], { env })).trim() || undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
   }
-  return { added, removed, removedAfter };
 };
 
-export const readChanges = async (workspacePath: string, absolutePath: string, current: string | undefined, ref: string | undefined): Promise<GitChanges> => {
-  const file = workspaceRelative(workspacePath, absolutePath);
-  const range = ref && current ? [`${current}...${ref}`] : ["HEAD"];
+const isIgnored = (workspacePath: string, path: string): Promise<boolean> =>
+  runGit(workspacePath, ["check-ignore", "-q", "--", path]).then(
+    () => true,
+    () => false,
+  );
+
+export type TreeFile = { kind: "text"; text: string } | { kind: "absent" } | { kind: "unavailable" };
+
+export const readFileAtTree = async (workspacePath: string, tree: string, relativePath: string): Promise<TreeFile> => {
+  if (!TREE_ID_PATTERN.test(tree)) return { kind: "unavailable" };
   try {
-    return changedLinesOf(await runGit(workspacePath, ["diff", "-U0", "--no-color", "--no-ext-diff", ...range, "--", file]));
+    await runGit(workspacePath, ["cat-file", "-e", tree]);
   } catch {
-    return { added: [], removed: 0, removedAfter: [] };
+    return { kind: "unavailable" };
+  }
+  const path = relativePath.replace(/\\/g, "/");
+  try {
+    const text = await runGit(workspacePath, ["show", `${tree}:./${path}`]);
+    return text.includes("\0") ? { kind: "unavailable" } : { kind: "text", text };
+  } catch (error) {
+    if (!(error instanceof GitFailure) || !MISSING_PATH_PATTERN.test(error.stderr)) return { kind: "unavailable" };
+    return (await isIgnored(workspacePath, path)) ? { kind: "unavailable" } : { kind: "absent" };
+  }
+};
+
+export const NO_CHANGES: GitChanges = { added: [], removed: 0, removedBlocks: [] };
+
+const readForkPointFile = async (workspacePath: string, absolutePath: string, current: string, ref: string): Promise<string> => {
+  const forkPoint = (await runGit(workspacePath, ["merge-base", current, ref])).trim();
+  try {
+    return await readFileAtBranch(workspacePath, absolutePath, forkPoint);
+  } catch (error) {
+    if (error instanceof GitFailure && MISSING_PATH_PATTERN.test(error.stderr)) return "";
+    throw error;
+  }
+};
+
+export const readChanges = async (workspacePath: string, absolutePath: string, current: string | undefined, ref: string | undefined, shownText: string): Promise<GitChanges> => {
+  try {
+    const base = ref && current ? await readForkPointFile(workspacePath, absolutePath, current, ref) : await readFileAtBranch(workspacePath, absolutePath, "HEAD");
+    return gitChangesOf(diffRows(base, shownText, Infinity));
+  } catch {
+    return NO_CHANGES;
   }
 };

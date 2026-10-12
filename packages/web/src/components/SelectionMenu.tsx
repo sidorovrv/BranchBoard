@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { bulletOfQuote, isBranchList, liveNodes, quotedPrompt, withAddedBullet, type GraphNode } from "@branchboard/core";
 import { createAndFocus } from "../actions";
+import { ANSWER_SELECTOR, offsetsOfRange } from "../commentAnchors";
 import { sendBoardCommand, useBoard } from "../store";
+import { addComment, CommentField, type CommentAnchor } from "./Comments";
 
 interface Selection {
   nodeId: string;
   text: string;
   range: Range;
+  comment?: CommentAnchor;
 }
 
 interface OpenMenu {
@@ -44,7 +47,14 @@ const readSelection = (): Selection | undefined => {
   const node = nodeId ? useBoard.getState().view.graph.nodes[nodeId] : undefined;
   const isBranchable = node?.kind === "code" || (node?.kind === "turn" && node.status !== "idle");
   if (!nodeId || !isBranchable) return undefined;
-  return { nodeId, text: text.slice(0, MAX_QUOTE_CHARS), range: selection.getRangeAt(0).cloneRange() };
+  const range = selection.getRangeAt(0).cloneRange();
+  return { nodeId, text: text.slice(0, MAX_QUOTE_CHARS), range, comment: commentAnchorOf(anchor, node, range, text.slice(0, MAX_QUOTE_CHARS)) };
+};
+
+const commentAnchorOf = (anchor: Element, node: GraphNode, range: Range, quote: string): CommentAnchor | undefined => {
+  const answer = anchor.closest<HTMLElement>(ANSWER_SELECTOR);
+  if (!answer || node.kind !== "turn" ||!answer.contains(range.commonAncestorContainer)) return undefined;
+  return { nodeId: node.id, roll: Number(answer.dataset.roll), quote, ...offsetsOfRange(answer, range) };
 };
 
 const branchFromSelection = ({ nodeId, text }: Selection) => createAndFocus({ type: "reply", parentIds: [nodeId], prompt: quotedPrompt(text), run: false });
@@ -108,6 +118,12 @@ export const SelectionMenu = () => {
   };
   return (
     <div className="context-menu selection-menu" style={{ left: menu.x, top: menu.y }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
+      {menu.selection.comment && (
+        <>
+          <CommentField autoFocus label="Add the comment to the selected text" onSubmit={(text) => (close(), window.getSelection()?.removeAllRanges(), void addComment(menu.selection.comment!, text))} />
+          <hr />
+        </>
+      )}
       <button onClick={choose(branchFromSelection)} title="New node under this one, starting with the selection as a quote">Quick branch</button>
       <button onClick={choose(newBranchList)} title="New node under this one, starting a bullet list with the selection">New branch list</button>
       <div className="selection-menu-parent">
