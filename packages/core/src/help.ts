@@ -23,9 +23,8 @@ export const FIXED_SHORTCUTS: ShortcutRow[] = [
   { area: "Nodes", keys: "Escape", text: "stop the selected run" },
   { area: "Nodes", keys: "Enter", text: "send the prompt" },
   { area: "Nodes", modifier: "Shift", keys: "Enter", text: "new line in a prompt" },
-  { area: "Canvas", modifier: "Alt", keys: "Drag", text: "align and snap to other nodes" },
   { area: "Canvas", keys: "Right-click", text: "menu for a node, board or selected text" },
-  { area: "Navigation", keys: "Scroll / drag", text: "pan and zoom the board (arrow or WASD keys can be turned on in Settings)" },
+  { area: "Navigation", keys: "Scroll / drag", text: "pan and zoom the board" },
 ];
 
 export const rowKeys = (row: Pick<ShortcutRow, "modifier" | "keys">): string => [row.modifier, row.keys].filter(Boolean).join("+");
@@ -33,7 +32,7 @@ export const rowKeys = (row: Pick<ShortcutRow, "modifier" | "keys">): string => 
 export const shortcutRows = (keybinds: Keybinds): ShortcutRow[] => {
   const bound = BINDABLE_ACTIONS.flatMap((action) => {
     const bindings = keybinds[action.id] ?? [];
-    return bindings.length === 0 ? [] : [{ area: action.area, keys: bindings.join(" / "), text: action.label }];
+    return bindings.length === 0 ? [] : [{ area: action.area, keys: (action.kind === "hold" ? bindings.map((binding) => `${binding}+Drag`) : bindings).join(" / "), text: action.label }];
   });
   const rows = [...bound, ...FIXED_SHORTCUTS.map((row) => ({ ...row, keys: rowKeys(row), modifier: undefined }))];
   return SHORTCUT_AREAS.flatMap((area) => rows.filter((row) => row.area === area));
@@ -75,7 +74,7 @@ export const TOUR_STEPS: TourStep[] = [
     focusTitle: SAMPLE_TITLES.python,
     selectsNode: true,
     title: "The context panel",
-    body: "Select a node to see its parents, the turns sent with it, its token count and which turns are sent again as text. Drag a parent to change the order, or click × to disconnect it.",
+    body: "Select a node to see its parents, the turns sent with it and its token count. Drag a parent to change the order, or click × to disconnect it.",
   },
   {
     anchor: "stale",
@@ -94,25 +93,25 @@ export const TOUR_STEPS: TourStep[] = [
     anchor: "rolls",
     focusTitle: SAMPLE_TITLES.python,
     title: "Earlier answers",
-    body: "Regenerating a node keeps its previous answers. Use the arrows to switch between them. The answer you leave selected is the one passed to the nodes below.",
+    body: "Regenerating a node keeps its previous answers. Switch between them with the arrows. The selected answer is passed to the nodes below.",
   },
   {
     anchor: "code",
     focusTitle: SAMPLE_TITLES.code,
     title: "Code nodes",
-    body: "A code node shows a file from the project folder and passes it to the nodes it is connected to. Add one from the toolbar, or use the extract button next to a file path in an answer or in the list of edited files. The node follows changes made to the file. In a git repository it also marks the changed lines and can show the file from another branch.",
+    body: "A code node shows a file from the project folder and passes it to the nodes it is connected to. Add one from the toolbar or with the extract button next to a file path in an answer.",
   },
   {
     anchor: "table",
     focusTitle: SAMPLE_TITLES.compare,
     title: "Tables",
-    body: "Tables in answers are sorted by clicking a column heading, and long tables get a filter field. Use Download as CSV or Copy as CSV below the table.",
+    body: "Click a column heading to sort a table. Download or copy it as CSV below the table.",
   },
   {
     anchor: "chart",
     focusTitle: SAMPLE_TITLES.compare,
     title: "Charts",
-    body: "Agents can draw charts from a chart block. A chart follows the light or dark theme and can be saved as a PNG. Source shows the block it was drawn from.",
+    body: "Agents can draw charts in their answers. A chart follows the light or dark theme and can be saved as a PNG.",
   },
   {
     anchor: "help",

@@ -1,10 +1,14 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { RUNTIMES, type RunEvent } from "@branchboard/core";
+import { CUT_OFF_NOTE, STEPS_LIMIT_MESSAGE, STEPS_LIMIT_NOTE } from "../packages/server/src/runtimes/failures";
 import { opencodeEventMap } from "../packages/server/src/runtimes/opencode";
 import { createSeen2, opencode2Runtime, translateEvent2 } from "../packages/server/src/runtimes/opencode2";
 import { locateOpencode2, type LocatorEnvironment } from "../packages/server/src/runtimes/opencodeLocator";
 import { majorVersionOf } from "../packages/server/src/runtimes/opencodeGeneration";
+import { unsentFileNotes } from "../packages/server/src/run/fileChecks";
 import type { RunScope } from "../packages/server/src/run/types";
 
 const ROOT = "ses_root";
@@ -82,19 +86,77 @@ describe("OpenCode 2 events", () => {
       ],
     };
     const [opened] = mapped([event("form.created", { form })]);
-    expect(opened).toMatchObject({ type: "request.opened", request: { remoteId: `${ROOT}/frm_1`, kind: "question" } });
+    expect(opened).toMatchObject({ type: "request.opened", request: { remoteId: `${ROOT}/frm_1/q0,q1`, kind: "question" } });
     const questions = (opened as { request: { questions: unknown[] } }).request.questions;
     expect(questions).toEqual([
-      { question: "Which color?", header: "Color", options: [{ label: "Red", description: "warm" }, { label: "Blue", description: undefined }], multiple: false },
-      { question: "Which extras?", header: "Extras", options: [{ label: "A", description: undefined }], multiple: true },
+      { question: "Which color?", header: "Color", options: [{ label: "Red", description: "warm" }, { label: "Blue", description: undefined }], multiple: false, key: "q0" },
+      { question: "Which extras?", header: "Extras", options: [{ label: "A", description: undefined }], multiple: true, key: "q1" },
     ]);
-    expect(translate([event("form.created", { form: { ...form, metadata: { kind: "other" } } })])).toEqual([]);
+    expect(translate([event("form.created", { form: { ...form, fields: [] } })])).toEqual([]);
+  });
+
+  it("maps typed fields of other forms and leaves out hidden ones", () => {
+    const fields = [
+      { key: "name", title: "Name", type: "string", required: true },
+      { key: "size", title: "Size", type: "number" },
+      { key: "agree", title: "Agree", type: "boolean" },
+      { key: "docs", title: "Docs", description: "Open the page", type: "external", url: "https://example.com/auth" },
+      { key: "secret", title: "Secret", type: "string", hidden: true },
+    ];
+    const [other] = translate([event("form.created", { form: { id: "frm_2", sessionID: ROOT, title: "Sign in", metadata: { kind: "auth" }, fields } })]);
+    expect(other).toMatchObject({ type: "question", remoteId: `${ROOT}/frm_2/name,size,agree,docs` });
+    expect((other as { questions?: unknown }).questions).toEqual([
+      expect.not.objectContaining({ optional: true }),
+      expect.objectContaining({ header: "Sign in · Size", kind: "number", optional: true }),
+      expect.objectContaining({ kind: "boolean", options: [{ label: "Yes" }, { label: "No" }] }),
+      expect.objectContaining({ kind: "link", url: "https://example.com/auth", question: "Open the page", options: [{ label: "Done" }] }),
+    ]);
   });
 
   it("ends the run on success or interruption and reports a failure message", () => {
     expect(mapped([event("session.execution.succeeded", { sessionID: ROOT })])).toEqual([{ type: "done" }]);
     expect(mapped([event("session.execution.interrupted", { sessionID: ROOT, reason: "user" })])).toEqual([{ type: "done" }]);
-    expect(mapped([event("session.execution.failed", { sessionID: ROOT, error: { type: "provider.no-route", message: "Model unavailable: opencode/x" } })])).toEqual([{ type: "error", message: "Model unavailable: opencode/x" }]);
+    expect(mapped([event("session.execution.failed", { sessionID: ROOT, error: { type: "provider.no-route", message: "Model unavailable: opencode/x" } })])).toEqual([{ type: "error", message: "Model unavailable: opencode/x", recovery: "setup" }]);
+  });
+
+  it("maps authentication and rate limit failures to recovery actions", () => {
+    const failed = (error: Record<string, unknown>) => mapped([event("session.execution.failed", { sessionID: ROOT, error })]);
+    expect(failed({ type: "provider.auth", status: 401, message: "Incorrect API key" })).toMatchObject([{ recovery: "signIn" }]);
+    expect(failed({ type: "provider.rate-limit", status: 429, message: "Slow down" })).toMatchObject([{ recovery: "usageLimit" }]);
+    expect(failed({ type: "provider.invalid-request", status: 404, message: "No such model" })).toEqual([{ type: "error", message: "No such model" }]);
+  });
+
+  it("reports scheduled provider retries", () => {
+    expect(mapped([event("session.retry.scheduled", { sessionID: ROOT, attempt: 2, at: 1700000000000, error: { type: "provider.rate-limit", message: "Rate limited" } })])).toEqual([
+      { type: "retry", attempt: 2, at: 1700000000000, reason: "Rate limited" },
+    ]);
+  });
+
+  it("drops the partial text of a failed step when the engine restarts it", () => {
+    const seen = createSeen2(ROOT);
+    const events = translate(
+      [
+        event("session.text.delta", { ...base, ordinal: 0, delta: "Partial" }),
+        event("session.step.failed", { ...base, error: { type: "provider.transport" } }),
+        event("session.synthetic", { sessionID: ROOT }),
+        event("session.text.delta", { sessionID: ROOT, assistantMessageID: "msg_second", ordinal: 0, delta: "Partial" }),
+      ],
+      seen,
+    );
+    expect(events.map((entry) => entry.type)).toEqual(["text", "retry-restart", "text"]);
+    expect(events[1].partKeys).toEqual([`${MESSAGE}:text:0`]);
+  });
+
+  it("adds the cut-off note when a step ends at the length limit", () => {
+    expect(mapped([event("session.step.ended", { ...base, finish: "length" })])).toEqual([{ type: "part.delta", partKey: `${MESSAGE}:text:cutoff`, partType: "text", text: CUT_OFF_NOTE }]);
+    expect(mapped([event("session.step.ended", { ...base, finish: "stop" })])).toEqual([]);
+  });
+
+  it("adds the step limit note once when tools are disabled after the maximum agent steps", () => {
+    const failed = (id: string) => event("session.tool.failed", { ...base, id, error: { type: "tool.execution", message: STEPS_LIMIT_MESSAGE } });
+    const events = mapped([failed("call_1"), failed("call_2")]);
+    expect(events.map((entry) => entry.type)).toEqual(["tool.done", "part.delta", "tool.done"]);
+    expect(events[1]).toEqual({ type: "part.delta", partKey: `${MESSAGE}:text:steps`, partType: "text", text: STEPS_LIMIT_NOTE });
   });
 
   it("adds up usage across the session and its subagents", () => {
@@ -133,6 +195,33 @@ describe("OpenCode 2 events", () => {
     expect(translateEvent2(event("session.created", { sessionID: "ses_other", parentID: "ses_unrelated" }), seen)).toEqual([]);
     translateEvent2(event("session.text.delta", { ...base, ordinal: 0, delta: "yes" }), seen);
     expect(seen.lastAssistantMessage).toBe(MESSAGE);
+  });
+});
+
+describe("recorded engine file handling", () => {
+  const recordedModel = { id: "cat-jam-free", providerID: "opencode", capabilities: { tools: true, input: ["text"], output: ["text"] } };
+  const directory = mkdtempSync(join(tmpdir(), "branchboard-recorded-"));
+  afterAll(() => rmSync(directory, { recursive: true, force: true }));
+
+  const fileOf = (name: string, mime: string, bytes: Buffer) => {
+    const path = join(directory, name);
+    writeFileSync(path, bytes);
+    return { name, mime, path };
+  };
+
+  it("names the pdf kind the way the engine does for a model that takes text only", () => {
+    const pdf = fileOf("page.pdf", "application/pdf", Buffer.from("%PDF-1.1\n"));
+    expect(unsentFileNotes([pdf], recordedModel.capabilities.input)).toEqual(["page.pdf was not sent: the model does not accept pdf files."]);
+  });
+
+  it("names every kind the model rejects and keeps text files", () => {
+    const files = [
+      fileOf("pixel.png", "image/png", Buffer.from([0x89, 0x50, 0x4e, 0x47])),
+      fileOf("page.pdf", "application/pdf", Buffer.from("%PDF-1.1\n")),
+      fileOf("note.txt", "text/plain", Buffer.from("plain text\n")),
+      fileOf("blob.bin", "application/octet-stream", Buffer.from([0x50, 0x4b, 0, 0xff, 0xfe])),
+    ];
+    expect(unsentFileNotes(files, ["text", "image"])).toEqual(["page.pdf was not sent: the model does not accept pdf files.", "blob.bin was not sent: it is not UTF-8 text, an image or a PDF."]);
   });
 });
 

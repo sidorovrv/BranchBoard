@@ -19,17 +19,20 @@
     "start": "npm -w @branchboard/server run start",
     "dev:server": "npm -w @branchboard/server run dev",
     "dev:web": "npm -w @branchboard/web run dev",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.kit.json",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "kit:sync": "node ../kit/scripts/sync.mjs .",
+    "kit:check": "node ../kit/scripts/sync.mjs . --check"
   },
   "engines": {
     "node": ">=22.13"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.0",
-    "@types/node": "^22.0.0",
-    "typescript": "^5.6.0",
+    "@types/node": "^26.6.5",
+    "oxc-parser": "^0.154.0",
+    "typescript": "^7.0.2",
     "vite": "^8.3.2",
     "vitest": "^5.0.3"
   }

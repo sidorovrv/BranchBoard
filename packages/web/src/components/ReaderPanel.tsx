@@ -3,8 +3,8 @@ import { activeRollOf, describeContext, formatTokens, partsOfRoll, type GraphNod
 import { useEdgeResize } from "../panelResize";
 import { READER_DEFAULT_WIDTH, READER_MAX_WIDTH, READER_MIN_WIDTH, useSettings } from "../settings";
 import { useBoard } from "../store";
-import { Icon } from "./Icons";
-import { Markdown } from "./Markdown";
+import { Icon } from "../kit/Icons";
+import { Markdown } from "../kit/Markdown";
 
 const EMPTY_PARTS: Part[] = [];
 
@@ -87,7 +87,7 @@ const ReaderEmpty = () => (
   <div className="reader-empty">
     <Icon name="reader" />
     <strong>Nothing to read yet</strong>
-    <span>Select a chat node to read the conversation that leads to it, in order.</span>
+    <span>Select a chat node to read its conversation.</span>
   </div>
 );
 

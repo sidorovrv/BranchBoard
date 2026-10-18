@@ -1,4 +1,4 @@
-import { COMMAND_TYPE_HEADER, type AboutInfo, type Attachment, type Board, type BoardEvent, type BoardView, type Catalog, type CostSummary, type Project, type RateLimits, type RunInfo, type TrashListing } from "@branchboard/core";
+import { COMMAND_TYPE_HEADER, type AboutInfo, type Attachment, type Board, type BoardEvent, type BoardView, type Catalog, type CostSummary, type CredentialStatus, type Project, type RateLimits, type RunInfo, type RuntimePanel, type TelemetryOverview, type TrashListing } from "@branchboard/core";
 
 export class CommandRefused extends Error {
   constructor(message: string, readonly sensitiveFiles: string[] = []) {
@@ -6,10 +6,26 @@ export class CommandRefused extends Error {
   }
 }
 
-const readJson = async (response: Response) => {
-  const body = await response.json().catch(() => ({}));
+const checkedBody = (response: Response, body: any) => {
   if (!response.ok) throw new CommandRefused(body.error ?? `Request failed (${response.status})`, Array.isArray(body.sensitiveFiles) ? body.sensitiveFiles.map(String) : []);
   return body;
+};
+
+const readJson = async (response: Response) => checkedBody(response, await response.json().catch(() => ({})));
+
+const getTimedJson = async <T = any>(path: string): Promise<{ body: T; fetchMs: number; parseMs: number }> => {
+  const startedAt = performance.now();
+  const response = await fetch(path);
+  const text = await response.text();
+  const fetchedAt = performance.now();
+  let parsed: unknown = {};
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = {};
+  }
+  const body = checkedBody(response, parsed);
+  return { body, fetchMs: fetchedAt - startedAt, parseMs: performance.now() - fetchedAt };
 };
 
 export const sendCommand = async <T = any>(command: Record<string, unknown>): Promise<T> =>
@@ -62,7 +78,7 @@ export const fetchRuns = () => getJson<RunInfo[]>("/api/runs");
 
 export const fetchFinishedRuns = () => getJson<RunInfo[]>("/api/runs/finished");
 
-export const fetchLimits = () => getJson<RateLimits | null>("/api/limits");
+export const fetchLimits = (runtime: string) => getJson<RateLimits | null>(`/api/limits?runtime=${encodeURIComponent(runtime)}`);
 
 export const fetchCosts = () => getJson<CostSummary>("/api/costs");
 
@@ -73,12 +89,16 @@ export const fetchTrash = () => getJson<TrashListing>("/api/trash");
 
 export const fetchRuntimeCatalog = (mode: string, isFresh = false) => getJson<Catalog>(`/api/runtime/catalog?mode=${encodeURIComponent(mode)}${isFresh ? "&fresh=1" : ""}`);
 
-export const fetchAbout = (isFresh = false) => getJson<AboutInfo>(`/api/about${isFresh ? "?fresh=1" : ""}`);
+export const fetchCredentialStatus = (mode: string) => getJson<CredentialStatus>(`/api/runtime/credential?mode=${encodeURIComponent(mode)}`);
+
+export const fetchAbout =(isFresh = false) => getJson<AboutInfo>(`/api/about${isFresh ? "?fresh=1" : ""}`);
 
 
 export const fetchWorkspaceFiles = (boardId: string, query: string) => getJson<string[]>(`/api/workspace/files?board=${boardId}&q=${encodeURIComponent(query)}`);
 
-export const fetchBoardView = (boardId: string) => getJson<BoardView & { board: Board }>(`/api/boards/${boardId}/graph`);
+export const fetchTimedBoardView = (boardId: string) => getTimedJson<BoardView & { board: Board }>(`/api/boards/${boardId}/graph`);
+
+export const fetchBoardView = async (boardId: string) => (await fetchTimedBoardView(boardId)).body;
 
 export const fetchCatalog = (boardId: string) => getJson<Catalog>(`/api/runtime/catalog?board=${boardId}`);
 
@@ -102,3 +122,12 @@ export const subscribeToBoard = (boardId: string, onEvent: (event: BoardEvent) =
 };
 
 export const workspaceFileUrl = (boardId: string, path: string, hash = ""): string => `/api/boards/${boardId}/files?path=${encodeURIComponent(path)}${hash}`;
+
+export const fetchRuntimePanels = (boardId: string, mode: string) =>
+  getJson<{ panels: RuntimePanel[] }>(`/api/runtime/panels?mode=${encodeURIComponent(mode)}&board=${boardId}`).then((body) => body.panels);
+
+export const runPanelAction = async (boardId: string, mode: string, panelId: string, rowId: string, actionId: string): Promise<void> => {
+  await readJson(await fetch(`/api/runtime/panels/${encodeURIComponent(panelId)}/${encodeURIComponent(rowId)}/${encodeURIComponent(actionId)}?mode=${encodeURIComponent(mode)}&board=${boardId}`, { method: "POST" }));
+};
+
+export const fetchTelemetry = () => getJson<TelemetryOverview>("/api/telemetry");

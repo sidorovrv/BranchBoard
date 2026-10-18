@@ -3,6 +3,7 @@ import { join, relative } from "node:path";
 import {
   addNodeEdit,
   asNodeClipboard,
+  canResume,
   DEFAULT_BOARD_TITLE,
   fileNameOf,
   hasAutoTitle,
@@ -13,9 +14,12 @@ import {
   isRuntimeId,
   isSafeChoice,
   commentClearingEdits,
+  commentTargetOf,
+  promptWithComment,
   isSensitivePath,
   newId,
   now,
+  parseEnvironmentText,
   planPaste,
   RUN_CHOICE_DEFAULTS,
   RUN_CHOICE_KEYS,
@@ -42,7 +46,9 @@ import { clearLogs } from "./logSources";
 import { revertEdits, type RevertCommand } from "./revert";
 import { sensitiveMentionsOf } from "./run/mentions";
 import type { RunService, Runtimes } from "./run/pipeline";
+import type { Telemetry } from "./telemetry";
 import type { TrashService } from "./trash";
+import type { UsageRecorder } from "./usage";
 import { existingWorkspaceFile } from "./workspaceFiles";
 import { writeWorkspaceFile } from "./workspaceWrites";
 
@@ -56,6 +62,8 @@ export interface CommandContext {
   runs: RunService;
   runtimes: Runtimes;
   trash: TrashService;
+  telemetry: Telemetry;
+  usage: UsageRecorder;
 }
 
 type Command = { type: string; boardId?: Id } & Record<string, any>;
@@ -68,7 +76,15 @@ const editHandler: Handler = ({ boards }, { boardId, ...edit }) => {
   return { ok: true };
 };
 
-const resolveAttachments = ({ attachments }: CommandContext, command: Command) =>
+const commentHandler: Handler = (context, command) => {
+  const { boards } = context;
+  const boardId = command.boardId!;
+  const target = command.add ? commentTargetOf(boards.stateOf(boardId).graph, command.nodeId) : undefined;
+  if (!target) return editHandler(context, command);
+  return editHandler(context, { type: "editNode", boardId, nodeId: target.id, fields: { prompt: promptWithComment(target.prompt, command.add) } });
+};
+
+const resolveAttachments =({ attachments }: CommandContext, command: Command) =>
   attachments.describeAll(Array.isArray(command.attachmentIds) ? command.attachmentIds.map(String) : []);
 
 const requireConfirmation = (command: Command, flaggedFiles: string[]) => {
@@ -99,6 +115,7 @@ const seedHandler: Handler = (context, command) => {
   if (willRun) requireConfirmationForMentions(context, command, String(command.prompt ?? ""));
   const edit = addNodeEdit(graph, board, seed, seedCommand.position);
   boards.commitEdit(boardId, edit);
+  context.usage.record({ type: "nodeCreated", boardId, kind: seedCommand.type });
   commentClearingEdits(graph, seedCommand).forEach((clearing) => boards.commitEdit(boardId, clearing));
   if (willRun) runs.enqueue(boardId, edit.node.id);
   return { nodeId: edit.node.id };
@@ -170,9 +187,17 @@ const setCredentialHandler: Handler = ({ credentials, runtimes, runs }, command)
   if (!isRuntimeId(command.runtimeId)) throw new RefusedError("Unknown runtime");
   const key = command.key === null ? null : typeof command.key === "string" ? command.key : undefined;
   const credential = credentials.set(command.runtimeId, key, typeof command.baseUrl === "string" ? command.baseUrl : undefined);
-  runtimes[command.runtimeId]?.forgetCaches?.();
+  if (key !== null) runtimes[command.runtimeId]?.setUp?.();
+  void runtimes[command.runtimeId]?.forgetCaches?.();
   runs.forgetCatalogs();
   return { credential };
+};
+
+const setUpRuntimeHandler: Handler = ({ runtimes, runs }, command) => {
+  if (!isRuntimeId(command.runtimeId)) throw new RefusedError("Unknown runtime");
+  runtimes[command.runtimeId]?.setUp?.();
+  runs.forgetCatalogs();
+  return {};
 };
 
 const testCredentialHandler: Handler = async ({ runtimes }, command) => {
@@ -299,7 +324,18 @@ const createBoardHandler: Handler = async (context, command) => {
     updatedAt: now(),
     deleted: false,
   };
-  return boards.createBoard(board);
+  const created = await boards.createBoard(board);
+  context.usage.record({ type: "boardCreated", boardId: board.id });
+  return created;
+};
+
+const environmentOf = (text: unknown): Record<string, string> | undefined => {
+  try {
+    const variables = parseEnvironmentText(String(text));
+    return Object.keys(variables).length > 0 ? variables : undefined;
+  } catch (error) {
+    throw new RefusedError(error instanceof Error ? error.message : String(error));
+  }
 };
 
 const updateBoardHandler: Handler = ({ boards }, command) => {
@@ -308,7 +344,8 @@ const updateBoardHandler: Handler = ({ boards }, command) => {
   const budget = command.budgetTokens === undefined ? {} : { budgetTokens: Number(command.budgetTokens) > 0 ? Math.round(Number(command.budgetTokens)) : undefined };
   const share = command.summaryShare === undefined ? {} : { summaryShare: Math.min(1, Math.max(0, Number(command.summaryShare) || 0)) };
   const guide = command.answerFormatsGuide === undefined ? {} : { answerFormatsGuide: Boolean(command.answerFormatsGuide) };
-  boards.saveBoard({ ...board, ...fields, ...budget, ...share, ...guide, updatedAt: now() });
+  const environment = command.environment === undefined ? {} : { environment: environmentOf(command.environment) };
+  boards.saveBoard({ ...board, ...fields, ...budget, ...share, ...guide, ...environment, updatedAt: now() });
   boards.announceBoard(command.boardId!);
   return boards.stateOf(command.boardId!).board;
 };
@@ -343,8 +380,8 @@ const pasteNodesHandler: Handler = (context, command) => {
 
 const markBoardSeenHandler: Handler = ({ boards }, command) => {
   const { board } = boards.stateOf(command.boardId!);
-  if (board.hasUnseenResult) {
-    boards.saveBoard({ ...board, hasUnseenResult: false });
+  if (board.hasUnseenResult || board.hitUsageLimit) {
+    boards.saveBoard({ ...board, hasUnseenResult: false, hitUsageLimit: false });
     boards.announceBoard(command.boardId!);
   }
   return { ok: true };
@@ -356,7 +393,7 @@ const deleteBoardHandler: Handler = ({ boards }, command) => {
   return { ok: true };
 };
 
-const importIntoProject = ({ boards, attachments }: CommandContext, project: Project | undefined, raw: string, title?: string): Board => {
+const importIntoProject = ({ boards, attachments, usage }: CommandContext, project: Project | undefined, raw: string, title?: string): Board => {
   if (!project) throw new RefusedError("Choose a project to import the board into");
   const imported = (() => {
     try {
@@ -378,6 +415,7 @@ const importIntoProject = ({ boards, attachments }: CommandContext, project: Pro
     deleted: false,
   };
   boards.saveSnapshot({ board, graph: imported.graph, parts: imported.parts });
+  usage.record({ type: "boardCreated", boardId: board.id });
   return board;
 };
 
@@ -386,7 +424,13 @@ const importBoardHandler: Handler = (context, command) =>
 
 export const commandHandlers: Record<string, Handler> = {
   ...Object.fromEntries(CLIENT_EDIT_TYPES.map((type) => [type, editHandler])),
-  undo: ({ boards }, command) => ({ patch: boards.undo(command.boardId!) ?? null }),
+  editComments: commentHandler,
+  undo: ({ boards, usage }, command) => {
+    const patch = boards.undo(command.boardId!) ?? null;
+    if (patch) usage.record({ type: "undo", boardId: command.boardId! });
+    return { patch };
+  },
+  setTelemetryConsent: ({ telemetry }, command) => (telemetry.setConsent(command.granted === true), { ok: true }),
   redo: ({ boards }, command) => ({ patch: boards.redo(command.boardId!) ?? null }),
   reply: seedHandler,
   sibling: seedHandler,
@@ -404,6 +448,7 @@ export const commandHandlers: Record<string, Handler> = {
   openPreview: openPreviewHandler,
   setCredential: setCredentialHandler,
   testCredential: testCredentialHandler,
+  setUpRuntime: setUpRuntimeHandler,
   revertEdits: ({ boards, runs }, command) => revertEdits({ boards, runs }, command as unknown as RevertCommand),
   revealDataFolder: ({ databasePath }) => (showInFileManager(databasePath), { ok: true }),
   clearLogs: ({ dataDirectory }) => ({ cleared: clearLogs(dataDirectory) }),
@@ -417,11 +462,12 @@ export const commandHandlers: Record<string, Handler> = {
       boards.commitEdit(boardId, { type: "reopen", nodeId: command.nodeId });
       boards.commitEdit(boardId, { type: "editNode", nodeId: command.nodeId, fields: { forceAssemble: true } });
     }
-    runs.enqueue(boardId, command.nodeId);
+    if (command.continue === true && canResume(boards.stateOf(boardId).graph.nodes[command.nodeId])) runs.resume(boardId, command.nodeId);
+    else runs.enqueue(boardId, command.nodeId);
     return { ok: true };
   },
   abort: ({ runs }, command) => (runs.abort(command.boardId!, command.nodeId), { ok: true }),
-  answerRequest: async ({ runs }, command) => (await runs.answerRequest(command.boardId!, command.requestId, command.answer), { ok: true }),
+  answerRequest: async ({ runs }, command) => (await runs.answerRequest(command.boardId!, command.requestId, command.answer, typeof command.message === "string" ? command.message : undefined), { ok: true }),
   saveNow: ({ boards }, command) => boards.saveNow(command.boardId!),
   createProject: createProjectHandler,
   renameProject: renameProjectHandler,
@@ -435,6 +481,14 @@ export const commandHandlers: Record<string, Handler> = {
   restoreBoard: ({ trash }, command) => (trash.restoreBoard(command.boardId!), { ok: true }),
   emptyTrash: ({ trash }) => (trash.emptyTrash(), { ok: true }),
   summarise: async ({ runs }, command) => (await runs.summarise(command.boardId!, command.nodeId), { ok: true }),
+  compactNode: async ({ runs }, command) => (await runs.compact(command.boardId!, command.nodeId), { ok: true }),
+  controlRun: async ({ runs }, command) => {
+    const text = typeof command.text === "string" ? command.text.trim() : "";
+    if (command.control === "followUp" && text) await runs.control(command.boardId!, command.nodeId, { type: "followUp", text });
+    else if (command.control === "background") await runs.control(command.boardId!, command.nodeId, { type: "background" });
+    else throw new RefusedError("Unknown run action");
+    return { ok: true };
+  },
   clearSummary: (context, command) => editHandler(context, { type: "setSummary", boardId: command.boardId, nodeId: command.nodeId }),
   importBoard: importBoardHandler,
 };

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { installCommandFor, isApiRuntime, needsKey, runtimeInfo, type Catalog, type CredentialStatus, type RuntimeId } from "@branchboard/core";
-import { fetchAbout, fetchRuntimeCatalog } from "../api";
+import { installCommandFor, isApiRuntime, needsKey, runtimeInfo, type Catalog, type CredentialStatus, type EngineSetup, type RuntimeId } from "@branchboard/core";
+import { fetchAbout, fetchCredentialStatus, fetchRuntimeCatalog } from "../api";
 import { useBoard } from "../store";
 
 const copy = (text: string) => void navigator.clipboard.writeText(text).then(() => useBoard.getState().notify("Copied"));
@@ -9,12 +9,15 @@ export const useRuntimeCatalog = (runtimeId: RuntimeId) => {
   const [catalog, setCatalog] = useState<Catalog>();
   const [error, setError] = useState<string>();
   const refresh = useCallback(
-    async (isFresh = false) => {
+    async (isFresh = false): Promise<Catalog | undefined> => {
       try {
-        setCatalog(await fetchRuntimeCatalog(runtimeId, isFresh));
+        const loaded = await fetchRuntimeCatalog(runtimeId, isFresh);
+        setCatalog(loaded);
         setError(undefined);
+        return loaded;
       } catch (failure) {
         setError(failure instanceof Error ? failure.message : String(failure));
+        return undefined;
       }
     },
     [runtimeId],
@@ -26,9 +29,49 @@ export const useRuntimeCatalog = (runtimeId: RuntimeId) => {
   return { catalog, error, refresh };
 };
 
-const dateOf = (timestamp: number | undefined): string => (timestamp ? new Date(timestamp).toLocaleDateString() : "earlier");
+type RefreshCatalog = (isFresh?: boolean) => Promise<Catalog | undefined>;
 
-export const CredentialForm = ({ runtimeId, status, onChanged }: { runtimeId: RuntimeId; status?: CredentialStatus; onChanged: () => void }) => {
+const ENGINE_POLL_MS = 1500;
+
+export const setUpEngine = async (runtimeId: RuntimeId, refresh: RefreshCatalog): Promise<boolean> => {
+  await useBoard.getState().send({ type: "setUpRuntime", runtimeId });
+  for (;;) {
+    const phase = (await refresh(true))?.engine?.phase;
+    if (phase === "failed" || phase === undefined) return false;
+    if (phase !== "installing") return true;
+    await new Promise((resolve) => setTimeout(resolve, ENGINE_POLL_MS));
+  }
+};
+
+export const EngineNotice = ({ engine }: { engine?: EngineSetup }) => {
+  if (engine?.phase === "ready") return null;
+  return (
+    <div className="muted">
+      Saving a key or connecting a project downloads the OpenCode engine{engine?.version ? ` v${engine.version}` : ""} (@opencode/cli, MIT licence) into the Branchboard data folder.
+    </div>
+  );
+};
+
+export const EngineStatus = ({ runtimeId, engine, refresh }: { runtimeId: RuntimeId; engine?: EngineSetup; refresh: RefreshCatalog }) => {
+  const isInstalling = engine?.phase === "installing";
+  useEffect(() => {
+    if (!isInstalling) return;
+    const timer = setInterval(() => void refresh(true), ENGINE_POLL_MS * 2);
+    return () => clearInterval(timer);
+  }, [isInstalling, refresh]);
+  if (!engine || (engine.phase !== "installing" && engine.phase !== "failed")) return null;
+  return (
+    <div className="setup-step">
+      <div className={engine.phase === "failed" ? "part-error" : "muted"}>{engine.message ?? "Downloading the engine."}</div>
+      {engine.phase === "failed" && <div className="row"><button onClick={() => void setUpEngine(runtimeId, refresh)}>Try again</button></div>}
+    </div>
+  );
+};
+
+const dateOf =(timestamp: number | undefined): string => (timestamp ? new Date(timestamp).toLocaleDateString() : "earlier");
+
+export const CredentialForm = ({ runtimeId, catalog, refresh, isNoticeShown = false }: { runtimeId: RuntimeId; catalog?: Catalog; refresh: RefreshCatalog; isNoticeShown?: boolean }) => {
+  const status: CredentialStatus | undefined = catalog?.credential;
   const info = runtimeInfo(runtimeId);
   const credential = info.credential!;
   const [key, setKey] = useState("");
@@ -48,17 +91,25 @@ export const CredentialForm = ({ runtimeId, status, onChanged }: { runtimeId: Ru
     setKey("");
     setIsReplacing(false);
     setTestResult(undefined);
-    if (saved) onChanged();
+    if (saved) void refresh(true);
   };
   const remove = async () => {
     if (!confirm(`Remove the saved ${info.label} key?`)) return;
-    if (await send({ type: "setCredential", key: null })) onChanged();
+    if (await send({ type: "setCredential", key: null })) void refresh(true);
   };
-  const test = async () => setTestResult(await send({ type: "testCredential" }));
+  const test = async () => {
+    setIsBusy(true);
+    const isEngineReady = await setUpEngine(runtimeId, refresh);
+    setIsBusy(false);
+    if (isEngineReady) setTestResult(await send({ type: "testCredential" }));
+  };
   const showField = !status?.saved || isReplacing;
   const isKeyOptional = !needsKey(runtimeId, baseUrl);
+  const isAddressChanged = Boolean(credential.baseUrlEditable) && baseUrl.replace(/\/+$/, "") !== (status?.baseUrl ?? credential.defaultBaseUrl).replace(/\/+$/, "");
   return (
     <div className="credential-form">
+      {(isNoticeShown || key.trim() || isAddressChanged) && <EngineNotice engine={catalog?.engine} />}
+      <EngineStatus runtimeId={runtimeId} engine={catalog?.engine} refresh={refresh} />
       {credential.baseUrlEditable && (
         <label>
           Address
@@ -66,7 +117,7 @@ export const CredentialForm = ({ runtimeId, status, onChanged }: { runtimeId: Ru
         </label>
       )}
       {credential.baseUrlEditable && baseUrl.replace(/\/+$/, "") !== (status?.baseUrl ?? credential.defaultBaseUrl).replace(/\/+$/, "") && status?.saved && <div className="muted">Changing the address removes the saved key unless you enter it again.</div>}
-      {status?.saved && !isReplacing && <div className="muted">Key saved on {dateOf(status.updatedAt)}. Replace or remove it to change it.</div>}
+      {status?.saved && !isReplacing && <div className="muted">Key saved on {dateOf(status.updatedAt)}.</div>}
       {showField && (
         <label>
           {isKeyOptional ? "API key (optional for this address)" : "API key"}
@@ -91,6 +142,50 @@ export const CredentialForm = ({ runtimeId, status, onChanged }: { runtimeId: Ru
   );
 };
 
+export const ServerAddressForm = ({ runtimeId }: { runtimeId: RuntimeId }) => {
+  const [status, setStatus] = useState<CredentialStatus>();
+  const [address, setAddress] = useState("");
+  const [password, setPassword] = useState("");
+  const [isBusy, setIsBusy] = useState(false);
+  const [connection, setConnection] = useState<{ ok: boolean; detail: string }>();
+  const loadStatus = useCallback(() => fetchCredentialStatus(runtimeId).then(setStatus, () => undefined), [runtimeId]);
+  useEffect(() => void loadStatus(), [loadStatus]);
+  useEffect(() => setAddress(status?.baseUrl ?? ""), [status?.baseUrl]);
+  const check = async () => {
+    setIsBusy(true);
+    const catalog = await fetchRuntimeCatalog(runtimeId, true).catch((failure) => ({ health: { ok: false, detail: failure instanceof Error ? failure.message : String(failure) } }));
+    setIsBusy(false);
+    setConnection(catalog.health);
+  };
+  const save = async (command: Record<string, unknown>) => {
+    setIsBusy(true);
+    const saved = await useBoard.getState().send<any>({ runtimeId, type: "setCredential", ...command });
+    setIsBusy(false);
+    setPassword("");
+    setConnection(undefined);
+    if (saved) await loadStatus();
+  };
+  return (
+    <div className="credential-form">
+      <div className="muted">Address of a running OpenCode 2 server, for example one started with “opencode service start”. The password is in service.json in the OpenCode configuration folder. Leave the address empty to use a server started by Branchboard.</div>
+      <label>
+        Server address
+        <input value={address} spellCheck={false} onChange={(event) => setAddress(event.target.value)} placeholder="http://127.0.0.1:4096" />
+      </label>
+      <label>
+        Server password
+        <input type="password" autoComplete="off" spellCheck={false} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={status?.saved ? "Saved. Type to replace it" : "Password of the server"} />
+      </label>
+      <div className="row">
+        <button className="primary" disabled={isBusy} onClick={() => void save({ key: password.trim() || undefined, baseUrl: address.trim() })}>Save</button>
+        {status?.baseUrl && <button disabled={isBusy} onClick={() => void save({ key: null, baseUrl: "" })}>Disconnect</button>}
+        {status?.baseUrl && <button disabled={isBusy} onClick={() => void check()}>Check connection</button>}
+      </div>
+      {connection && <div className={connection.ok ? "muted" : "part-error"}>{connection.ok ? "✓ " : ""}{connection.detail}</div>}
+    </div>
+  );
+};
+
 export const CliSetup = ({ runtimeId, onCheckAgain }: { runtimeId: RuntimeId; onCheckAgain: () => void }) => {
   const info = runtimeInfo(runtimeId);
   const [platform, setPlatform] = useState("linux");
@@ -108,6 +203,7 @@ export const CliSetup = ({ runtimeId, onCheckAgain }: { runtimeId: RuntimeId; on
         <div className="setup-step">
           <div>{install ? "2." : "1."} Sign in once by running:</div>
           <div className="row"><code>{info.setup.signIn}</code><button onClick={() => copy(info.setup!.signIn!)}>Copy</button></div>
+          {info.setup.signInNote && <div className="muted">{info.setup.signInNote}</div>}
         </div>
       )}
       {info.pathVariable && <div className="muted">If it is installed but not found, set <code>{info.pathVariable}</code> to its full path and restart Branchboard.</div>}
@@ -118,6 +214,3 @@ export const CliSetup = ({ runtimeId, onCheckAgain }: { runtimeId: RuntimeId; on
     </div>
   );
 };
-
-export const SetupGuide = ({ runtimeId, catalog, onCheckAgain }: { runtimeId: RuntimeId; catalog?: Catalog; onCheckAgain: () => void }) =>
-  isApiRuntime(runtimeId) ? <CredentialForm runtimeId={runtimeId} status={catalog?.credential} onChanged={onCheckAgain} /> : <CliSetup runtimeId={runtimeId} onCheckAgain={onCheckAgain} />;

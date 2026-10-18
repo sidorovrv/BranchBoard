@@ -34,7 +34,7 @@ describe("code file helpers", () => {
 
 describe("file manager launch", () => {
   it("selects the file in Explorer and Finder, opens the folder elsewhere", () => {
-    expect(fileManagerLaunchOf("C:\\repo\\a.ts", "win32")).toEqual({ command: "explorer.exe", args: ["/select,C:\\repo\\a.ts"] });
+    expect(fileManagerLaunchOf("C:/my repo/a.ts", "win32")).toEqual({ command: "explorer.exe", args: ["/select,\"C:\\my repo\\a.ts\""], isVerbatim: true });
     expect(fileManagerLaunchOf("/repo/a.ts", "darwin")).toEqual({ command: "open", args: ["-R", "/repo/a.ts"] });
     expect(fileManagerLaunchOf("/repo/a.ts", "linux")).toEqual({ command: "xdg-open", args: ["/repo"] });
   });

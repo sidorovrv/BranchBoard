@@ -17,18 +17,29 @@ export const sensitiveMentionsOf = (prompt: string, workspacePath: string): stri
     return path !== undefined && (isSensitivePath(token) || isSensitivePath(realpathSync(path)));
   });
 
+export interface MentionTargets {
+  agents: string[];
+  subagents?: string[];
+  skills?: string[];
+}
+
 export interface ResolvedMentions {
   files: RunFile[];
   agent?: string;
+  subagents: string[];
+  skills: string[];
 }
 
-export const resolveMentions = (prompt: string, workspacePath: string, agents: string[]): ResolvedMentions => {
+export const resolveMentions = (prompt: string, workspacePath: string, targets: MentionTargets): ResolvedMentions => {
   const tokens = mentionTokensOf(prompt);
-  const agent = tokens.find((token) => agents.includes(token));
+  const agent = tokens.find((token) => targets.agents.includes(token));
+  const subagents = tokens.filter((token) => targets.subagents?.includes(token));
+  const skills = tokens.filter((token) => targets.skills?.includes(token));
+  const named = new Set([agent, ...subagents, ...skills]);
   const files = tokens
-    .filter((token) => token !== agent)
+    .filter((token) => !named.has(token))
     .map((token) => fileOfMention(workspacePath, token))
     .filter((file): file is RunFile => file !== undefined);
   const unique = new Map(files.map((file) => [file.path, file]));
-  return { files: [...unique.values()], agent };
+  return { files: [...unique.values()], agent, subagents: [...new Set(subagents)], skills: [...new Set(skills)] };
 };

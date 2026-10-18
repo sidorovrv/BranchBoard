@@ -1,4 +1,5 @@
 import { liveNodes } from "@branchboard/core";
+import { takeBoardOpen } from "./boardOpenTiming";
 import { useSettings } from "./settings";
 import { useBoard } from "./store";
 
@@ -109,6 +110,7 @@ export const startPerfMonitor = (): (() => void) => {
       heapUsedMb: heapBytes === undefined ? null : roundTo(heapBytes / BYTES_PER_MEGABYTE),
       domElements: document.getElementsByTagName("*").length,
       animations: runningAnimations(),
+      boardOpen: takeBoardOpen(),
       ...boardSnapshot(),
     });
   }, SAMPLE_MS);

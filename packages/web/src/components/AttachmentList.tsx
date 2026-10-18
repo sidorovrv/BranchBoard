@@ -2,7 +2,7 @@ import { isTextAttachment, type Attachment, type GraphNode } from "@branchboard/
 import { attachmentUrl } from "../api";
 import { attachToNode, detachFromNode, fileTypeLabel, formatBytes, isDisplayableImage, pickFiles } from "../attachments";
 import { ExtractAttachmentButton } from "./CodeNode";
-import { Icon } from "./Icons";
+import { Icon } from "../kit/Icons";
 import { PreviewableImage } from "./ImagePreview";
 
 const RemoveButton = ({ node, attachment }: { node: GraphNode; attachment: Attachment }) => (

@@ -335,6 +335,25 @@ describe("the exit demo", () => {
     expect((await textOf(boardId, ids.S)).length).toBeGreaterThan(0);
   });
 
+  it("refuses a run action that the runtime or the command does not support", async () => {
+    const slow = (await command({ type: "reply", boardId, prompt: `/slow ${"count ".repeat(100)}` })).json.nodeId;
+    await waitFor(async () => (await textOf(boardId, slow)).length > 10);
+    expect((await command({ type: "controlRun", boardId, nodeId: slow, control: "followUp", text: "more" })).status).toBe(409);
+    expect((await command({ type: "controlRun", boardId, nodeId: slow, control: "unknown" })).status).toBe(409);
+    await command({ type: "abort", boardId, nodeId: slow });
+    await waitForStatus(boardId, slow, "done");
+  });
+
+  it("stores board environment variables, refuses bad names and leaves them out of exports", async () => {
+    expect((await command({ type: "updateBoard", boardId, environment: "1BAD=x" })).status).toBe(409);
+    expect((await command({ type: "updateBoard", boardId, environment: "PATH=/tmp" })).status).toBe(409);
+    await command({ type: "updateBoard", boardId, environment: "API_TOKEN=abc\n# note\nMODE=dev" });
+    expect(((await view(boardId)).board as { environment?: unknown }).environment).toEqual({ API_TOKEN: "abc", MODE: "dev" });
+    expect((await request(`/api/boards/${boardId}/export`)).text).not.toContain("API_TOKEN");
+    await command({ type: "updateBoard", boardId, environment: "" });
+    expect(((await view(boardId)).board as { environment?: unknown }).environment).toBeUndefined();
+  });
+
   it("a finished node's prompt cannot be edited", async () => {
     const response = await command({ type: "editNode", boardId, nodeId: ids.A, fields: { prompt: "rewrite history" } });
     expect(response.status).toBe(409);

@@ -3,7 +3,6 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LimitsStore } from "../limits";
 import { createChannel } from "../run/channel";
-import type { Limiter } from "../run/limiter";
 import { RecoverableError, type RunScope } from "../run/types";
 import type { LooseNative } from "./commonEvents";
 
@@ -16,19 +15,20 @@ export interface LineSource<State> {
   endFailure(state: State): Promise<LooseNative | undefined>;
 }
 
-export interface StreamContext<Session> {
+export interface StreamContext<Session, State> {
   session: Session;
+  state: State;
   writeRunFile(name: string, content: string): string;
 }
 
 export interface StreamSpec<Handle, State extends { isFinished: boolean }, Session> {
-  limiter: Limiter;
   limits?: LimitsStore;
   temporaryDirectory: string;
   begin?(scope: RunScope, push: (native: LooseNative) => void): Session & { dispose(): void };
-  open(handle: Handle, input: string, scope: RunScope, context: StreamContext<Session>): LineSource<State> | Promise<LineSource<State>>;
-  createState(): State;
+  open(handle: Handle, input: string, scope: RunScope, context: StreamContext<Session, State>): LineSource<State> | Promise<LineSource<State>>;
+  createState(handle: Handle): State;
   translate(line: string, state: State): LooseNative[];
+  finish?(state: State): LooseNative[];
 }
 
 export const writePrivateFile = (directory: string, fileName: string, content: string): string => {
@@ -39,19 +39,17 @@ export const writePrivateFile = (directory: string, fileName: string, content: s
   return path;
 };
 
-const pump = async <State extends { isFinished: boolean }>(source: LineSource<State>, state: State, translate: (line: string, state: State) => LooseNative[], push: (native: LooseNative) => void, signal: AbortSignal) => {
-  for await (const line of source.lines) translate(line, state).forEach(push);
-  if (state.isFinished || signal.aborted) return;
+const pump = async <State extends { isFinished: boolean }>(source: LineSource<State>, state: State, spec: Pick<StreamSpec<unknown, State, unknown>, "translate" | "finish">, push: (native: LooseNative) => void, signal: AbortSignal) => {
+  for await (const line of source.lines) spec.translate(line, state).forEach(push);
+  if (signal.aborted) return;
+  spec.finish?.(state).forEach(push);
+  if (state.isFinished) return;
   const failure = await source.endFailure(state);
   if (failure) push(failure);
 };
 
 export const createStreamRuntime = <Handle, State extends { isFinished: boolean }, Session = object>(spec: StreamSpec<Handle, State, Session>) =>
   async function* execute(handle: Handle, input: string, scope: RunScope): AsyncGenerator<LooseNative> {
-    if (spec.limiter.isFull()) scope.setWaitingForSlot?.(true);
-    const release = await spec.limiter.acquire(scope.signal);
-    scope.setWaitingForSlot?.(false);
-    if (!release) return;
     const channel = createChannel<LooseNative>();
     const session = spec.begin?.(scope, channel.push);
     const runId = randomUUID();
@@ -66,9 +64,9 @@ export const createStreamRuntime = <Handle, State extends { isFinished: boolean 
         runFiles.push(path);
         return path;
       };
-      source = await spec.open(handle, input, scope, { session: session as Session, writeRunFile });
-      const state = spec.createState();
-      void pump(source, state, spec.translate, channel.push, scope.signal)
+      const state = spec.createState(handle);
+      source = await spec.open(handle, input, scope, { session: session as Session, state, writeRunFile });
+      void pump(source, state, spec, channel.push, scope.signal)
         .catch((error) => channel.push({ type: "failure", message: error instanceof Error ? error.message : String(error) }))
         .finally(channel.close);
       for await (const native of channel.iterator) {
@@ -83,6 +81,5 @@ export const createStreamRuntime = <Handle, State extends { isFinished: boolean 
       stop();
       session?.dispose();
       runFiles.forEach((path) => rmSync(path, { force: true }));
-      release();
     }
   };

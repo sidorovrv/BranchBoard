@@ -1,9 +1,10 @@
 import { pathToFileURL } from "node:url";
 import { decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, SESSION_GONE_MESSAGE, UNSET_CHOICE, type Catalog, type CatalogCommand, type CatalogModel, type PendingRequest, type RunEvent } from "@branchboard/core";
-import { approvalOpened, questionOpened, streamEventMap, subagentEventMap } from "./commonEvents";
+import { approvalOpened, questionOpened, streamEventMap, subagentEventMap, usageEvents, usageNative } from "./commonEvents";
 import { log } from "../log";
 import { locateOpencode } from "./opencodeLocator";
-import { createServerPool, isNotFound, serverSentEvents, splitModel, type OpencodeServer } from "./opencodeServer";
+import { generateThroughSession } from "../run/askOnce";
+import { createServerPool, isNotFound, opencodeSlots, serverSentEvents, splitModel, type OpencodeServer } from "./opencodeServer";
 import { pickSmallModel } from "./smallModel";
 import { RecoverableError, type EventMap, type NativeEvent, type RunScope, type RuntimeSteps } from "../run/types";
 
@@ -81,7 +82,7 @@ const totalUsageOf = (seen: SeenState): OpencodeNative => {
   const states = [seen, ...seen.children.values()];
   const messages = states.flatMap((state) => [...state.messageUsage.values()]);
   const sum = (pick: (message: MessageUsage) => number) => messages.reduce((total, message) => total + pick(message), 0);
-  return { type: "usage", inputTokens: sum((message) => message.input + message.cacheRead + message.cacheWrite), outputTokens: sum((message) => message.output), cacheReadTokens: sum((message) => message.cacheRead), cacheCreationTokens: sum((message) => message.cacheWrite), costUsd: sum((message) => message.cost) };
+  return usageNative({ inputTokens: sum((message) => message.input + message.cacheRead + message.cacheWrite), outputTokens: sum((message) => message.output), cacheReadTokens: sum((message) => message.cacheRead), cacheCreationTokens: sum((message) => message.cacheWrite), costUsd: sum((message) => message.cost) });
 };
 
 export const translateEvent = (raw: OpencodeNative, handle: Pick<OpencodeHandle, "sessionId">, seen: SeenState): OpencodeNative[] => {
@@ -150,7 +151,7 @@ async function* execute(handle: OpencodeHandle, input: string, scope: RunScope):
   scope.signal.addEventListener("abort", () => void call(server, directory, `/session/${sessionId}/abort`, { method: "POST" }).catch(() => undefined), { once: true });
   await call(server, directory, `/session/${sessionId}/prompt_async`, {
     method: "POST",
-    body: JSON.stringify({ agent: scope.agent, model: splitModel(scope.model), variant: isChosen(scope.effort) ? scope.effort : undefined, system: scope.systemNote, parts: [{ type: "text", text: input }, ...scope.files.map((file) => ({ type: "file", mime: file.mime, filename: file.name, url: pathToFileURL(file.path).href }))] }),
+    body: JSON.stringify({ agent: scope.agent, model: splitModel(scope.model), variant: isChosen(scope.effort) ? scope.effort : undefined, system: [scope.systemNote, scope.contextNote].filter(Boolean).join("\n\n") || undefined, parts: [{ type: "text", text: input }, ...scope.files.map((file) => ({ type: "file", mime: file.mime, filename: file.name, url: pathToFileURL(file.path).href }))] }),
   });
   try {
     for await (const raw of serverSentEvents<OpencodeNative>(stream, scope.signal)) {
@@ -174,10 +175,13 @@ async function* execute(handle: OpencodeHandle, input: string, scope: RunScope):
 export const opencodeEventMap: EventMap<OpencodeNative> = {
   ...streamEventMap,
   ...subagentEventMap(() => opencodeEventMap),
-  usage: (native) => [{ type: "usage", usage: { inputTokens: native.inputTokens, outputTokens: native.outputTokens, cacheReadTokens: native.cacheReadTokens, cacheCreationTokens: native.cacheCreationTokens, costUsd: native.costUsd } }],
+  usage: usageEvents,
   permission: (native) => approvalOpened({ id: `permission:${native.remoteId}`, remoteId: native.remoteId, title: native.title, detail: native.detail }),
   question: (native) => questionOpened({ id: `question:${native.remoteId}`, remoteId: native.remoteId, questions: native.questions }),
-  failure: (native) => [{ type: "error", message: native.message }],
+  retry: (native) => [{ type: "retry", attempt: native.attempt, at: native.at, reason: native.reason }],
+  compacted: () => [{ type: "context.compacted" }],
+  "retry-restart": (native) => [{ type: "retry-restart", partKeys: native.partKeys }],
+  failure: (native) => [{ type: "error", message: native.message, recovery: native.recovery }],
   idle: () => [{ type: "done" }],
 };
 
@@ -201,7 +205,7 @@ const catalog = async (workspacePath: string): Promise<Catalog> => {
       Object.values<any>(provider.models ?? {}).map((model) => ({ id: `${provider.id}/${model.id}`, name: model.name ?? model.id, provider: provider.name ?? provider.id, contextWindow: model.limit?.context, efforts: effortsOf(model) })),
     );
     const primaryAgents = (agents as any[]).filter((agent) => agent.mode !== "subagent" && !agent.hidden).map((agent) => agent.name as string);
-    return { agents: primaryAgents, models, commands, health: { ok: true, detail: "connected to opencode serve" } };
+    return { agents: primaryAgents, models, commands, meters: ["cost"], health: { ok: true, detail: "connected to opencode serve" } };
   } catch (error) {
     log.error("opencode", `Catalog failed for ${workspacePath}`, error);
     return { agents: [], models: [], health: { ok: false, detail: error instanceof Error ? error.message : String(error) } };
@@ -233,6 +237,11 @@ export const opencode1Runtime: RuntimeSteps<OpencodeNative, OpencodeHandle> = {
   id: "opencode",
   editsFiles: true,
   canSuggestTitles: true,
+  slots: opencodeSlots,
+  generateText: generateThroughSession(() => opencode1Runtime),
+  dropSession: async (reference, workspacePath) => {
+    await call(await serverFor(workspacePath), workspacePath, `/session/${reference.sessionId}`, { method: "DELETE" });
+  },
   titleModel: async (scope) => {
     const server = await serverFor(scope.workspacePath);
     const config = await callJson(server, scope.workspacePath, "/config");

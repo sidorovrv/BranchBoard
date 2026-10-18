@@ -52,7 +52,7 @@ export const useSeenResults = create<SeenResultsStore>((set, get) => ({
 }));
 
 export const isUnseenCompletion = (completion: { status: string; isStopped: boolean; completedAt: number | undefined }, seenAt: number | undefined): boolean =>
-  completion.status === "done" && !completion.isStopped && completion.completedAt !== undefined && completion.completedAt > BASELINE && completion.completedAt > (seenAt ?? 0);
+  (completion.status === "error" || (completion.status === "done" && !completion.isStopped)) && completion.completedAt !== undefined && completion.completedAt > BASELINE && completion.completedAt > (seenAt ?? 0);
 
 export const isUnseenResult = (node: GraphNode, seenAt: number | undefined): boolean =>
   node.kind === "turn" && isUnseenCompletion({ status: node.status, isStopped: node.stopped === true, completedAt: node.completedAt }, seenAt);

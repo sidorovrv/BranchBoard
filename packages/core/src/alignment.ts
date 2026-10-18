@@ -64,13 +64,22 @@ export interface ResizeSnapResult {
   guides: Guide[];
 }
 
-export const snapResizedEdges = (box: Box, axes: { horizontal: boolean; vertical: boolean }, others: Box[], threshold: number): ResizeSnapResult => {
+export type ResizeDirection = { x: -1 | 0 | 1; y: -1 | 0 | 1 };
+
+const draggedEdge = (start: number, size: number, direction: number): number[] => (direction === 1 ? [start + size] : direction === -1 ? [start] : []);
+
+export const snapResizedEdges = (box: Box, direction: ResizeDirection, others: Box[], threshold: number): ResizeSnapResult => {
   if (others.length === 0) return { dw: 0, dh: 0, guides: [] };
-  const horizontal = axes.horizontal ? nearestOffset([box.x + box.w], others.flatMap(xAnchorsOf), threshold) : undefined;
-  const vertical = axes.vertical ? nearestOffset([box.y + box.h], others.flatMap(yAnchorsOf), threshold) : undefined;
-  const dw = horizontal?.offset ?? 0;
-  const dh = vertical?.offset ?? 0;
-  const snapped: Box = { ...box, w: box.w + dw, h: box.h + dh };
+  const horizontal = nearestOffset(draggedEdge(box.x, box.w, direction.x), others.flatMap(xAnchorsOf), threshold);
+  const vertical = nearestOffset(draggedEdge(box.y, box.h, direction.y), others.flatMap(yAnchorsOf), threshold);
+  const dw = (horizontal?.offset ?? 0) * direction.x;
+  const dh = (vertical?.offset ?? 0) * direction.y;
+  const snapped: Box = {
+    x: direction.x === -1 ? box.x - dw : box.x,
+    y: direction.y === -1 ? box.y - dh : box.y,
+    w: box.w + dw,
+    h: box.h + dh,
+  };
   return {
     dw,
     dh,

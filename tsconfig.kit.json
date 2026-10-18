@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": true,
+    "paths": { "@branchboard/core": ["./packages/core/src/kit/index.ts"] }
+  },
+  "include": ["packages/core/src/kit", "packages/web/src/kit"]
+}

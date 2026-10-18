@@ -7,6 +7,7 @@ import { runtimeSummary } from "../packages/cli/src/run";
 import { createApp } from "../packages/server/src/app";
 import { CHANNEL_URL, TAGS_URL, createRemoteChannel, parseChannel, parseTags } from "../packages/server/src/channel";
 import { dataDirectoryId } from "../packages/server/src/dataDirectory";
+import { DEFAULT_ENGINE_VERSION } from "../packages/server/src/engine/locator";
 import { createClaudeRuntime } from "../packages/server/src/runtimes/claude";
 import { pickFreePort, readLastPort, resolvePort, writeLastPort, type PortState } from "../packages/cli/src/ports";
 import { parseArguments } from "../packages/cli/src/args";
@@ -65,8 +66,8 @@ describe("choosing a port", () => {
 
 describe("runtime registry and start summary", () => {
   it("lists every runtime with a kind, and API runtimes with an address policy", () => {
-    expect(RUNTIME_IDS.sort()).toEqual(["anthropic", "claude", "fake", "openai", "opencode", "opencode2"]);
-    expect(RUNTIMES.anthropic.credential.baseUrlEditable).toBe(false);
+    expect(RUNTIME_IDS.sort()).toEqual(["anthropic", "claude", "codex", "fake", "openai", "opencode", "opencode2"]);
+    expect(RUNTIMES.anthropic.credential.baseUrlEditable).toBe(true);
     expect(RUNTIMES.openai.credential.baseUrlEditable).toBe(true);
     expect(isApiRuntime("openai")).toBe(true);
     expect(isApiRuntime("claude")).toBe(false);
@@ -80,6 +81,11 @@ describe("runtime registry and start summary", () => {
     expect(summary[1]).toContain("BRANCHBOARD_CLAUDE_PATH");
     expect(installCommandFor("claude", "darwin")).toBe("npm install -g @anthropic-ai/claude-code");
     expect(installCommandFor("anthropic", "linux")).toBeUndefined();
+  });
+
+  it("prints the codex install and sign-in lines", () => {
+    const [codex] = runtimeSummary("linux", { codex: () => ({}) });
+    expect(codex).toBe("ChatGPT subscription: not found. Install it with: npm install -g @openai/codex. Then sign in once by running: codex login. More: https://developers.openai.com/codex (or set BRANCHBOARD_CODEX_PATH to its full path).");
   });
 });
 
@@ -105,6 +111,11 @@ describe("update channel", () => {
     expect(parseTags(JSON.parse(tagsText))).toEqual({ latest: "0.3.0" });
     expect(parseTags({ latest: "soon" })).toEqual({});
     expect(parseChannel("nonsense")).toEqual({ tags: {}, minimumVersion: undefined, claudeModels: [] });
+  });
+
+  it("pins the engine version the server falls back to", () => {
+    const published = parseChannel(JSON.parse(readFileSync(join(import.meta.dirname, "..", "channel.json"), "utf8")));
+    expect(published.engine?.version).toBe(DEFAULT_ENGINE_VERSION);
   });
 
   it("compares versions, pre-releases included", () => {

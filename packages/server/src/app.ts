@@ -6,11 +6,13 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { WebSocketServer, type WebSocket } from "ws";
 import { homedir } from "node:os";
-import { describeContext, embedFiles, encoders, isSensitivePath, redactSecrets, SENSITIVE_COMMANDS, summariseCommand, updateFor, isNewerVersion, type AboutInfo, type Id } from "@branchboard/core";
+import { describeContext, embedFiles, encoders, hasCredential, isRuntimeId, isSensitivePath, redactSecrets, SENSITIVE_COMMANDS, summariseCommand, updateFor, isNewerVersion, type AboutInfo, type Id } from "@branchboard/core";
 import { createAttachmentStore, MAX_ATTACHMENT_BYTES } from "./attachments";
 import { BODY_CAPS, commandCapOf, readCappedBody } from "./bodies";
 import { createCodeFileSync } from "./codeFileSync";
 import { createBoardService, RefusedError, SensitiveFilesError } from "./boards";
+import { createTelemetry, type PostPayload } from "./telemetry";
+import { createUsage } from "./usage";
 import { dispatchCommand, type CommandContext } from "./commands";
 import { openRepository } from "./db";
 import { pickPath } from "./folderPicker";
@@ -27,13 +29,15 @@ import { createCostStore } from "./costs";
 import { createLimitsStore } from "./limits";
 import { createClaudeRuntime } from "./runtimes/claude";
 import { createApprovalBroker, type ApprovalBroker } from "./runtimes/claudeApprovals";
+import { createCodexRuntime } from "./runtimes/codex";
 import { opencodeRuntime } from "./runtimes/opencodeAuto";
 import { opencode2Runtime } from "./runtimes/opencode2";
+import { provideServerAddress } from "./runtimes/opencodeServer";
 import { createCapabilityStore } from "./capabilities";
 import { createCredentialStore } from "./credentials";
-import { createApiRuntime } from "./runtimes/apiRuntime";
-import { anthropicProvider } from "./runtimes/anthropicApi";
-import { openaiProvider } from "./runtimes/openaiApi";
+import { createEngine } from "./engine/flavor";
+import { createEngineInstaller } from "./engine/install";
+import { engineRuntime } from "./engine/runtime";
 import { createRemoteChannel } from "./channel";
 import { dataDirectoryId } from "./dataDirectory";
 import { VERSION, installedVersionOf } from "./version";
@@ -47,6 +51,8 @@ export interface AppOptions {
   version?: string;
   runtimes?: Runtimes;
   approvals?: ApprovalBroker;
+  telemetryPost?: PostPayload;
+  clock?: () => number;
 }
 
 const errorStatus = (error: unknown): 409 | 500 => (error instanceof RefusedError || error instanceof SyntaxError ? 409 : 500);
@@ -55,39 +61,47 @@ export const createApp = (options: AppOptions) => {
   const currentVersion = options.version ?? VERSION;
   const repository = openRepository(options.databasePath);
   const hub = createHub();
-  const boards = createBoardService(repository, hub);
-  const approvals = options.approvals ?? createApprovalBroker();
   const limitsDirectory = dirname(options.databasePath);
+  const usage = createUsage({ dataDirectory: limitsDirectory, clock: options.clock });
+  const boards = createBoardService(repository, hub, usage);
+  const approvals = options.approvals ?? createApprovalBroker();
   const limits = options.runtimes ? createLimitsStore() : createLimitsStore(join(limitsDirectory, "limits.json"), join(limitsDirectory, "limits-history.jsonl"));
   const channel = createRemoteChannel({ dataDirectory: limitsDirectory });
   const claudeRuntime = createClaudeRuntime({
     approvals,
-    limits,
+    limits: limits.of("claude"),
     serverUrl: `http://127.0.0.1:${options.security.port}`,
     extraModels: () => [...channel.contents().claudeModels, ...channel.seenModels()],
     noteModelSeen: channel.recordSeenModel,
   });
   const credentials = createCredentialStore(limitsDirectory);
+  provideServerAddress(credentials.serverAddress);
+  const engineInstaller = createEngineInstaller({ dataDirectory: limitsDirectory });
+  const engine = createEngine({ dataDirectory: limitsDirectory, installer: engineInstaller, channelContents: channel.contents, credentials });
   const runtimes: Runtimes = options.runtimes ?? {
     fake: fakeRuntime,
     opencode: opencodeRuntime,
     opencode2: opencode2Runtime,
     claude: claudeRuntime,
-    anthropic: createApiRuntime(anthropicProvider, { credentials }),
-    openai: createApiRuntime(openaiProvider, { credentials }),
+    codex: createCodexRuntime({ limits: limits.of("codex") }),
+    anthropic: engineRuntime("anthropic", { engine, installer: engineInstaller, credentials }),
+    openai: engineRuntime("openai", { engine, installer: engineInstaller, credentials }),
   };
   const attachments = createAttachmentStore(join(dirname(options.databasePath), "attachments"));
   const runLog = createRunLog(join(dirname(options.databasePath), "run-logs"));
   const perfLog = createPerfLog(join(dirname(options.databasePath), "perf"));
   const costs = createCostStore(options.runtimes ? undefined : join(limitsDirectory, "costs-history.jsonl"));
-  const runs = createRunService(boards, runtimes, attachments, runLog, costs);
+  const runs = createRunService(boards, runtimes, attachments, runLog, costs, usage);
   boards.recoverInterruptedRuns();
+  const telemetry = createTelemetry({ dataDirectory: limitsDirectory, usage, boards, version: currentVersion, isOffline: () => channel.status().isOffline, post: options.telemetryPost, clock: options.clock });
   const codeFileSync = createCodeFileSync(boards);
-  const trash = createTrashService(repository, boards, attachments);
+  const trash = createTrashService(repository, boards, attachments, (board, references) =>
+    references.forEach((reference) => void runtimes[board.mode]?.dropSession?.(reference, board.workspacePath).catch((error) => log.warn("trash", `Could not delete session ${reference.sessionId}`, error))),
+  );
   trash.purgeExpired();
   trash.sweepAttachments();
   const capabilities = createCapabilityStore();
-  const context: CommandContext = { boards, runs, runtimes, attachments, trash, capabilities, credentials, dataDirectory: limitsDirectory, databasePath: options.databasePath };
+  const context: CommandContext = { boards, runs, runtimes, attachments, trash, capabilities, credentials, telemetry, usage, dataDirectory: limitsDirectory, databasePath: options.databasePath };
   const redactionContext = () => ({ secrets: [...(options.security.accessToken ? [options.security.accessToken] : []), ...credentials.secretValues()], homeDirectory: homedir() });
 
   const app = new Hono();
@@ -169,9 +183,10 @@ export const createApp = (options: AppOptions) => {
     };
     return honoContext.json(about);
   });
-  app.get(INSTANCE_PATH, (honoContext) => honoContext.json({ app: "branchboard", dataDirId: dataDirectoryId(dirname(options.databasePath)) }));
+  app.get("/api/telemetry", async (honoContext) => honoContext.json(await telemetry.overview()));
+  app.get(INSTANCE_PATH,(honoContext) => honoContext.json({ app: "branchboard", dataDirId: dataDirectoryId(dirname(options.databasePath)) }));
   app.get("/api/boards", (honoContext) => honoContext.json(boards.listBoards()));
-  app.get("/api/limits", (honoContext) => honoContext.json(limits.current() ?? null));
+  app.get("/api/limits", (honoContext) => honoContext.json(limits.current(honoContext.req.query("runtime") ?? "claude") ?? null));
   app.get("/api/costs", (honoContext) => honoContext.json(costs.lastHour()));
   app.get("/api/runs",(honoContext) => honoContext.json(runs.listRuns()));
   app.get("/api/runs/finished", (honoContext) => honoContext.json(runs.listFinishedRuns()));
@@ -235,7 +250,8 @@ export const createApp = (options: AppOptions) => {
         const runtime = runtimes[mode];
         if (!runtime) throw new RefusedError(`Unknown runtime ${mode}`);
         const [catalog, diagnostics] = await Promise.all([runs.catalogOf(mode, workspacePath, isFresh), runtime.diagnostics?.(workspacePath).catch(() => ({}))]);
-        return { id: mode, workspacePath, isOk: catalog?.health.ok ?? false, detail: catalog?.health.detail ?? "The runtime did not answer", credential: catalog?.credential, ...diagnostics };
+        const processSlots = runtime.slots && { active: runtime.slots.activeCount(), limit: runtime.slots.limit, waiting: runtime.slots.waitingCount() };
+        return { id: mode, workspacePath, isOk: catalog?.health.ok ?? false, detail: catalog?.health.detail ?? "The runtime did not answer", credential: catalog?.credential, processSlots, ...diagnostics };
       }),
     );
     return { runtimes: entries, logFile: currentLogFile() ?? null, version: currentVersion, dataDirectory: limitsDirectory };
@@ -274,10 +290,31 @@ export const createApp = (options: AppOptions) => {
     const runtime = runtimes[mode];
     if (!runtime) throw new RefusedError(`Unknown runtime ${mode}`);
     if (honoContext.req.query("fresh") === "1") {
-      runtime.forgetCaches?.();
+      await runtime.forgetCaches?.();
       runs.forgetCatalogs();
     }
     return honoContext.json(await runtime.catalog(workspaceOf((name) => honoContext.req.query(name))));
+  });
+  app.get("/api/runtime/credential", (honoContext) => {
+    const mode = honoContext.req.query("mode") ?? "";
+    if (!isRuntimeId(mode) || !hasCredential(mode)) throw new RefusedError(`The ${mode} runtime has no saved credential`);
+    return honoContext.json(credentials.status(mode));
+  });
+  const panelsOf = (honoContext: { req: { query(name: string): string | undefined } }) => {
+    const mode = (honoContext.req.query("mode") ?? "fake") as keyof Runtimes;
+    const runtime = runtimes[mode];
+    if (!runtime?.panels || !runtime.panelAction) throw new RefusedError(`The ${mode} runtime shows no details`);
+    return { runtime: { panels: runtime.panels, panelAction: runtime.panelAction }, workspacePath: workspaceOf((name) => honoContext.req.query(name)) };
+  };
+  app.get("/api/runtime/panels", async (honoContext) => {
+    const { runtime, workspacePath } = panelsOf(honoContext);
+    return honoContext.json({ panels: await runtime.panels(workspacePath) });
+  });
+  app.post("/api/runtime/panels/:panel/:row/:action", async (honoContext) => {
+    const { runtime, workspacePath } = panelsOf(honoContext);
+    const { panel, row, action } = honoContext.req.param();
+    await runtime.panelAction(panel, row, action, workspacePath);
+    return honoContext.json({ ok: true });
   });
   app.get("/api/boards/:id/export", (honoContext) => {
     const plain = boards.exportDocument(honoContext.req.param("id"));
@@ -335,8 +372,9 @@ export const createApp = (options: AppOptions) => {
       return { activeRuns: runs.listRuns().length, socketClients: clients, socketMessages: messages };
     });
 
-  return { app, listen, boards, runs, trash, perfLog, channel, startPerfSampling, codeFileSync, close: () => {
+  return { app, listen, boards, runs, trash, perfLog, channel, telemetry, usage, startPerfSampling, codeFileSync, close: () => {
       openClients.forEach((client) => client.terminate());
+      void engine.pool.stopAll();
       boards.flushPartsAndStopSaving();
       repository.close();
     } };

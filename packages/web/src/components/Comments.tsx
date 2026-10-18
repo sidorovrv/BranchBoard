@@ -1,8 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { MAX_COMMENT_CHARS, newId, type GraphNode, type NodeComment } from "@branchboard/core";
+import { commentsPrompt, MAX_COMMENT_CHARS, newId, type GraphNode, type NodeComment } from "@branchboard/core";
+import { createAndFocus } from "../actions";
+import { keepNativeMenuOnTextFields } from "./ContextMenu";
 import { ANSWER_SELECTOR, commentsOfRoll, rangeOfComment } from "../commentAnchors";
 import { sendBoardCommand, useBoard } from "../store";
-import { Icon } from "./Icons";
+import { Icon } from "../kit/Icons";
 
 export interface CommentAnchor {
   nodeId: string;
@@ -23,9 +25,13 @@ interface CommentFieldProps {
   label: string;
   autoFocus?: boolean;
   onSubmit: (text: string) => void;
+  onAsk?: (text: string) => void;
 }
 
-export const CommentField = ({ initialText = "", label, autoFocus, onSubmit }: CommentFieldProps) => {
+export const askNow = ({ nodeId, quote }: Pick<CommentAnchor, "nodeId" | "quote">, text: string) =>
+  createAndFocus({ type: "reply", parentIds: [nodeId], prompt: commentsPrompt([{ quote, text }]) });
+
+export const CommentField = ({ initialText = "", label, autoFocus, onSubmit, onAsk }: CommentFieldProps) => {
   const [text, setText] = useState(initialText);
   const input = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
@@ -36,7 +42,7 @@ export const CommentField = ({ initialText = "", label, autoFocus, onSubmit }: C
   }, [text]);
   const submit = () => onSubmit(text.trim());
   return (
-    <div className="comment-field">
+    <div className={`comment-field${onAsk ? " has-actions" : ""}`}>
       <textarea
         ref={input}
         rows={1}
@@ -51,7 +57,14 @@ export const CommentField = ({ initialText = "", label, autoFocus, onSubmit }: C
           submit();
         }}
       />
-      <button className="comment-submit" onClick={submit} title={label} aria-label={label}><Icon name="comment" /></button>
+      {onAsk ? (
+        <div className="comment-actions">
+          <button onClick={submit} title={label}>{initialText ? "Save comment" : "Add to comments"}</button>
+          <button className="primary" disabled={text.trim() === ""} onClick={() => onAsk(text.trim())} title="Send the quote and the comment to a new node and run it now">Ask now</button>
+        </div>
+      ) : (
+        <button className="comment-submit" onClick={submit} title={label} aria-label={label}><Icon name="comment" /></button>
+      )}
     </div>
   );
 };
@@ -110,9 +123,9 @@ export const CommentMenu = () => {
   if (!open || !comment) return null;
   const close = () => setOpen(undefined);
   return (
-    <div className="context-menu comment-menu" style={{ left: open.x, top: open.y }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
+    <div className="context-menu comment-menu" style={{ left: open.x, top: open.y }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={keepNativeMenuOnTextFields}>
       <blockquote className="comment-quote">{comment.quote}</blockquote>
-      <CommentField key={comment.id} initialText={comment.text} label="Save the comment" autoFocus onSubmit={(text) => (close(), void changeComment(open.nodeId, comment.id, text))} />
+      <CommentField key={comment.id} initialText={comment.text} label="Save the comment" autoFocus onSubmit={(text) => (close(), void changeComment(open.nodeId, comment.id, text))} onAsk={(text) => (close(), void removeComment(open.nodeId, comment.id), void askNow({ nodeId: open.nodeId, quote: comment.quote }, text))} />
       <button className="danger" onClick={() => (close(), void removeComment(open.nodeId, comment.id))}>Delete comment</button>
     </div>
   );

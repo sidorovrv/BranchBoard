@@ -15,16 +15,33 @@ type RunReducer<E extends RunEvent> = (parts: Part[], nodeId: Id, roll: number, 
 
 const keepParts: RunReducer<RunEvent> = (parts) => parts;
 
+const withoutRetryNotice: RunReducer<RunEvent> = (parts, nodeId, roll) => parts.filter((part) => part.id !== partIdFor(nodeId, roll, RETRY_PART_KEY));
+
+const RETRY_PART_KEY = "retry";
+
 const runReducers: { [T in RunEvent["type"]]: RunReducer<Extract<RunEvent, { type: T }>> } = {
   "part.delta": (parts, nodeId, roll, event) =>
     upsertPart(
-      parts,
+      event.partType === "text" ? withoutRetryNotice(parts, nodeId, roll, event) : parts,
       nodeId,
       roll,
       event.partKey,
       () => ({ type: event.partType, text: event.text }),
       (part) => ({ ...part, text: part.text + event.text }),
     ),
+  retry: (parts, nodeId, roll, event) =>
+    upsertPart(
+      parts,
+      nodeId,
+      roll,
+      RETRY_PART_KEY,
+      () => ({ type: "retry", text: event.reason, meta: { attempt: event.attempt, at: event.at } }),
+      (part) => ({ ...part, text: event.reason, meta: { attempt: event.attempt, at: event.at } }),
+    ),
+  "retry-restart": (parts, nodeId, roll, event) => {
+    const dropped = new Set(event.partKeys.map((key) => partIdFor(nodeId, roll, key)));
+    return parts.filter((part) => !dropped.has(part.id));
+  },
   "tool.started": (parts, nodeId, roll, event) =>
     upsertPart(
       parts,
@@ -41,7 +58,7 @@ const runReducers: { [T in RunEvent["type"]]: RunReducer<Extract<RunEvent, { typ
         : part,
     ),
   error: (parts, nodeId, roll, event) =>
-    upsertPart(parts, nodeId, roll, `error:${parts.length}`, () => ({ type: "error", text: event.message, ...(event.recovery ? { meta: { recovery: event.recovery } } : {}) }), (part) => part),
+    upsertPart(withoutRetryNotice(parts, nodeId, roll, event), nodeId, roll, `error:${parts.length}`, () => ({ type: "error", text: event.message, ...(event.recovery ? { meta: { recovery: event.recovery } } : {}) }), (part) => part),
   todos: (parts, nodeId, roll, event) =>
     upsertPart(
       parts,
@@ -56,10 +73,17 @@ const runReducers: { [T in RunEvent["type"]]: RunReducer<Extract<RunEvent, { typ
   "subagent.event": keepParts,
   "request.opened": keepParts,
   usage: keepParts,
-  done: keepParts,
+  "context.compacted": keepParts,
+  done: withoutRetryNotice,
 };
 
-export const applyRunEvent = (parts: Part[], nodeId: Id, roll: number, event: RunEvent): Part[] =>
+export const withPartKeyPrefix = (event: RunEvent, prefix: string): RunEvent => {
+  if (event.type === "part.delta" || event.type === "tool.started" || event.type === "tool.done") return { ...event, partKey: `${prefix}${event.partKey}` };
+  if (event.type === "retry-restart") return { ...event, partKeys: event.partKeys.map((key) => `${prefix}${key}`) };
+  return event;
+};
+
+export const applyRunEvent =(parts: Part[], nodeId: Id, roll: number, event: RunEvent): Part[] =>
   (runReducers[event.type] as RunReducer<RunEvent>)(parts, nodeId, roll, event);
 
 const activeRollInView = (view: BoardView, nodeId: Id): number => {

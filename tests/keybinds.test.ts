@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { combinedPanDirection, isTextAttachment, panDirectionOf, bindingProblem, boundActionId, clickBindingOf, isDefaultBinding, isSidePointerButton, keyBindingOf, normaliseKeybinds, shortcutLabelOf, sharedBindingOwners } from "../packages/core/src";
+import { combinedPanDirection, isTextAttachment, panDirectionOf, bindingProblem, boundActionId, clickBindingOf, isDefaultBinding, isHoldActive, isSidePointerButton, keyBindingOf, normaliseKeybinds, shortcutLabelOf, sharedBindingOwners } from "../packages/core/src";
 
 const none = { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
 
@@ -70,6 +70,15 @@ describe("keybinds", () => {
     expect(boundActionId(keybinds, "Alt+N")).toBe("newChat");
     expect(boundActionId(keybinds, "Alt+Click")).toBe("focusNode");
     expect(boundActionId(keybinds, "Alt+Q")).toBeUndefined();
+  });
+
+  it("matches a held modifier combination exactly and keeps only valid hold bindings", () => {
+    const keybinds = normaliseKeybinds({ alignGuides: ["Ctrl+Shift", "Shift+Ctrl", "Alt+Click", "X"] });
+    expect(keybinds.alignGuides).toEqual(["Ctrl+Shift"]);
+    expect(isHoldActive(keybinds, "alignGuides", { ...none, ctrlKey: true, shiftKey: true })).toBe(true);
+    expect(isHoldActive(keybinds, "alignGuides", { ...none, ctrlKey: true })).toBe(false);
+    expect(isHoldActive(normaliseKeybinds({}), "alignGuides", { ...none, altKey: true })).toBe(true);
+    expect(isHoldActive(normaliseKeybinds({}), "alignGuides", none)).toBe(false);
   });
 
   it("refuses reserved and repeated bindings and reports bindings shared with other actions", () => {

@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newId, decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type Catalog, type CatalogCommand, type RunEvent } from "@branchboard/core";
+import { newId, decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type Catalog, type CatalogCommand } from "@branchboard/core";
 import { listWorkspaceCommands, withBundledCommands } from "./claudeCommands";
 import { CLAUDE_ALIAS_MODELS, KNOWN_CLAUDE_MODELS, TITLE_MODEL } from "./claudeModels";
 import { createLimitsStore, type LimitsStore } from "../limits";
 import { log } from "../log";
+import { ONE_SHOT_SYSTEM_PROMPTS } from "../run/askOnce";
 import { createLimiter, type Limiter } from "../run/limiter";
-import { RecoverableError, type RunScope, type RuntimeDiagnostics, type RuntimeSteps } from "../run/types";
+import { RecoverableError, type GenerateText, type RunScope, type RuntimeDiagnostics, type RuntimeSteps } from "../run/types";
+import { ALLOWED_ANSWERS, askApproval, createApprovalMemory, waitForReply, type ApprovalMemory } from "./approvalMemory";
 import { createApprovalBroker, type ApprovalBroker, type ApprovalCall, type ApprovalHandler, type ApprovalVerdict } from "./claudeApprovals";
 import { locateClaude, CLAUDE_PATH_VARIABLE } from "./claudeLocator";
 import {
@@ -22,6 +24,8 @@ import {
   createStreamState,
   DEFAULT_CHOICE,
   displayToolName,
+  finalEvents,
+  linesUntilFollowUpEnds,
   parseStreamLine,
   translateClaudeMessage,
   type StreamState,
@@ -35,7 +39,6 @@ export const MAX_CONCURRENT_PROCESSES = 2;
 export const TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 const SESSION_GONE_PATTERN = /no conversation found/i;
-const ALLOWED_ANSWERS = ["once", "always"];
 const MODELS = [{ id: DEFAULT_CHOICE, name: "CLI default" }, ...CLAUDE_ALIAS_MODELS, ...KNOWN_CLAUDE_MODELS];
 const EFFORTS = [DEFAULT_CHOICE, "low", "medium", "high", "xhigh", "max"];
 const DEFAULT_PERMISSION_MODE = "acceptEdits";
@@ -47,11 +50,8 @@ const PERMISSION_MODES = [
   { id: "dontAsk", name: "Don't ask" },
 ];
 
-const TITLE_SYSTEM_PROMPT = "You write very short titles. Reply with the title only.";
-const SUMMARY_SYSTEM_PROMPT = "You write faithful, compact summaries of conversations. Keep every decision, fact, name and open question. Reply with the summary only.";
-const ONE_SHOT_SYSTEM_PROMPTS = { title: TITLE_SYSTEM_PROMPT, summary: SUMMARY_SYSTEM_PROMPT };
 const oneShotArguments = (systemPrompt: string) => ["-p", "--output-format", "text", "--model", TITLE_MODEL, "--tools", "", "--system-prompt", systemPrompt, "--no-session-persistence", "--max-turns", "1"];
-export const TITLE_ARGUMENTS = oneShotArguments(TITLE_SYSTEM_PROMPT);
+export const TITLE_ARGUMENTS = oneShotArguments(ONE_SHOT_SYSTEM_PROMPTS.title);
 export const TITLE_FLAG_SETS = [["--safe-mode"], ["--strict-mcp-config", "--disable-slash-commands"]];
 const UNKNOWN_OPTION_PATTERN = /unknown option|unrecognized|unexpected argument|invalid option/i;
 
@@ -93,21 +93,11 @@ const allow = (call: ApprovalCall, extra: Record<string, unknown> = {}): Approva
 
 const deny = (message: string): ApprovalVerdict => ({ behavior: "deny", message });
 
-const alwaysKey = (workspacePath: string, call: ApprovalCall): string =>
-  `${workspacePath}|${call.toolName}|${call.toolName === "Bash" ? approvalDetail(call.toolName, call.input) : ""}`;
-
-const replyOrReject = (scope: RunScope, requestId: string): Promise<string> => {
-  const reply = scope.waitForAnswer(requestId);
-  if (scope.signal.aborted) return Promise.resolve(REJECTED_ANSWER);
-  const aborted = new Promise<string>((resolve) => scope.signal.addEventListener("abort", () => resolve(REJECTED_ANSWER), { once: true }));
-  return Promise.race([reply, aborted]);
-};
-
 const askQuestions = async (scope: RunScope, push: (native: LooseNative) => void, call: ApprovalCall): Promise<ApprovalVerdict> => {
   const questions = (Array.isArray(call.input.questions) ? call.input.questions : []).map(parseQuestionSpec);
   if (questions.length === 0) return deny("The question tool was called without any questions");
   const requestId = newId();
-  const reply = replyOrReject(scope, requestId);
+  const reply = waitForReply(scope, requestId);
   push({ type: "question", requestId, questions });
   const raw = await reply;
   if (raw === REJECTED_ANSWER) return deny("The user dismissed the question without answering");
@@ -116,15 +106,10 @@ const askQuestions = async (scope: RunScope, push: (native: LooseNative) => void
   return allow(call, { answers });
 };
 
-const createApprovalHandler = (scope: RunScope, push: (native: LooseNative) => void, alwaysAllowed: Set<string>): ApprovalHandler => async (call) => {
+const createApprovalHandler = (scope: RunScope, push: (native: LooseNative) => void, memory: ApprovalMemory): ApprovalHandler => async (call) => {
   if (call.toolName === ASK_USER_QUESTION_TOOL) return askQuestions(scope, push, call);
-  const key = alwaysKey(scope.workspacePath, call);
-  if (alwaysAllowed.has(key)) return allow(call);
-  const requestId = newId();
-  const reply = replyOrReject(scope, requestId);
-  push({ type: "permission", requestId, title: `Allow ${displayToolName(call.toolName)}?`, detail: approvalDetail(call.toolName, call.input) });
-  const answer = await reply;
-  if (answer === "always") alwaysAllowed.add(key);
+  const detail = approvalDetail(call.toolName, call.input);
+  const answer = await askApproval(scope, push, memory, { tool: call.toolName, memoryDetail: call.toolName === "Bash" ? detail : "", title: `Allow ${displayToolName(call.toolName)}?`, detail });
   return ALLOWED_ANSWERS.includes(answer) ? allow(call) : deny("The user rejected this tool call");
 };
 
@@ -152,7 +137,7 @@ const translateLine = (noteModelSeen: (modelId: string) => void) => (line: strin
 export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverUrl"> & Partial<ClaudeDependencies>): RuntimeSteps<LooseNative, ClaudeHandle> => {
   const dependencies: ClaudeDependencies = {
     approvals: createApprovalBroker(),
-    limits: createLimitsStore(),
+    limits: createLimitsStore().of("claude"),
     locate: () => locateClaude(),
     launch: launchProcess,
     probeVersion: (executable, workspacePath) => readOutput(executable, ["--version"], { cwd: workspacePath, env: process.env }),
@@ -168,7 +153,7 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     noteModelSeen: () => undefined,
     ...overrides,
   };
-  const alwaysAllowed = new Set<string>();
+  const approvalMemory = createApprovalMemory();
 
   const catalog = async (workspacePath: string): Promise<Catalog> => {
     const agents = [DEFAULT_CHOICE, ...dependencies.listAgents(workspacePath)];
@@ -179,7 +164,7 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     if (!located.path) return { agents: [], models: [], health: { ok: false, detail: `The claude command was not found. Install it, sign in once by running claude yourself, or set ${CLAUDE_PATH_VARIABLE} to its full path.` } };
     try {
       const version = await dependencies.probeVersion(located.path, workspacePath);
-      return { agents, models, permissionModes: PERMISSION_MODES, commands: withBundledCommands(dependencies.listCommands(workspacePath)), defaultPermissionMode: DEFAULT_PERMISSION_MODE, health: { ok: true, detail: `found claude ${version}` } };
+      return { agents, models, meters: ["limits"], permissionModes: PERMISSION_MODES, commands: withBundledCommands(dependencies.listCommands(workspacePath)), defaultPermissionMode: DEFAULT_PERMISSION_MODE, health: { ok: true, detail: `found claude ${version}` } };
     } catch (error) {
       return { agents: [], models: [], health: { ok: false, detail: `The claude command at ${located.path} did not run: ${error instanceof Error ? error.message : String(error)}` } };
     }
@@ -203,22 +188,22 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
   };
 
   const execute = createStreamRuntime<ClaudeHandle, ClaudeRunState, { secret: string }>({
-    limiter: dependencies.limiter,
     limits: dependencies.limits,
     temporaryDirectory: dependencies.temporaryDirectory,
-    begin: (scope, push) => dependencies.approvals.register(createApprovalHandler(scope, push, alwaysAllowed)),
+    begin: (scope, push) => dependencies.approvals.register(createApprovalHandler(scope, push, approvalMemory)),
     createState: createStreamState,
     translate: translateLine(dependencies.noteModelSeen),
-    open: (handle, input, scope, { session, writeRunFile }) => {
+    finish: (state) => (state.results.length > 0 && !state.isFinished ? finalEvents(state) : []),
+    open: (handle, input, scope, { session, state, writeRunFile }) => {
       const configPath = writeRunFile("mcp.json", JSON.stringify(buildMcpConfig(`${dependencies.serverUrl}/mcp/${session.secret}`)));
-      const systemNotePath = scope.systemNote ? writeRunFile("system.md", scope.systemNote) : undefined;
+      const systemNote = [scope.systemNote, scope.contextNote].filter(Boolean).join("\n\n");
+      const systemNotePath = systemNote ? writeRunFile("system.md", systemNote) : undefined;
       const args = buildClaudeArguments({ ...handle, model: scope.model, agent: scope.agent, effort: scope.effort, permissionMode: isChosen(scope.permissionMode) ? scope.permissionMode : DEFAULT_PERMISSION_MODE, mcpConfigPath: configPath, systemNotePath, addDirectories: attachmentDirectories(scope.files), forwardSubagentText: handle.forwardSubagentText });
       log.info("claude", `Launching ${handle.executable} for node ${scope.nodeId} (${handle.resumeFrom ? `forking ${handle.resumeFrom}` : "new session"} as ${handle.sessionId})`);
       scope.setRuntimeRef({ sessionId: handle.sessionId });
       const running = dependencies.launch(handle.executable, args, { cwd: scope.workspacePath, env: dependencies.environment() });
       running.writeInput(buildUserMessage(input, scope.files, dependencies.readBase64));
-      running.endInput();
-      return { lines: running.lines, kill: () => running.kill(), endFailure: async () => exitFailure(await running.exit) };
+      return { lines: linesUntilFollowUpEnds(running.lines, state), kill: () => running.kill(), endFailure: async () => exitFailure(await running.exit) };
     },
   });
 
@@ -248,21 +233,15 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     }
   };
 
-  const generateTitle = async (input: string, _scope: RunScope, signal: AbortSignal, purpose: "title" | "summary" = "title"): Promise<string> => {
+  const generateText: GenerateText = async (input, purpose, _scope, signal) => {
     const located = dependencies.locate();
     if (!located.path) throw new Error("The claude command was not found");
-    const release = await dependencies.limiter.acquire(signal);
-    if (!release) throw new Error("Title generation was stopped");
-    try {
-      for (const flags of TITLE_FLAG_SETS) {
-        const { text, exit } = await runTitleProcess(located.path, flags, input, signal, purpose);
-        if (exit.code === 0 && text) return text;
-        if (!UNKNOWN_OPTION_PATTERN.test(exit.stderrTail)) throw new Error(describeExit(exit));
-      }
-      throw new Error("This claude version accepts none of the lean title options");
-    } finally {
-      release();
+    for (const flags of TITLE_FLAG_SETS) {
+      const { text, exit } = await runTitleProcess(located.path, flags, input, signal, purpose);
+      if (exit.code === 0 && text) return text;
+      if (!UNKNOWN_OPTION_PATTERN.test(exit.stderrTail)) throw new Error(describeExit(exit));
     }
+    throw new Error("This claude version accepts none of the lean title options");
   };
 
   const parseAuthStatus = (raw: string): { authMethod?: string; isSignedIn?: boolean } => {
@@ -276,14 +255,13 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
 
   const diagnostics = async (workspacePath: string): Promise<RuntimeDiagnostics> => {
     const located = dependencies.locate();
-    const processSlots = { active: dependencies.limiter.activeCount(), limit: dependencies.limiter.limit, waiting: dependencies.limiter.waitingCount() };
-    if (!located.path) return { executable: located.path, processSlots };
+    if (!located.path) return { executable: located.path };
     const [supportsSubagentTextFlag, auth] = await Promise.all([
       supportsForwardedSubagentText(located.path, workspacePath),
       dependencies.probeAuth(located.path, workspacePath).then(parseAuthStatus, () => ({})),
     ]);
-    return { executable: located.path, processSlots, supportsSubagentText: supportsSubagentTextFlag, ...auth };
+    return { executable: located.path, supportsSubagentText: supportsSubagentTextFlag, ...auth };
   };
 
-  return { id: "claude", editsFiles: true, canSuggestTitles: dependencies.suggestsTitles, generateTitle, diagnostics, catalog, openSession, execute, eventMap, answerRequest: async () => undefined };
+  return { id: "claude", editsFiles: true, canSuggestTitles: dependencies.suggestsTitles, slots: dependencies.limiter, generateText, diagnostics, catalog, openSession, execute, eventMap, answerRequest: async () => undefined };
 };

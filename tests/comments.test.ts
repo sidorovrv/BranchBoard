@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addNodeEdit, commentClearingEdits, commentsPrompt, makeNode, runEdit, sanitiseNode, seedFrom, shouldAutoRun, type NodeComment, type SeedCommand } from "../packages/core/src";
+import { addNodeEdit, commentClearingEdits, commentsPrompt, commentTargetOf, makeNode, promptWithComment, runEdit, sanitiseNode, seedFrom, shouldAutoRun, type NodeComment, type SeedCommand } from "../packages/core/src";
 import { buildGraph, mustApply } from "./support";
 
 const board = { id: "B", title: "t", workspacePath: "", mode: "fake", createdAt: 0, updatedAt: 0, deleted: false } as const;
@@ -64,6 +64,22 @@ describe("comments on answers", () => {
   it("drops comments when the history is discarded by a prompt change", () => {
     const graph = graphWithAnswer({ comments: [comment({ roll: 2 })], status: "idle" });
     expect(mustApply(graph, { type: "editNode", nodeId: "P", fields: { prompt: "changed" } }).nodes.P.comments).toEqual([]);
+  });
+
+  it("appends a comment to the prompt of the earliest unsent child", () => {
+    const withChildren = ["late", "early"].reduce(
+      (graph, id, index) => mustApply(graph, { type: "addNode", parentIds: ["P"], node: makeNode("B", { id, status: "idle", prompt: id === "early" ? "draft" : "", createdAt: 10 - index }) }),
+      graphWithAnswer(),
+    );
+    const target = commentTargetOf(withChildren, "P");
+    expect(target?.id).toBe("early");
+    expect(promptWithComment(target!.prompt, comment())).toBe("draft\n\n> alpha\nExplain this\n\n");
+    expect(promptWithComment("", comment())).toBe("> alpha\nExplain this\n\n");
+  });
+
+  it("has no target when every child has run", () => {
+    const graph = mustApply(graphWithAnswer(), { type: "addNode", parentIds: ["P"], node: makeNode("B", { id: "C", status: "done" }) });
+    expect(commentTargetOf(graph, "P")).toBeUndefined();
   });
 
   it("keeps valid comments and drops malformed ones when importing", () => {

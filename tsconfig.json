@@ -13,5 +13,5 @@
     "noUncheckedIndexedAccess": false,
     "types": ["node"]
   },
-  "include": ["packages/*/src", "tests"]
+  "include": ["packages/*/src", "services/*/src", "tests"]
 }

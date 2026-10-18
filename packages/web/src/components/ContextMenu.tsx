@@ -3,6 +3,13 @@ import { createPortal } from "react-dom";
 
 const EDGE_GAP = 8;
 
+const TEXT_FIELD_SELECTOR = "input, textarea, [contenteditable='true']";
+
+export const keepNativeMenuOnTextFields = (event: MouseEvent) => {
+  if ((event.target as Element).closest(TEXT_FIELD_SELECTOR)) return event.stopPropagation();
+  event.preventDefault();
+};
+
 export interface MenuItem {
   label: string;
   isDanger?: boolean;
@@ -43,7 +50,7 @@ const ContextMenu = ({ menu, onClose }: { menu: OpenMenu; onClose: () => void })
     };
   }, [onClose]);
   return createPortal(
-    <div ref={element} className="context-menu" style={{ left: position.x, top: position.y }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
+    <div ref={element} className="context-menu" style={{ left: position.x, top: position.y }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={keepNativeMenuOnTextFields}>
       {menu.items.map((item, index) => (
         <button key={index} className={item.isDanger ? "danger" : ""} onClick={() => (onClose(), item.run())}>{item.label}</button>
       ))}

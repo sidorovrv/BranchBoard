@@ -36,10 +36,8 @@ jobs:
           case "$VERSION" in *-*) echo "npm_tag=next" >> "$GITHUB_OUTPUT"; echo "prerelease=--prerelease" >> "$GITHUB_OUTPUT";; *) echo "npm_tag=latest" >> "$GITHUB_OUTPUT"; echo "prerelease=" >> "$GITHUB_OUTPUT";; esac
       - name: Publish to npm with provenance
         working-directory: packages/cli
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --tag ${{ steps.release.outputs.npm_tag }}
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --title "Branchboard ${{ github.ref_name }}" --generate-notes ${{ steps.release.outputs.prerelease }}
+        run: gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --title "BranchBoard ${{ github.ref_name }}" --generate-notes ${{ steps.release.outputs.prerelease }}

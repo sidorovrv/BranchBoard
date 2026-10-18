@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { PACKAGE_NAME, VERSION_PATTERN, type UpdateTags } from "@branchboard/core";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { isNewerVersion, PACKAGE_NAME, VERSION_PATTERN, type UpdateTags } from "@branchboard/core";
+import { fetchRemote } from "./fetchRemote";
+import { readJsonFile, writeJsonFile } from "./jsonFile";
 import { log } from "./log";
 
 export const CHANNEL_URL = "https://raw.githubusercontent.com/sidorovrv/BranchBoard/main/channel.json";
@@ -8,7 +10,6 @@ export const TAGS_URL = `https://registry.npmjs.org/-/package/${PACKAGE_NAME}/di
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const RETRY_AFTER_FAILURE_MS = 60 * 60 * 1000;
-const FETCH_TIMEOUT_MS = 5000;
 const MAX_CHANNEL_BYTES = 64 * 1024;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][\w.-]{0,79}$/;
 
@@ -17,10 +18,16 @@ export interface ChannelModel {
   name: string;
 }
 
+export interface EnginePin {
+  version: string;
+  minimumVersion?: string;
+}
+
 export interface ChannelContents {
   tags: UpdateTags;
   minimumVersion?: string;
   claudeModels: ChannelModel[];
+  engine?: EnginePin;
 }
 
 interface CachedChannel {
@@ -47,34 +54,33 @@ export const parseTags = (raw: unknown): UpdateTags => {
   return latest && VERSION_PATTERN.test(latest) ? { latest } : {};
 };
 
+const parseEnginePin = (raw: unknown): EnginePin | undefined => {
+  const source = objectOf(raw);
+  const version = asText(source.version, 40);
+  const minimumVersion = asText(source.minimumVersion, 40);
+  if (!version || !VERSION_PATTERN.test(version)) return undefined;
+  return { version, ...(minimumVersion && VERSION_PATTERN.test(minimumVersion) ? { minimumVersion } : {}) };
+};
+
 export const parseChannel = (raw: unknown): ChannelContents => {
   const source = objectOf(raw);
   const minimumVersion = asText(source.minimumVersion, 40);
+  const engine = parseEnginePin(source.engine);
   const claudeModels = (Array.isArray(source.claudeModels) ? source.claudeModels : []).flatMap((entry): ChannelModel[] => {
     const id = asText(entry?.id, 80);
     const name = asText(entry?.name, 80);
     return id && name && MODEL_ID_PATTERN.test(id) ? [{ id, name }] : [];
   });
-  return { tags: parseTags(source.tags), minimumVersion: minimumVersion && VERSION_PATTERN.test(minimumVersion) ? minimumVersion : undefined, claudeModels: claudeModels.slice(0, 30) };
+  return { tags: parseTags(source.tags), minimumVersion: minimumVersion && VERSION_PATTERN.test(minimumVersion) ? minimumVersion : undefined, claudeModels: claudeModels.slice(0, 30), ...(engine ? { engine } : {}) };
 };
 
-const readJsonFile = <T>(path: string, fallback: T): T => {
-  try {
-    return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-};
-
-const writeJsonFile = (path: string, value: unknown) => {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.tmp`;
-  writeFileSync(temporary, JSON.stringify(value));
-  renameSync(temporary, path);
+export const engineVersionOf = (contents: ChannelContents, fallback: string): string => {
+  const pinned = contents.engine?.version;
+  return pinned && (!contents.engine?.minimumVersion || !isNewerVersion(contents.engine.minimumVersion, pinned)) ? pinned : fallback;
 };
 
 export const fetchRemoteText: FetchText = async (url) => {
-  const response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "error", credentials: "omit" });
+  const response = await fetchRemote(url);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const text = await response.text();
   if (text.length > MAX_CHANNEL_BYTES) throw new Error("Channel file is too large");

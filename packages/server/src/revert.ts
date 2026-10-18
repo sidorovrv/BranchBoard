@@ -40,9 +40,9 @@ export const workspaceRelativePath = (workspacePath: string, toolPath: string): 
   return undefined;
 };
 
-export const fileHashesAfterRun = (workspacePath: string, parts: Part[]): Record<string, string | null> =>
+export const fileHashesAfterRun = (workspacePath: string, parts: Part[], extraPaths: string[] = []): Record<string, string | null> =>
   Object.fromEntries(
-    [...editStepsByPath(parts).keys()].flatMap((toolPath): [string, string | null][] => {
+    [...new Set([...editStepsByPath(parts).keys(), ...extraPaths])].flatMap((toolPath): [string, string | null][] => {
       const path = workspaceRelativePath(workspacePath, toolPath);
       if (!path) return [];
       try {
@@ -76,9 +76,10 @@ const planOne = async (workspacePath: string, node: GraphNode, path: string, ste
 const planRevert = async (workspacePath: string, node: GraphNode, parts: Part[]): Promise<PlannedFile[]> => {
   const already = new Set(node.reverted?.files.map((file) => file.path));
   const steps = editStepsByPath(partsOfRoll(parts, activeRollOf(node)));
-  const planned = [...steps.entries()].flatMap(([toolPath, fileSteps]) => {
+  const toolPaths = new Set([...steps.keys(), ...Object.keys(node.fileHashes ?? {})]);
+  const planned = [...toolPaths].flatMap((toolPath) => {
     const path = workspaceRelativePath(workspacePath, toolPath);
-    return path && !already.has(path) ? [{ path, fileSteps }] : [];
+    return path && !already.has(path) ? [{ path, fileSteps: steps.get(toolPath) ?? [] }] : [];
   });
   return Promise.all(planned.map(({ path, fileSteps }) => planOne(workspacePath, node, path, fileSteps)));
 };

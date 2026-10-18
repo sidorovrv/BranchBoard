@@ -1,5 +1,6 @@
 import { MAX_COMMENT_CHARS, MAX_COMMENTS_PER_NODE, NODE_MAX_HEIGHT, NODE_MAX_WIDTH } from "./graph";
-import type { Attachment, ContextMode, DocumentFile, GraphEdge, GraphNode, Id, NodeComment, NodeKind, NodeStatus, NodeSummary, Part, PartType, RollSnapshot, Usage } from "./types";
+import type { PartType } from "./kit/types";
+import type { Attachment, ContextMode, DocumentFile, GraphEdge, GraphNode, Id, NodeComment, NodeKind, NodeStatus, NodeSummary, Part, RollSnapshot, Usage } from "./types";
 
 export const MAX_UNTRUSTED_NODES = 2000;
 export const MAX_UNTRUSTED_PARTS = 50000;
@@ -137,6 +138,7 @@ export const sanitiseNode = (raw: unknown): GraphNode | undefined => {
     comments: commentsOf(raw.comments),
     pinned: raw.pinned === true ? true : undefined,
     satelliteOf: textOf(raw.satelliteOf),
+    satelliteRunStartedAt: numberOf(raw.satelliteRunStartedAt),
     summary: summaryOf(raw.summary),
     deleted: false,
   };

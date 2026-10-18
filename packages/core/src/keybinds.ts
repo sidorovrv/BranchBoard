@@ -1,4 +1,4 @@
-export type BindingKind = "key" | "click";
+export type BindingKind = "key" | "click" | "hold";
 
 export interface BindableAction {
   id: string;
@@ -42,6 +42,7 @@ export const BINDABLE_ACTIONS: BindableAction[] = [
   { id: "search", label: "Search inside nodes", kind: "key", defaults: ["Ctrl+F"], area: "Navigation" },
   { id: "focusNode", label: "Zoom in on a node", kind: "click", defaults: ["Alt+Click"], area: "Canvas" },
   { id: "showShortcuts", label: "Show the shortcuts", kind: "key", defaults: ["Shift+?"], area: "Navigation" },
+  { id: "alignGuides", label: "Align and snap while dragging or resizing", kind: "hold", defaults: ["Alt"], area: "Canvas" },
 ];
 
 const MODIFIER_ORDER = ["Ctrl", "Alt", "Shift"];
@@ -73,7 +74,15 @@ const joinBinding = (state: ModifierState, name: string): string =>
 
 export const keyBindingOf = (input: KeyInput): string | undefined => (MODIFIER_KEYS.has(input.key) ? undefined : joinBinding(input, keyNameOf(input)));
 
-export const clickBindingOf = (input: PointerInput): string | undefined => {
+export const holdBindingOf = (state: ModifierState): string =>
+  [state.ctrlKey || state.metaKey ? "Ctrl" : "", state.altKey ? "Alt" : "", state.shiftKey ? "Shift" : ""].filter(Boolean).join("+");
+
+export const isHoldActive = (keybinds: Keybinds, actionId: string, state: ModifierState): boolean => {
+  const held = holdBindingOf(state);
+  return held !== "" && (keybinds[actionId] ?? []).includes(held);
+};
+
+export const clickBindingOf =(input: PointerInput): string | undefined => {
   const name = POINTER_NAMES_BY_BUTTON[input.button];
   return name ? joinBinding(input, name) : undefined;
 };
@@ -85,6 +94,7 @@ export const modifiersOfBinding = (binding: string): string[] => binding.split("
 export const keyOfBinding = (binding: string): string => binding.split("+").at(-1) ?? "";
 
 const isValidBinding = (binding: string, kind: BindingKind): boolean => {
+  if (kind === "hold") return binding !== "" && binding.split("+").every((part) => MODIFIER_ORDER.includes(part)) && MODIFIER_ORDER.filter((modifier) => binding.split("+").includes(modifier)).join("+") === binding;
   const modifiers = modifiersOfBinding(binding);
   const name = keyOfBinding(binding);
   const isCanonical = MODIFIER_ORDER.filter((modifier) => modifiers.includes(modifier)).join("+") === modifiers.join("+");

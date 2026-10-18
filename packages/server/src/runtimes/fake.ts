@@ -1,8 +1,10 @@
 import { newId, parseTodoItems, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type QuestionSpec, type RecoveryId } from "@branchboard/core";
 import { existsSync } from "node:fs";
+import { generateThroughSession } from "../run/askOnce";
 import type { EventMap, RunScope, RuntimeSteps } from "../run/types";
 import { resolveInsideWorkspace, writeWorkspaceFile } from "../workspaceWrites";
 import { subagentEventMap, type LooseNative } from "./commonEvents";
+import { loadDemoScript, matchDemoEntry, type DemoEntry } from "./demoScript";
 
 type FakeEvent =
   | { type: "chunk"; text: string }
@@ -31,6 +33,14 @@ const fakeQuestions: QuestionSpec[] = [
   { question: "Which toppings?", header: "Toppings", multiple: true, options: [{ label: "cream" }, { label: "nuts" }] },
 ];
 
+const fakeForm: QuestionSpec[] = [
+  { question: "Your name", header: "Sign in · Name", options: [], key: "name" },
+  { question: "How many seats?", header: "Sign in · Seats", options: [], kind: "integer", key: "seats" },
+  { question: "Subscribe to updates?", header: "Sign in · Updates", options: [{ label: "Yes" }, { label: "No" }], kind: "boolean", key: "updates" },
+  { question: "Which address?", header: "Sign in · Address", options: [], optional: true, key: "address", when: [{ key: "updates", op: "eq", value: true }] },
+  { question: "Open the terms page", header: "Sign in · Terms", options: [{ label: "Done" }], kind: "link", url: "https://example.com/terms", key: "terms" },
+];
+
 const CHUNK_SIZE = 14;
 const FAST_DELAY_MS = 8;
 const SLOW_DELAY_MS = 120;
@@ -45,11 +55,54 @@ const chunksOf = (text: string): string[] => text.match(new RegExp(`[\\s\\S]{1,$
 
 const echoText = (input: string, scope: RunScope): string => `[fake ${scope.agent ?? "default"}/${scope.model ?? "default"}] received:\n${input}`;
 
+const SCRIPTED_CHARS_PER_SECOND = 120;
+
+async function* playScript(session: FakeSession, input: string, entry: DemoEntry, scope: RunScope): AsyncGenerator<FakeEvent> {
+  const wait = (milliseconds: number) => pause(milliseconds / entry.speed, scope.signal);
+  let answer = "";
+  for (const step of entry.steps) {
+    if (scope.signal.aborted) return;
+    if (step.type === "reasoning") yield { type: "reasoning", text: step.text };
+    if (step.type === "pause") await wait(step.delayMs);
+    if (step.type === "tool") {
+      const id = newId();
+      yield { type: "tool", id, description: step.description };
+      await wait(step.delayMs ?? 800);
+      yield { type: "tool-result", id, output: step.output ?? "ok", isError: false };
+    }
+    if (step.type === "file-write") {
+      const existed = existsSync(resolveInsideWorkspace(scope.workspacePath, step.path));
+      writeWorkspaceFile(scope.workspacePath, step.path, step.content);
+      yield { type: "file-write", id: newId(), path: step.path, content: step.content, existed };
+    }
+    if (step.type === "chunk") {
+      const delay = (CHUNK_SIZE / (step.charsPerSecond ?? SCRIPTED_CHARS_PER_SECOND)) * 1000;
+      for (const text of chunksOf(step.text)) {
+        if (scope.signal.aborted) return;
+        yield { type: "chunk", text };
+        answer += text;
+        await wait(delay);
+      }
+    }
+  }
+  histories.set(session.sessionId, `${session.history}${input}\n${answer}\n`);
+  yield { type: "usage", inputTokens: Math.ceil((session.history.length + input.length) / 4), outputTokens: Math.ceil(answer.length / 4) };
+}
+
 async function* execute(session: FakeSession, input: string, scope: RunScope): AsyncGenerator<FakeEvent> {
   const prompt = input.split("\n").at(-1) ?? "";
   const delay = prompt.includes("/slow") ? SLOW_DELAY_MS : FAST_DELAY_MS;
   const fullInput = `${session.history}${input}`;
   scope.setRuntimeRef({ sessionId: session.sessionId, lastMessageId: `fake-msg-${scope.nodeId}` });
+  let script;
+  try {
+    script = loadDemoScript(scope.workspacePath);
+  } catch (error) {
+    yield { type: "failure", message: error instanceof Error ? error.message : String(error) };
+    return;
+  }
+  const scripted = script && matchDemoEntry(script, input);
+  if (scripted) return yield* playScript(session, input, scripted, scope);
   yield { type: "reasoning", text: "Reading the context. " };
   if (prompt.startsWith("/tool")) {
     const id = newId();
@@ -58,10 +111,10 @@ async function* execute(session: FakeSession, input: string, scope: RunScope): A
     const answer = await scope.waitForAnswer(id);
     yield { type: "tool-result", id, output: answer === "reject" ? "Rejected by the user" : "ok", isError: answer === "reject" };
   }
-  if (prompt.startsWith("/ask")) {
+  if (prompt.startsWith("/ask") || prompt.startsWith("/form")) {
     const id = newId();
     yield { type: "tool", id, description: "Asks the user a question" };
-    yield { type: "question", id, questions: fakeQuestions };
+    yield { type: "question", id, questions: prompt.startsWith("/form") ? fakeForm : fakeQuestions };
     const reply = await scope.waitForAnswer(id);
     yield { type: "tool-result", id, output: reply, isError: reply === REJECTED_ANSWER };
   }
@@ -149,6 +202,7 @@ const eventMap: EventMap<FakeEvent> = {
 
 export const fakeRuntime: RuntimeSteps<FakeEvent, FakeSession> = {
   id: "fake",
+  generateText: generateThroughSession(() => fakeRuntime),
   catalog: async () => ({
     agents: ["build", "plan"],
     models: [
@@ -161,6 +215,7 @@ export const fakeRuntime: RuntimeSteps<FakeEvent, FakeSession> = {
     ],
     defaultPermissionMode: "edit",
     commands: [{ name: "review", description: "Review something", template: "Please review: $ARGUMENTS" }],
+    meters: ["limits"],
     health: { ok: true, detail: "built-in fake runtime" },
   }),
   openSession: async (plan, scope) => ({

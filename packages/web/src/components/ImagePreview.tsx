@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { create } from "zustand";
-import { Icon } from "./Icons";
+import { Icon } from "../kit/Icons";
 
 interface PreviewTarget {
   url: string;

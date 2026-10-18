@@ -1,5 +1,7 @@
 import {
   activeRollOf,
+  withoutSecretAnswers,
+  withPartKeyPrefix,
   answerText,
   ancestorIds,
   boardTokenUsage,
@@ -28,13 +30,16 @@ import {
   placeSatellite,
   planSession,
   recoveryOfMessage,
-  renderInput,
+  renderRequest,
+  renderTurns,
   satelliteIdsOf,
   summarySource,
   type ApiRuntimeId,
   type Catalog,
+  type GraphNode,
   type Id,
   type NodeStatus,
+  type RecoveryId,
   type PendingRequest,
   type RunEvent,
   type RunInfo,
@@ -50,11 +55,14 @@ import { log } from "../log";
 import type { CostStore } from "../costs";
 import { fileHashesAfterRun } from "../revert";
 import type { RunLog } from "../runLog";
+import type { UsageRecorder } from "../usage";
 import { askOnce } from "./askOnce";
+import { expandCommandTemplate } from "./commandExpansion";
+import { withSlot } from "./limiter";
 import { resolveMentions } from "./mentions";
 import { createAnswerWaiters } from "./requests";
 import { shortName, suggestTitle } from "./titles";
-import { RecoverableError, type RunFile, type RunScope, type RuntimeSteps } from "./types";
+import { RecoverableError, type LiveControl, type RunFile, type RunScope, type RuntimeSteps } from "./types";
 
 interface ActiveRun {
   boardId: Id;
@@ -63,6 +71,8 @@ interface ActiveRun {
   controller: AbortController;
   scope: RunScope;
   runtime: RuntimeSteps;
+  outcome: RunOutcome;
+  handle?: unknown;
 }
 
 interface RunOutcome {
@@ -70,19 +80,29 @@ interface RunOutcome {
   usage?: Usage;
   runtimeRef?: RuntimeRef;
   answerChars: number;
+  retryFailure?: string;
   errors: string[];
+  firstRecovery?: RecoveryId;
   satellites: Map<string, Id>;
+  partKeyPrefix?: string;
 }
 
-export type Runtimes = Record<"fake" | "opencode" | "claude", RuntimeSteps> & Partial<Record<ApiRuntimeId | "opencode2", RuntimeSteps>>;
+export type Runtimes = Record<"fake" | "opencode" | "claude", RuntimeSteps> & Partial<Record<ApiRuntimeId | "opencode2" | "codex", RuntimeSteps>>;
 
 const finalStatusOf = (outcome: RunOutcome): NodeStatus => (outcome.errors.length > 0 && !outcome.stopped ? "error" : "done");
 
+const noteFailure = (outcome: RunOutcome, message: string, recovery: RecoveryId | undefined) => {
+  if (outcome.errors.length === 0) outcome.firstRecovery = recovery;
+  outcome.errors.push(message);
+};
+
 export const DEFAULT_SUMMARY_SHARE = 0.6;
+export const MAX_RETRY_ATTEMPTS = 5;
 const CATALOG_CACHE_MS = 60 * 1000;
 const FINISHED_RUNS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const FINISHED_RUNS_LIMIT = 40;
 const SUMMARY_TIMEOUT_MS = 180 * 1000;
+const CHANGED_FILES_TIMEOUT_MS = 15 * 1000;
 const MAX_SUMMARY_SOURCE_CHARS = 200000;
 const MIN_TURNS_TO_SUMMARISE = 2;
 
@@ -95,10 +115,11 @@ export const summaryInstruction = (source: string): string =>
     source.slice(-MAX_SUMMARY_SOURCE_CHARS),
   ].join("\n");
 
-export const createRunService = (boards: BoardService, runtimes: Runtimes, attachments: AttachmentStore, runLog: RunLog, costs?: CostStore) => {
+export const createRunService = (boards: BoardService, runtimes: Runtimes, attachments: AttachmentStore, runLog: RunLog, costs?: CostStore, usage?: UsageRecorder) => {
   const activeRuns = new Map<Id, ActiveRun>();
   const waiters = createAnswerWaiters();
   const catalogCache = new Map<string, { at: number; catalog: Promise<Catalog | undefined> }>();
+  const resumingNodeIds = new Set<Id>();
 
   const runtimeOf = (runtimeId: RuntimeId): RuntimeSteps => {
     const runtime = runtimes[runtimeId];
@@ -160,6 +181,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       status: "running",
       prompt: event.prompt ?? "",
       satelliteOf: parentId,
+      satelliteRunStartedAt: graph.nodes[parentId]?.startedAt,
       ...size,
       startedAt: now(),
       ...placeSatellite(graph, parentId, size),
@@ -192,9 +214,14 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     if (event.type === "request.opened") return openRequest(boardId, nodeId, event);
     if (event.type === "subagent.started") return startSatellite(boardId, nodeId, event, outcome);
     if (event.type === "subagent.event") return routeSatelliteEvent(boardId, event, outcome);
+    if (event.type === "retry" && event.attempt > MAX_RETRY_ATTEMPTS && !outcome.retryFailure) {
+      outcome.retryFailure = event.reason;
+      activeRuns.get(nodeId)?.controller.abort();
+    }
+    if (event.type === "context.compacted") patchNode(boardId, nodeId, { compactedAt: now() });
     if (event.type === "usage") outcome.usage = event.usage;
     if (event.type === "done") outcome.stopped = event.stopped ?? false;
-    if (event.type === "error") outcome.errors.push(event.message);
+    if (event.type === "error") noteFailure(outcome, event.message, event.recovery ?? recoveryOfMessage(event.message));
     if (event.type === "part.delta" && event.partType === "text") outcome.answerChars += event.text.length;
     boards.recordRunEvent(boardId, nodeId, event.type === "error" ? { ...event, recovery: event.recovery ?? recoveryOfMessage(event.message) } : event);
   };
@@ -205,20 +232,23 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     return { plan, hash: contextHash(graph, nodeId), contextNodeIds: orderedAncestorIds(graph, nodeId) };
   };
 
-  const streamRun = async (runtime: RuntimeSteps, plan: SessionPlan, input: string, scope: RunScope, outcome: RunOutcome) => {
-    const handle = await runtime.openSession(plan, scope);
-    log.debug("run", `Session opened for node ${scope.nodeId}`);
-    const tally: Record<string, number> = {};
-    for await (const native of runtime.execute(handle, input, scope)) {
-      const events = runtime.eventMap[native.type]?.(native, scope) ?? [];
-      events.forEach((event) => {
-        tally[event.type] = (tally[event.type] ?? 0) + 1;
-        handleEvent(scope.boardId, scope.nodeId, event, outcome);
-      });
-    }
-    log.info("run", `Node ${scope.nodeId} stream ended: events ${JSON.stringify(tally)}, answer text ${outcome.answerChars} chars`);
-    if (outcome.answerChars === 0 && !scope.signal.aborted) log.warn("run", `Node ${scope.nodeId} finished without any answer text`);
-  };
+  const streamRun = (runtime: RuntimeSteps, plan: SessionPlan, input: string, scope: RunScope, outcome: RunOutcome) =>
+    withSlot(runtime.slots, scope.signal, scope.setWaitingForSlot, async () => {
+      const handle = await runtime.openSession(plan, scope);
+      const active = activeRuns.get(scope.nodeId);
+      if (active) active.handle = handle;
+      log.debug("run", `Session opened for node ${scope.nodeId}`);
+      const tally: Record<string, number> = {};
+      for await (const native of runtime.execute(handle, input, scope)) {
+        const events = runtime.eventMap[native.type]?.(native, scope) ?? [];
+        events.forEach((event) => {
+          tally[event.type] = (tally[event.type] ?? 0) + 1;
+          handleEvent(scope.boardId, scope.nodeId, outcome.partKeyPrefix ? withPartKeyPrefix(event, outcome.partKeyPrefix) : event, outcome);
+        });
+      }
+      log.info("run", `Node ${scope.nodeId} stream ended: events ${JSON.stringify(tally)}, answer text ${outcome.answerChars} chars`);
+      if (outcome.answerChars === 0 && !scope.signal.aborted) log.warn("run", `Node ${scope.nodeId} finished without any answer text`);
+    });
 
   const persistRun = (boardId: Id, nodeId: Id, status: NodeStatus, outcome: RunOutcome) => {
     const node = boards.stateOf(boardId).graph.nodes[nodeId];
@@ -298,7 +328,25 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     runLog.append({ event: "summary", boardId, nodeId, roll: activeRollOf(node), coveredNodeIds, input: summaryInstruction(text), output });
   };
 
-  const summaryCandidateFor = (boardId: Id, nodeId: Id): Id | undefined => {
+  const compact = async (boardId: Id, nodeId: Id) => {
+    const state = boards.stateOf(boardId);
+    const node = state.graph.nodes[nodeId];
+    const runtime = runtimeOf(state.board.mode);
+    if (!node || node.deleted || node.kind !== "turn" || node.status !== "done" || !node.runtimeRef) throw new RefusedError("Only a finished chat with a saved session can be compacted");
+    if (!runtime.compact) throw new RefusedError(`The ${state.board.mode} runtime cannot compact a session`);
+    if (isInFlight(node) || [...satelliteIdsOf(state.graph, nodeId)].some((id) => isInFlight(state.graph.nodes[id]))) throw new RefusedError("The node is running");
+    await runtime.compact(node.runtimeRef, state.board.workspacePath);
+    patchNode(boardId, nodeId, { compactedAt: now() });
+  };
+
+  const control = async (boardId: Id, nodeId: Id, liveControl: LiveControl) => {
+    const active = activeRuns.get(nodeId);
+    if (!active || active.boardId !== boardId || active.handle === undefined || !active.runtime.control) throw new RefusedError("The run does not accept that action");
+    await active.runtime.control(active.handle, liveControl);
+    if (liveControl.type === "followUp") handleEvent(boardId, nodeId, { type: "part.delta", partKey: `followup:${now()}`, partType: "text", text: `\n\n**Follow-up:** ${liveControl.text}\n\n` }, active.outcome);
+  };
+
+  const summaryCandidateFor =(boardId: Id, nodeId: Id): Id | undefined => {
     const { graph, parts } = boards.stateOf(boardId);
     const plan = planSession(graph, parts, nodeId);
     const missing = new Set(plan.missingTurns.map((turn) => turn.nodeId));
@@ -327,6 +375,8 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     plan: SessionPlan;
     hash: string;
     contextNodeIds: Id[];
+    context: string;
+    request: string;
     input: string;
     commandName?: string;
   }
@@ -337,22 +387,54 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     const catalog = await catalogOf(state.board.mode, state.board.workspacePath);
     await summariseIfContextIsLarge(boardId, nodeId, catalog);
     const expanded = expandSlashCommand(node.prompt, catalog?.commands);
-    const mentions = resolveMentions(node.prompt, state.board.workspacePath, catalog?.agents ?? []);
+    if (expanded.command && !expanded.command.passThrough) expanded.text = await expandCommandTemplate(node.prompt, expanded.command, state.board.workspacePath);
+    const mentions = resolveMentions(node.prompt, state.board.workspacePath, { agents: catalog?.agents ?? [], subagents: catalog?.subagents, skills: catalog?.skills?.map((skill) => skill.id) });
+    scope.subagents = mentions.subagents;
+    scope.skills = mentions.skills;
     const { plan, hash, contextNodeIds } = resolveContext(boardId, nodeId);
     const attachmentFiles: RunFile[] = attachmentsToSend(plan, node).map((item) => ({ name: item.name, mime: item.mime, path: attachments.pathOf(item.id) }));
     scope.files = [...attachmentFiles, ...mentions.files];
     scope.agent = mentions.agent ?? node.agent;
-    const input = expanded.command?.passThrough ? expanded.text : renderInput(plan, expanded.text, node.quoteText);
-    return { plan, hash, contextNodeIds, input, commandName: expanded.command?.name };
+    const context = renderTurns(plan.missingTurns);
+    const isShellPrompt = catalog?.shellPrompts === true && node.prompt.trimStart().startsWith("!");
+    const isSentAlone = expanded.command?.passThrough === true || isShellPrompt;
+    const request = isSentAlone ? expanded.text.trim() : renderRequest(expanded.text, node.quoteText);
+    scope.contextNote = isSentAlone && context ? context : undefined;
+    return { plan, hash, contextNodeIds, context, request, input: scope.contextNote || !context ? request : `${context}\n\n${request}`, commandName: expanded.command?.name };
+  };
+
+  const CONTINUE_REQUEST = "Continue where you stopped.";
+
+  const prepareContinuation = (node: GraphNode, scope: RunScope): PreparedRun => {
+    scope.files = [];
+    scope.agent = node.agent;
+    const plan: SessionPlan = { spine: { nodeId: node.id, runtimeRef: node.runtimeRef! }, missingTurns: [] };
+    return { plan, hash: node.contextHash ?? "", contextNodeIds: node.contextNodeIds ?? [], context: "", request: CONTINUE_REQUEST, input: CONTINUE_REQUEST };
+  };
+
+  const failAfterRetries = (boardId: Id, nodeId: Id, outcome: RunOutcome) => {
+    if (outcome.errors.length > 0) return;
+    const message = `Gave up after ${MAX_RETRY_ATTEMPTS} attempts: ${outcome.retryFailure}`;
+    noteFailure(outcome, message, recoveryOfMessage(message));
+    boards.recordRunEvent(boardId, nodeId, { type: "error", message, recovery: recoveryOfMessage(message) });
+  };
+
+  const tagSession = (runtime: RuntimeSteps, scope: RunScope, outcome: RunOutcome) => {
+    if (!outcome.runtimeRef || !runtime.tagSession) return;
+    const nodeTitle = boards.stateOf(scope.boardId).graph.nodes[scope.nodeId]?.title ?? "";
+    void runtime
+      .tagSession(outcome.runtimeRef, { boardId: scope.boardId, nodeId: scope.nodeId, nodeTitle }, scope.workspacePath)
+      .catch((error) => log.warn("run", `Could not tag the session of node ${scope.nodeId}`, error));
   };
 
   const executeRun = async (boardId: Id, nodeId: Id) => {
     const state = boards.stateOf(boardId);
     const node = state.graph.nodes[nodeId];
+    const isResuming = resumingNodeIds.delete(nodeId);
     if (!node || node.deleted || node.status !== "queued") return;
     const runtime = runtimeOf(state.board.mode);
     const controller = new AbortController();
-    const outcome: RunOutcome = { stopped: false, answerChars: 0, errors: [], satellites: new Map() };
+    const outcome: RunOutcome = { stopped: false, answerChars: 0, errors: [], satellites: new Map(), partKeyPrefix: isResuming ? `resume${now()}:` : undefined };
     const roll = activeRollOf(node);
     const scope: RunScope = {
       boardId,
@@ -363,6 +445,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       effort: node.effort,
       permissionMode: node.permissionMode,
       systemNote: state.board.answerFormatsGuide === false ? undefined : ANSWER_FORMATS_GUIDE,
+      environment: state.board.environment,
       files: [],
       signal: controller.signal,
       setRuntimeRef: (reference) => (outcome.runtimeRef = reference),
@@ -372,15 +455,15 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       },
       waitForAnswer: waiters.wait,
     };
-    activeRuns.set(nodeId, { boardId, isStopping: false, isWaitingForSlot: false, controller, scope, runtime });
+    activeRuns.set(nodeId, { boardId, isStopping: false, isWaitingForSlot: false, controller, scope, runtime, outcome });
     const started = now();
     patchNode(boardId, nodeId, { status: "running", stopped: false, usage: undefined, startedAt: started, completedAt: undefined, workspaceSnapshot: null, fileHashes: null, reverted: null });
     let status: NodeStatus = "done";
     log.info("run", `Starting node ${nodeId} on board ${boardId} (runtime=${state.board.mode}, agent=${node.agent}, model=${node.model}, workspace=${scope.workspacePath})`);
     try {
-      const prepared = await prepareRun(boardId, nodeId, scope);
+      const prepared = isResuming ? prepareContinuation(node, scope) : await prepareRun(boardId, nodeId, scope);
       const { plan, hash, contextNodeIds, input } = prepared;
-      patchNode(boardId, nodeId, { contextHash: hash, contextNodeIds, contextMode: fidelityOf(plan) });
+      if (!isResuming) patchNode(boardId, nodeId, { contextHash: hash, contextNodeIds, contextMode: fidelityOf(plan), compactedAt: plan.spine?.compactedAt ?? null });
       runLog.append({
         event: "start",
         boardId,
@@ -404,24 +487,40 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       const snapshot = controller.signal.aborted || !runtime.editsFiles ? undefined : await snapshotWorkspace(scope.workspacePath);
       if (snapshot) patchNode(boardId, nodeId, { workspaceSnapshot: snapshot });
       if (!controller.signal.aborted) await streamRun(runtime, plan, input, scope, outcome);
-      if (controller.signal.aborted) outcome.stopped = true;
+      tagSession(runtime, scope, outcome);
+      if (controller.signal.aborted && !outcome.retryFailure) outcome.stopped = true;
+      if (outcome.retryFailure) failAfterRetries(boardId, nodeId, outcome);
       if (finalStatusOf(outcome) === "error") status = "error";
     } catch (error) {
-      if (controller.signal.aborted) outcome.stopped = true;
+      if (outcome.retryFailure) {
+        failAfterRetries(boardId, nodeId, outcome);
+        status = "error";
+      } else if (controller.signal.aborted) outcome.stopped = true;
       else {
         status = "error";
         log.error("run", `Node ${nodeId} failed`, error);
         const message = error instanceof Error ? error.message : String(error);
-        outcome.errors.push(message);
-        boards.recordRunEvent(boardId, nodeId, { type: "error", message, recovery: error instanceof RecoverableError ? error.recovery : recoveryOfMessage(message) });
+        const recovery = error instanceof RecoverableError ? error.recovery : recoveryOfMessage(message);
+        noteFailure(outcome, message, recovery);
+        boards.recordRunEvent(boardId, nodeId, { type: "error", message, recovery });
       }
     } finally {
       closeOpenRequests(boardId, nodeId, "reject");
       finishOpenSatellites(boardId, outcome, status === "error" ? "error" : "done");
+      await recordFileHashes(boardId, nodeId, roll, scope.workspacePath, runtime, outcome.runtimeRef);
       activeRuns.delete(nodeId);
-      recordFileHashes(boardId, nodeId, roll, scope.workspacePath);
       runLog.append({ event: "end", boardId, nodeId, roll, status, stopped: outcome.stopped, durationMs: now() - started, answerChars: outcome.answerChars, errors: outcome.errors, usage: outcome.usage, runtimeRef: outcome.runtimeRef });
       persistRun(boardId, nodeId, status, outcome);
+      usage?.record({
+        type: "run",
+        boardId,
+        outcome: status === "error" ? "error" : "done",
+        stopped: outcome.stopped,
+        runtime: state.board.mode,
+        contextMode: boards.stateOf(boardId).graph.nodes[nodeId]?.contextMode,
+        recovery: outcome.firstRecovery,
+        isRegeneration: roll > 1,
+      });
       recordCost(boardId, nodeId, outcome);
       log.info("run", `Node ${nodeId} finished as ${status}${outcome.stopped ? " (stopped)" : ""} in ${now() - started}ms`);
       pump(boardId);
@@ -430,9 +529,18 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     }
   };
 
-  const recordFileHashes = (boardId: Id, nodeId: Id, roll: number, workspacePath: string) => {
+  const changedFilesWithin = (listing: Promise<string[]>): Promise<string[]> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<string[]>((resolve) => {
+      timer = setTimeout(() => resolve([]), CHANGED_FILES_TIMEOUT_MS);
+    });
+    return Promise.race([listing.catch(() => []), timedOut]).finally(() => clearTimeout(timer));
+  };
+
+  const recordFileHashes = async (boardId: Id, nodeId: Id, roll: number, workspacePath: string, runtime: RuntimeSteps, runtimeRef: RuntimeRef | undefined) => {
     try {
-      const fileHashes = fileHashesAfterRun(workspacePath, partsOfRoll(boards.stateOf(boardId).parts[nodeId], roll));
+      const changed = runtimeRef && runtime.changedFiles ? await changedFilesWithin(runtime.changedFiles(runtimeRef, workspacePath)) : [];
+      const fileHashes = fileHashesAfterRun(workspacePath, partsOfRoll(boards.stateOf(boardId).parts[nodeId], roll), changed);
       if (Object.keys(fileHashes).length > 0) patchNode(boardId, nodeId, { fileHashes });
     } catch (error) {
       log.warn("run", `Could not record the file state after node ${nodeId}`, error);
@@ -482,7 +590,15 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
   const enqueue = (boardId: Id, nodeId: Id) => {
     refuseIfOverBudget(boardId);
     boards.commitRunPatch(boardId, { type: "queue", nodeId });
+    resumingNodeIds.delete(nodeId);
     void nameNode(boardId, nodeId, runtimeOf(boards.stateOf(boardId).board.mode)).catch((error) => log.warn("run", `Naming failure for node ${nodeId}`, error));
+    pump(boardId);
+  };
+
+  const resume = (boardId: Id, nodeId: Id) => {
+    refuseIfOverBudget(boardId);
+    boards.commitRunPatch(boardId, { type: "resume", nodeId });
+    resumingNodeIds.add(nodeId);
     pump(boardId);
   };
 
@@ -495,22 +611,33 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       return;
     }
     if (boards.stateOf(boardId).graph.nodes[nodeId]?.status === "queued") {
+      resumingNodeIds.delete(nodeId);
       patchNode(boardId, nodeId, { status: "idle" });
       pump(boardId);
     }
   };
 
-  const answerRequest = async (boardId: Id, requestId: Id, answer: string) => {
+  const closeOtherApprovals = (boardId: Id, ownerId: Id, answered: PendingRequest) =>
+    openRequestsOf(boardId, ownerId)
+      .filter((other) => other.kind === "approval" && other.id !== answered.id)
+      .forEach((other) => {
+        waiters.resolve(other.id, "reject");
+        boards.saveRequest({ ...other, status: "closed", answer: "reject" });
+      });
+
+  const answerRequest = async (boardId: Id, requestId: Id, answer: string, message?: string) => {
     const request = boards.stateOf(boardId).requests[requestId];
     if (!request || request.status !== "open") throw new RefusedError("That request is no longer open");
-    log.info("run", `Answering request ${requestId} with "${answer}"`);
+    const storedAnswer = withoutSecretAnswers(request.questions, answer);
+    log.info("run", `Answering request ${requestId} with "${storedAnswer}"`);
     const ownerId = ownerOf(boardId, request.nodeId);
     const active = activeRuns.get(ownerId);
     const runtime = active?.runtime ?? runtimeOf(boards.stateOf(boardId).board.mode);
-    await runtime.answerRequest(request, answer, active?.scope);
+    await runtime.answerRequest(request, answer, active?.scope, message);
     waiters.resolve(requestId, answer);
-    boards.saveRequest({ ...request, status: "closed", answer });
+    boards.saveRequest({ ...request, status: "closed", answer: storedAnswer });
     if (request.kind === "approval" && answer === "always") await closeDuplicateApprovals(boardId, ownerId, request, active?.scope, runtime);
+    if (request.kind === "approval" && answer === "reject" && runtime.rejectClosesRun) closeOtherApprovals(boardId, ownerId, request);
     syncStatus(boardId, ownerId);
   };
 
@@ -562,7 +689,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       .sort((first, second) => (second.completedAt ?? 0) - (first.completedAt ?? 0))
       .slice(0, FINISHED_RUNS_LIMIT);
 
-  return { enqueue, abort, listRuns, listFinishedRuns, answerRequest, summarise, catalogOf, forgetCatalogs: () => catalogCache.clear(), isActive: (nodeId: Id) => activeRuns.has(nodeId) };
+  return { enqueue, resume, abort, listRuns, listFinishedRuns, answerRequest, summarise, compact, control, catalogOf, forgetCatalogs: () => catalogCache.clear(), isActive: (nodeId: Id) => activeRuns.has(nodeId) };
 };
 
 export type RunService = ReturnType<typeof createRunService>;

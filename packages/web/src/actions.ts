@@ -17,7 +17,7 @@ import {
   type Keybinds,
 } from "@branchboard/core";
 import { createFileNode, pickFiles } from "./attachments";
-import type { IconName } from "./components/Icons";
+import type { IconName } from "./kit/Icons";
 import { displayShortcuts } from "./platform";
 import { useSettings } from "./settings";
 import { sendBoardCommand, useBoard } from "./store";
@@ -158,6 +158,20 @@ export const actions: Action[] = [
     scope: "node",
     isAvailable: ({ node }) => node?.kind === "turn" && node.status === "done",
     run: summariseNode,
+  },
+  {
+    id: "compact",
+    label: () => "Compact session",
+    icons: () => ["summary"],
+    hint: () => "shrink the saved session of this turn",
+    scope: "node",
+    isAvailable: ({ node }) => node?.kind === "turn" && node.status === "done" && node.runtimeRef !== undefined && useBoard.getState().catalog?.canCompact === true,
+    run: async ({ node }) => {
+      const { notify } = useBoard.getState();
+      notify("Compacting…");
+      const result = await sendBoardCommand({ type: "compactNode", nodeId: node!.id });
+      if (result) notify("Session compacted");
+    },
   },
   {
     id: "pin",

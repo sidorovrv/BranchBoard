@@ -14,7 +14,6 @@ import {
   isSummaryUsable,
   liveEdges,
   mentionTokensOf,
-  parseTodoItems,
   planSession,
   renderInput,
   satelliteIdsOf,
@@ -241,15 +240,6 @@ describe("AL-3 and AL-4 subagents and todos", () => {
     await command({ type: "restoreNodes", boardId, ids: group.nodeIds });
     expect((await nodeOf(boardId, satelliteId)).deleted).toBe(false);
   });
-
-  it("parses todo items from the shapes the runtimes send", () => {
-    expect(parseTodoItems([{ content: "a", status: "pending" }, { activeForm: "b", status: "in-progress" }, { content: " ", status: "pending" }, { content: "c", status: "cancelled" }])).toEqual([
-      { content: "a", status: "pending" },
-      { content: "b", status: "in_progress" },
-      { content: "c", status: "completed" },
-    ]);
-    expect(parseTodoItems("nope")).toEqual([]);
-  });
 });
 
 describe("AL-5 slash commands and mentions", () => {
@@ -272,7 +262,7 @@ describe("AL-5 slash commands and mentions", () => {
   });
 
   it("resolves mentions to files inside the workspace only", () => {
-    const resolved = resolveMentions("see @notes.md @src/main.ts @../outside.txt @missing.md @planner", workspace, ["planner"]);
+    const resolved = resolveMentions("see @notes.md @src/main.ts @../outside.txt @missing.md @planner", workspace, { agents: ["planner"] });
     expect(resolved.files.map((file) => file.name).sort()).toEqual(["main.ts", "notes.md"]);
     expect(resolved.agent).toBe("planner");
     expect(resolved.files.find((file) => file.name === "main.ts")?.mime).toBe("text/plain");
@@ -588,6 +578,8 @@ describe("board activity", () => {
     const failed = (await command({ type: "reply", boardId, prompt: "/fail" })).json.nodeId;
     await waitForStatus(boardId, failed, "error");
     expect(await hitLimit(boardId)).toBe(true);
+    await command({ type: "markBoardSeen", boardId });
+    expect(await hitLimit(boardId)).toBe(false);
     const fine = (await command({ type: "reply", boardId, prompt: "hello" })).json.nodeId;
     await waitForStatus(boardId, fine, "done");
     await waitFor(async () => !(await hitLimit(boardId)));

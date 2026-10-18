@@ -1,9 +1,9 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { describeContext, formatTokens, incomingEdges, isStale, isSummaryUsable, orderedAncestorIds, sameMembers, type ContextMode, type GraphNode, type Id } from "@branchboard/core";
+import { describeContext, formatAgo, formatTokens, incomingEdges, isStale, isSummaryUsable, orderedAncestorIds, sameMembers, type ContextMode, type GraphNode, type Id } from "@branchboard/core";
 import { commitGraphEdit, summariseNode } from "../actions";
 import { useSettings } from "../settings";
 import { sendBoardCommand, useBoard } from "../store";
-import { Icon } from "./Icons";
+import { Icon } from "../kit/Icons";
 
 const KIND_LABELS = { context: "Note", code: "Code", file: "File", turn: "Chat", subagent: "Subagent", summary: "Summary" };
 
@@ -79,6 +79,7 @@ const SummaryBody = ({ node, summarisedCount }: { node: GraphNode; summarisedCou
   const graph = useBoard((state) => state.view.graph);
   const hasSummary = Boolean(node.summary?.text);
   const isUsable = hasSummary && isSummaryUsable(graph, node);
+  const summarisable = [node, ...incomingEdges(graph, node.id).map((edge) => graph.nodes[edge.fromId])].filter((candidate) => candidate?.kind === "turn" && candidate.status === "done");
   return (
     <>
       {summarisedCount > 0 && <div className="ctx-note">{summarisedCount} earlier turn{summarisedCount === 1 ? " is" : "s are"} replaced by this summary on the next run.</div>}
@@ -93,8 +94,10 @@ const SummaryBody = ({ node, summarisedCount }: { node: GraphNode; summarisedCou
         </>
       ) : (
         <>
-          <div className="ctx-note">A summary replaces this turn and everything before it with a shorter text.</div>
-          {node.status === "done" && <div className="ctx-actions"><button onClick={() => void summariseNode({ node })}>Summarise up to here</button></div>}
+          <div className="ctx-note">A summary replaces a finished turn and everything before it with a shorter text.</div>
+          <div className="ctx-actions">
+            {summarisable.map((target) => <button key={target.id} onClick={() => void summariseNode({ node: target })}>Summarise up to {target.id === node.id ? "here" : target.title}</button>)}
+          </div>
         </>
       )}
     </>
@@ -148,6 +151,7 @@ const ContextBody = () => {
       <div className="ctx-heading"><KindDot kind="turn" /><strong>{node.title}</strong></div>
       {isStale(graph, node) && <StalenessDetail nodeId={node.id} />}
       <UsageCard tokens={description!.tokens} isApproximate={description!.isApproximate} windowSize={windowSize} republished={description!.republished} mode={description!.mode} />
+      {node.compactedAt && <div className="ctx-note">The saved session was compacted {formatAgo(Date.now() - node.compactedAt)} ago. The runtime replaced earlier turns in it with a summary.</div>}
       <Section title="Parents" count={incomingEdges(graph, node.id).length}>
         <ParentList nodeId={node.id} />
       </Section>

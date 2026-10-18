@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
+  activeRollOf,
   codeViewOfPath,
   collapseUnchanged,
   diffRows,
-  fileNameOf,
   gitChangesOf,
   HTML_SANDBOX_FLAGS,
   languageOfPath,
@@ -17,13 +17,14 @@ import {
 import { fetchWorkspaceFiles, pickPath } from "../api";
 import { createAndFocus } from "../actions";
 import { useAutosavedText } from "../autosave";
-import { highlightCode } from "../highlight";
+import { useCommentHighlights } from "../commentAnchors";
+import { CopyButton } from "../kit/CodeFence";
+import { DiffView } from "../kit/DiffView";
+import { highlightCode } from "../kit/highlight";
+import { Icon } from "../kit/Icons";
+import { Markdown } from "../kit/Markdown";
 import { boardId, sendBoardCommand } from "../store";
-import { ChipSelect } from "./ChipSelect";
-import { CopyButton } from "./CodeFence";
-import { DiffView } from "./DiffView";
-import { Icon } from "./Icons";
-import { Markdown } from "./Markdown";
+import { ChipSelect } from "../kit/ChipSelect";
 
 const ExtractButton = ({ name, command }: { name: string; command: Record<string, unknown> }) => {
   const extract = (event: MouseEvent<HTMLButtonElement>) => {
@@ -38,8 +39,6 @@ const ExtractButton = ({ name, command }: { name: string; command: Record<string
     </button>
   );
 };
-
-export const ExtractFileButton = ({ path }: { path: string }) => <ExtractButton name={fileNameOf(path)} command={{ type: "extractFile", path }} />;
 
 export const ExtractAttachmentButton = ({ attachment }: { attachment: Attachment }) => (
   <ExtractButton name={attachment.name} command={{ type: "extractAttachment", attachmentId: attachment.id }} />
@@ -163,9 +162,14 @@ interface ViewProps {
   changes?: GitChanges;
 }
 
-const FormattedView = ({ node }: ViewProps) => (
-  <div className="markdown-view copyable nowheel"><Markdown text={node.prompt} sourcePath={node.sourceAttachmentId ? undefined : node.filePath} /></div>
-);
+const FormattedView = ({ node }: ViewProps) => {
+  const view = useRef<HTMLDivElement>(null);
+  const roll = activeRollOf(node);
+  useCommentHighlights(node, roll, view);
+  return (
+    <div ref={view} data-roll={roll} className="markdown-view copyable nowheel"><Markdown text={node.prompt} sourcePath={node.sourceAttachmentId ? undefined : node.filePath} /></div>
+  );
+};
 
 const EditView = ({ node }: ViewProps) => {
   const isFileBacked = !node.sourceAttachmentId && !node.gitRef;
@@ -188,11 +192,14 @@ const RemovedMarker = ({ block }: { block: GitChanges["removedBlocks"][number] }
 
 const SourceView = ({ node, path, changes }: ViewProps) => {
   const highlighted = useMemo(() => highlightCode(node.prompt, languageOfPath(path)), [node.prompt, path]);
+  const code = useRef<HTMLElement>(null);
+  const roll = activeRollOf(node);
+  useCommentHighlights(node, roll, code);
   return (
     <pre className="copyable nodrag nowheel">
       {changedRanges(changes?.added ?? []).map(({ start, length }) => <span key={start} className="changed-lines" style={{ top: `calc(var(--code-pad) + ${start - 1} * var(--code-line))`, height: `calc(${length} * var(--code-line))` }} />)}
       {(changes?.removedBlocks ?? []).map((block) => <RemovedMarker key={`${block.after}-${block.lines[0]}`} block={block} />)}
-      {highlighted === undefined ? <code>{node.prompt}</code> : <code className="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />}
+      {highlighted === undefined ? <code ref={code} data-roll={roll}>{node.prompt}</code> : <code ref={code} data-roll={roll} className="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />}
     </pre>
   );
 };

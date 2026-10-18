@@ -1,9 +1,14 @@
 import { create } from "zustand";
-import { applyBoardEvent, describeSensitiveFiles, emptyView, preferredModelId, preferredPermissionMode, sameMembers, unique, type Board, type BoardEvent, type BoardView, type Catalog, type Id, type Project, type RunInfo } from "@branchboard/core";
+import { applyBoardEvent, describeSensitiveFiles, emptyView, liveNodes, preferredModelId, preferredPermissionMode, sameMembers, unique, type Board, type BoardEvent, type BoardView, type Catalog, type Id, type Project, type RunInfo } from "@branchboard/core";
 import { useSettings } from "./settings";
-import { CommandRefused, fetchBoards, fetchProjects, fetchBoardView, fetchCatalog, fetchFinishedRuns, fetchRuns, sendCommand, subscribeToBoard } from "./api";
+import { recordBoardOpen } from "./boardOpenTiming";
+import { CommandRefused, fetchBoards, fetchProjects, fetchTimedBoardView, fetchCatalog, fetchFinishedRuns, fetchRuns, sendCommand, subscribeToBoard } from "./api";
 
 const RUN_POLL_MS = 1500;
+
+const roundMs = (value: number): number => Math.round(value * 10) / 10;
+
+const afterNextPaint = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
 interface BoardStore {
   runs: RunInfo[];
@@ -27,6 +32,7 @@ interface BoardStore {
   setSettingsOpen: (isOpen: boolean, sectionId?: string) => void;
   isShortcutsOpen: boolean;
   setShortcutsOpen: (isOpen: boolean) => void;
+  isBoardLoading: boolean;
   isTourOpen: boolean;
   tourReturnBoardId?: Id;
   beginTour: (sample: { board: Board; view: BoardView }) => void;
@@ -67,7 +73,7 @@ export const useBoard = create<BoardStore>((set, get) => {
       view: batch.reduce(applyBoardEvent, state.view),
       ...(renamed && state.board?.id === renamed.id ? { board: renamed, boards: state.boards.map((candidate) => (candidate.id === renamed.id ? renamed : candidate)) } : {}),
     }));
-    if (renamed?.hasUnseenResult && get().board?.id === renamed.id) void get().send({ type: "markBoardSeen", boardId: renamed.id });
+    if ((renamed?.hasUnseenResult || renamed?.hitUsageLimit) && get().board?.id === renamed.id) void get().send({ type: "markBoardSeen", boardId: renamed.id });
   };
 
   const queueEvent = (event: BoardEvent) => {
@@ -79,10 +85,28 @@ export const useBoard = create<BoardStore>((set, get) => {
   };
 
   const reload = async (boardId: Id) => {
-    const { board, ...view } = await fetchBoardView(boardId);
+    const startedAt = performance.now();
+    const { body, fetchMs, parseMs } = await fetchTimedBoardView(boardId);
+    const { board, ...view } = body;
     pendingEvents = [];
+    const renderStartedAt = performance.now();
     set({ board, view });
+    void afterNextPaint().then(() => {
+      const finishedAt = performance.now();
+      recordBoardOpen({ fetchMs: roundMs(fetchMs), parseMs: roundMs(parseMs), renderMs: roundMs(finishedAt - renderStartedAt), totalMs: roundMs(finishedAt - startedAt), nodes: liveNodes(view.graph).length });
+    });
   };
+
+  const subscribeAndLoad = (boardId: Id) =>
+    new Promise<void>((resolve, reject) => {
+      let isFirstOpen = true;
+      unsubscribe = subscribeToBoard(boardId, queueEvent, () => {
+        const loading = reload(boardId);
+        if (!isFirstOpen) return void loading;
+        isFirstOpen = false;
+        loading.then(resolve, reject);
+      });
+    });
 
   const activeBoardKey = (runs: RunInfo[]) => unique(runs.map((run) => run.boardId)).sort().join(",");
 
@@ -120,6 +144,7 @@ export const useBoard = create<BoardStore>((set, get) => {
     setSettingsOpen: (isOpen, sectionId) => set({ isSettingsOpen: isOpen, settingsSectionId: sectionId }),
     isShortcutsOpen: false,
     setShortcutsOpen: (isOpen) => set({ isShortcutsOpen: isOpen }),
+    isBoardLoading: true,
     isTourOpen: false,
     beginTour: (sample) => {
       if (get().isTourOpen) return;
@@ -143,15 +168,18 @@ export const useBoard = create<BoardStore>((set, get) => {
     },
     openBoard: async (boardId) => {
       unsubscribe?.();
-      set({ selectedIds: [], catalog: undefined });
-      await reload(boardId);
+      set({ selectedIds: [], catalog: undefined, isBoardLoading: true });
+      try {
+        await subscribeAndLoad(boardId);
+      } finally {
+        set({ isBoardLoading: false });
+      }
       const opened = get().board;
-      if (opened?.hasUnseenResult) {
-        set({ board: { ...opened, hasUnseenResult: false } });
+      if (opened?.hasUnseenResult || opened?.hitUsageLimit) {
+        set({ board: { ...opened, hasUnseenResult: false, hitUsageLimit: false } });
         await get().send({ type: "markBoardSeen", boardId });
         await get().loadBoards();
       }
-      unsubscribe = subscribeToBoard(boardId, queueEvent, () => void reload(boardId));
       set({ catalog: await fetchCatalog(boardId) });
       localStorage.setItem("branchboard.lastBoard", boardId);
     },
@@ -198,9 +226,12 @@ const nearViewFor = (command: Record<string, unknown>): Record<string, unknown> 
 const isTopLevelReply = (command: Record<string, unknown>): boolean => command.type === "reply" && Array.isArray(command.parentIds) && command.parentIds.length === 0;
 
 const preferredModelFor = (command: Record<string, unknown>): Record<string, unknown> => {
-  const models = useBoard.getState().catalog?.models ?? [];
-  const model = isTopLevelReply(command) && command.model === undefined ? preferredModelId(models, useSettings.getState().settings.defaultModel) : undefined;
-  return model ? { model } : {};
+  const catalog = useBoard.getState().catalog;
+  const models = catalog?.models ?? [];
+  const isNewChat = isTopLevelReply(command) && command.model === undefined;
+  const model = isNewChat ? (preferredModelId(models, useSettings.getState().settings.defaultModel) ?? models.find((candidate) => candidate.id === catalog?.defaultModel)?.id) : undefined;
+  const agent = isNewChat && command.agent === undefined && catalog?.defaultAgent && catalog.agents.includes(catalog.defaultAgent) ? catalog.defaultAgent : undefined;
+  return { ...(model ? { model } : {}), ...(agent ? { agent } : {}) };
 };
 
 const preferredPermissionModeFor = (command: Record<string, unknown>): Record<string, unknown> => {

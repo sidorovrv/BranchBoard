@@ -34,3 +34,16 @@ export const createLimiter = (limit: number) => {
 };
 
 export type Limiter = ReturnType<typeof createLimiter>;
+
+export const withSlot = async <Result>(limiter: Limiter | undefined, signal: AbortSignal, setWaiting: ((isWaiting: boolean) => void) | undefined, work: () => Promise<Result>): Promise<Result | undefined> => {
+  if (!limiter) return work();
+  if (limiter.isFull()) setWaiting?.(true);
+  const release = await limiter.acquire(signal);
+  setWaiting?.(false);
+  if (!release) return undefined;
+  try {
+    return await work();
+  } finally {
+    release();
+  }
+};

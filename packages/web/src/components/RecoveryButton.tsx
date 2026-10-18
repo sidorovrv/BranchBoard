@@ -21,7 +21,7 @@ export const RECOVERY_ACTIONS: Record<RecoveryId, RecoveryAction> = {
   assemble: { label: "Resend context as text", run: (node) => sendBoardCommand({ type: "regenerate", nodeId: node.id, assemble: true }) },
   setup: { label: "Open settings", run: openKeys },
   signIn: { label: "Try again", run: regenerate },
-  usageLimit: { label: "Try again", run: regenerate },
+  usageLimit: { label: "Try again and continue", run: (node) => sendBoardCommand({ type: "regenerate", nodeId: node.id, continue: true }) },
   report: { label: "Save bug report", run: saveBugReport },
   retry: { label: "Try again", run: regenerate },
 };

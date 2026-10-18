@@ -7,9 +7,9 @@ test.beforeEach(async ({ appPage }) => {
 
 test("the settings dialog opens and closes", async ({ appPage }) => {
   await appPage.getByRole("button", { name: "Settings" }).click();
-  await expect(appPage.locator(".dialog")).toBeVisible();
+  await expect(appPage.locator(".settings-dialog")).toBeVisible();
   await appPage.keyboard.press("Escape");
-  await expect(appPage.locator(".dialog")).toBeHidden();
+  await expect(appPage.locator(".settings-dialog")).toBeHidden();
 });
 
 test("the trash dialog states how long items are kept", async ({ appPage }) => {

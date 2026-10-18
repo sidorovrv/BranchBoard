@@ -1,6 +1,6 @@
 import { RUN_CHOICE_KEYS } from "./choices";
 import { indexBy, isRefusal, mapValues, newId, now, refuse, sameMembers, sortBy, unique, type Refusal } from "./helpers";
-import { canSelectRoll, rollPatchForDiscard, rollPatchForQueue, rollPatchForSelect } from "./rolls";
+import { activeRollOf, canSelectRoll, rollPatchForDiscard, rollPatchForQueue, rollPatchForSelect } from "./rolls";
 import type { BoardGraph, EdgePatch, GraphEdge, GraphEdit, GraphNode, Id, NodeComment, NodePatch, NodeStatus, Patch } from "./types";
 
 export const NODE_WIDTH = 700;
@@ -369,7 +369,16 @@ export const satelliteIdsOf = (graph: BoardGraph, parentId: Id): Id[] =>
     .filter((node) => node.satelliteOf === parentId)
     .map((node) => node.id);
 
-const nodesToDelete = (graph: BoardGraph, edit: EditOf<"deleteNodes">): Set<Id> => {
+export const shownSatelliteIdsOf = (graph: BoardGraph, parentId: Id, roll?: number): Id[] => {
+  const parent = graph.nodes[parentId];
+  const runStartedAt = parent && roll !== undefined && roll !== activeRollOf(parent) ? parent.rolls?.[roll]?.startedAt : parent?.startedAt;
+  return satelliteIdsOf(graph, parentId).filter((id) => {
+    const satellite = graph.nodes[id];
+    return satellite.satelliteRunStartedAt !== undefined ? satellite.satelliteRunStartedAt === runStartedAt : satellite.createdAt >= (runStartedAt ?? Infinity);
+  });
+};
+
+const nodesToDelete =(graph: BoardGraph, edit: EditOf<"deleteNodes">): Set<Id> => {
   const ids = new Set(edit.ids);
   if (edit.withExclusiveDescendants) exclusiveDescendantIds(graph, edit.ids).forEach((id) => ids.add(id));
   [...ids].forEach((id) => satelliteIdsOf(graph, id).forEach((satelliteId) => ids.add(satelliteId)));
@@ -501,6 +510,17 @@ const queue: EditKind<EditOf<"queue">> = {
   toPatch: (graph, edit) => nodeFieldPatch(graph, [edit.nodeId], rollPatchForQueue),
 };
 
+export const canResume = (node: GraphNode | undefined): boolean => node?.kind === "turn" && node.status === "error" && node.runtimeRef !== undefined;
+
+const resume: EditKind<EditOf<"resume">> = {
+  check: (graph, edit) => {
+    const node = liveNode(graph, edit.nodeId);
+    if (!canResume(node)) return "Only a failed chat with a saved session can continue";
+    return refuseLocked(graph, [edit.nodeId, ...descendantIds(graph, edit.nodeId)]);
+  },
+  toPatch: (graph, edit) => nodeFieldPatch(graph, [edit.nodeId], () => ({ status: "queued" })),
+};
+
 const selectRoll: EditKind<EditOf<"selectRoll">> = {
   check: (graph, edit) => {
     const node = liveNode(graph, edit.nodeId);
@@ -555,6 +575,7 @@ export const editKinds: { [T in GraphEdit["type"]]: EditKind<EditOf<T>> } = {
   detach,
   reopen,
   queue,
+  resume,
   selectRoll,
   editNode,
   editComments,

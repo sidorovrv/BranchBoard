@@ -5,7 +5,12 @@ type Level = "debug" | "info" | "warn" | "error";
 
 const LEVEL_ORDER: Record<Level, number> = { debug: 0, info: 1, warn: 2, error: 3 };
 
-const threshold = (): number => LEVEL_ORDER[(process.env.BRANCHBOARD_LOG_LEVEL as Level) ?? "debug"] ?? LEVEL_ORDER.debug;
+export const DEFAULT_CONSOLE_LEVEL: Level = "warn";
+const DEFAULT_FILE_LEVEL: Level = "info";
+
+const consoleThreshold = (): number => LEVEL_ORDER[process.env.BRANCHBOARD_LOG_LEVEL as Level] ?? LEVEL_ORDER[DEFAULT_CONSOLE_LEVEL];
+
+const fileThreshold = (): number => Math.min(consoleThreshold(), LEVEL_ORDER[DEFAULT_FILE_LEVEL]);
 
 const detail = (value: unknown): string => {
   if (value instanceof Error) return value.stack ?? `${value.name}: ${value.message}`;
@@ -60,10 +65,13 @@ const writeToFile = (line: string) => {
 };
 
 const write = (level: Level, scope: string, message: string, extra?: unknown) => {
-  if (LEVEL_ORDER[level] < threshold()) return;
+  const severity = LEVEL_ORDER[level];
+  const toConsole = severity >= consoleThreshold();
+  const toFile = severity >= fileThreshold();
+  if (!toConsole && !toFile) return;
   const line = `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} [${scope}] ${message}${extra === undefined ? "" : `\n${detail(extra)}`}`;
-  (level === "error" || level === "warn" ? console.error : console.log)(line);
-  writeToFile(line);
+  if (toConsole) (level === "error" || level === "warn" ? console.error : console.log)(line);
+  if (toFile) writeToFile(line);
 };
 
 export const log = {

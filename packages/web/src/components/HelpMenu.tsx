@@ -2,15 +2,17 @@ import { SHORTCUT_AREAS, shortcutRows } from "@branchboard/core";
 import { displayShortcuts } from "../platform";
 import { useSettings } from "../settings";
 import { useBoard } from "../store";
+import { useTelemetry } from "../telemetryStore";
 import { startTour } from "../tour";
 import { useContextMenu } from "./ContextMenu";
-import { IconRow } from "./Icons";
+import { IconRow } from "../kit/Icons";
 
 export const HelpButton = () => {
   const { open, element } = useContextMenu();
   const items = [
     { label: "Shortcuts", run: () => useBoard.getState().setShortcutsOpen(true) },
     { label: "Take the tour", run: startTour },
+    { label: "Telemetry", run: () => useTelemetry.getState().setDialogOpen(true) },
   ];
   return (
     <>

@@ -2,11 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { formatAgo, type TrashListing, type TrashedNodeGroup } from "@branchboard/core";
 import { fetchTrash } from "../api";
 import { useBoard } from "../store";
-import { IconRow } from "./Icons";
+import { IconRow } from "../kit/Icons";
 
 const ago = (deletedAt: number): string => formatAgo(Math.max(0, Date.now() - deletedAt));
 
-const RETENTION_NOTE = "Items are removed for good 30 days after they were deleted.";
+const RETENTION_NOTE = "Items are deleted for good after 30 days.";
 
 const isEmpty = (listing: TrashListing): boolean => listing.projects.length + listing.boards.length + listing.nodeGroups.length === 0;
 
@@ -29,7 +29,7 @@ export const TrashDialog = ({ onClose }: { onClose: () => void }) => {
   };
 
   const emptyTrash = async () => {
-    if (!confirm("Delete everything in the trash for good? This cannot be undone.")) return;
+    if (!confirm("Delete everything in the trash for good?")) return;
     await restoreAndRefresh({ type: "emptyTrash" });
   };
 

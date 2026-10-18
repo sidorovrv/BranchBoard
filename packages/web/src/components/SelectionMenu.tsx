@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { bulletOfQuote, isBranchList, liveNodes, quotedPrompt, withAddedBullet, type GraphNode } from "@branchboard/core";
+import { activeRollOf, bulletOfQuote, isBranchList, liveNodes, quotedPrompt, withAddedBullet, type GraphNode } from "@branchboard/core";
 import { createAndFocus } from "../actions";
+import { keepNativeMenuOnTextFields } from "./ContextMenu";
 import { ANSWER_SELECTOR, offsetsOfRange } from "../commentAnchors";
 import { sendBoardCommand, useBoard } from "../store";
-import { addComment, CommentField, type CommentAnchor } from "./Comments";
+import { addComment, askNow, CommentField, type CommentAnchor } from "./Comments";
 
 interface Selection {
   nodeId: string;
@@ -53,7 +54,7 @@ const readSelection = (): Selection | undefined => {
 
 const commentAnchorOf = (anchor: Element, node: GraphNode, range: Range, quote: string): CommentAnchor | undefined => {
   const answer = anchor.closest<HTMLElement>(ANSWER_SELECTOR);
-  if (!answer || node.kind !== "turn" ||!answer.contains(range.commonAncestorContainer)) return undefined;
+  if (!answer || !answer.contains(range.commonAncestorContainer)) return { nodeId: node.id, roll: activeRollOf(node), quote, start: 0, end: 0 };
   return { nodeId: node.id, roll: Number(answer.dataset.roll), quote, ...offsetsOfRange(answer, range) };
 };
 
@@ -117,10 +118,15 @@ export const SelectionMenu = () => {
     void run(menu.selection);
   };
   return (
-    <div className="context-menu selection-menu" style={{ left: menu.x, top: menu.y }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
+    <div className="context-menu selection-menu" style={{ left: menu.x, top: menu.y }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={keepNativeMenuOnTextFields}>
       {menu.selection.comment && (
         <>
-          <CommentField autoFocus label="Add the comment to the selected text" onSubmit={(text) => (close(), window.getSelection()?.removeAllRanges(), void addComment(menu.selection.comment!, text))} />
+          <CommentField
+            autoFocus
+            label="Add the comment to the selected text"
+            onSubmit={(text) => (close(), window.getSelection()?.removeAllRanges(), void addComment(menu.selection.comment!, text))}
+            onAsk={(text) => (close(), window.getSelection()?.removeAllRanges(), void askNow(menu.selection.comment!, text))}
+          />
           <hr />
         </>
       )}

@@ -22,9 +22,33 @@ export interface Settings {
   keyboardPanSpeed: number;
   boardNavigation: BoardNavigation;
   showTopbarMeters: boolean;
+  showClaudeCost: boolean;
   activeJobsShown: number;
+  shownTags: NodeTagId[];
   keybinds: Keybinds;
 }
+
+export const NODE_TAGS = [
+  { id: "status", label: "Status" },
+  { id: "summary", label: "Summary" },
+  { id: "runTime", label: "Run time" },
+  { id: "locked", label: "Locked" },
+  { id: "assemble", label: "Assemble" },
+  { id: "model", label: "Model" },
+  { id: "agent", label: "Agent" },
+  { id: "effort", label: "Effort" },
+  { id: "permissionMode", label: "Permission mode" },
+  { id: "contextMode", label: "Context mode" },
+  { id: "contextChanged", label: "Context changed" },
+  { id: "tokens", label: "Tokens" },
+  { id: "cost", label: "Cost" },
+  { id: "contextWindow", label: "Context window" },
+  { id: "cache", label: "Prompt cache" },
+] as const;
+
+export type NodeTagId = (typeof NODE_TAGS)[number]["id"];
+
+const ALL_NODE_TAGS: NodeTagId[] = NODE_TAGS.map((tag) => tag.id);
 
 export const ACTIVE_JOBS_SHOWN_MAX = 20;
 export const ACTIVE_JOBS_SHOWN_DEFAULT = 5;
@@ -58,7 +82,7 @@ export type ThemeChoice = "system" | "light" | "dark";
 export const THEME_CHOICES: ThemeChoice[] = ["system", "light", "dark"];
 
 
-export const DEFAULT_SETTINGS: Settings = { followScroll: true, defaultNodeWidth: NODE_WIDTH, defaultNodeHeight: NODE_HEIGHT, blinkForAttention: true, snapNextPrompt: false, groupToolCalls: false, defaultModel: DEFAULT_MODEL_PREFERENCE, defaultPermissionMode: RUNTIME_DEFAULT_PERMISSION_MODE, isSidebarOpen: true, isContextPanelOpen: true, readerWidth: READER_DEFAULT_WIDTH, answerFont: "sans", theme: "system", flowDirection: "horizontal", subagentDisplay: "node", altClickZoom: ALT_CLICK_ZOOM_DEFAULT, keyboardPan: "none", keyboardPanSpeed: KEYBOARD_PAN_SPEED_DEFAULT, boardNavigation: "sidebar", showTopbarMeters: true, activeJobsShown: ACTIVE_JOBS_SHOWN_DEFAULT, keybinds: normaliseKeybinds({}) };
+export const DEFAULT_SETTINGS: Settings = { followScroll: true, defaultNodeWidth: NODE_WIDTH, defaultNodeHeight: NODE_HEIGHT, blinkForAttention: true, snapNextPrompt: false, groupToolCalls: false, defaultModel: DEFAULT_MODEL_PREFERENCE, defaultPermissionMode: RUNTIME_DEFAULT_PERMISSION_MODE, isSidebarOpen: true, isContextPanelOpen: true, readerWidth: READER_DEFAULT_WIDTH, answerFont: "sans", theme: "system", flowDirection: "horizontal", subagentDisplay: "node", altClickZoom: ALT_CLICK_ZOOM_DEFAULT, keyboardPan: "none", keyboardPanSpeed: KEYBOARD_PAN_SPEED_DEFAULT, boardNavigation: "sidebar", showTopbarMeters: true, showClaudeCost: false, activeJobsShown: ACTIVE_JOBS_SHOWN_DEFAULT, shownTags: ALL_NODE_TAGS, keybinds: normaliseKeybinds({}) };
 
 const STORAGE_KEY = "branchboard.settings";
 
@@ -100,10 +124,12 @@ const normalizers: SettingNormalizers = {
   },
   boardNavigation: (value) => (BOARD_NAVIGATIONS.includes(value as BoardNavigation) ? (value as BoardNavigation) : DEFAULT_SETTINGS.boardNavigation),
   showTopbarMeters: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.showTopbarMeters),
+  showClaudeCost: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.showClaudeCost),
   activeJobsShown: (value) => {
     const count = Number(value);
     return Number.isFinite(count) ? Math.min(ACTIVE_JOBS_SHOWN_MAX, Math.max(0, Math.round(count))) : DEFAULT_SETTINGS.activeJobsShown;
   },
+  shownTags: (value) => (Array.isArray(value) ? ALL_NODE_TAGS.filter((id) => value.includes(id)) : DEFAULT_SETTINGS.shownTags),
   keybinds: normaliseKeybinds,
 };
 
@@ -128,7 +154,9 @@ const normalize = (raw: Partial<Record<keyof Settings, unknown>>): Settings => (
   keyboardPanSpeed: normalizers.keyboardPanSpeed(raw.keyboardPanSpeed),
   boardNavigation: normalizers.boardNavigation(raw.boardNavigation),
   showTopbarMeters: normalizers.showTopbarMeters(raw.showTopbarMeters),
+  showClaudeCost: normalizers.showClaudeCost(raw.showClaudeCost),
   activeJobsShown: normalizers.activeJobsShown(raw.activeJobsShown),
+  shownTags: normalizers.shownTags(raw.shownTags),
   keybinds: normalizers.keybinds(raw.keybinds),
 });
 

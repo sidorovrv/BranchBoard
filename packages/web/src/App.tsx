@@ -10,6 +10,7 @@ import { CommentMenu } from "./components/Comments";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { ContextPanel } from "./components/ContextPanel";
 import { ShortcutsDialog } from "./components/HelpMenu";
+import { TelemetryDialog } from "./components/TelemetryDialog";
 import { TourOverlay } from "./components/TourOverlay";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
@@ -33,12 +34,23 @@ const Toast = () => {
 
 const loadInitialBoard = async () => {
   const store = useBoard.getState();
-  await store.loadBoards();
-  const boards = useBoard.getState().boards;
-  const remembered = localStorage.getItem("branchboard.lastBoard");
-  const first = boards.find((board) => board.id === remembered) ?? boards[0];
-  if (first) await store.openBoard(first.id);
+  try {
+    await store.loadBoards();
+    const boards = useBoard.getState().boards;
+    const remembered = localStorage.getItem("branchboard.lastBoard");
+    const first = boards.find((board) => board.id === remembered) ?? boards[0];
+    if (first) await store.openBoard(first.id);
+  } finally {
+    useBoard.setState({ isBoardLoading: false });
+  }
 };
+
+const LoadingOverlay = () => (
+  <div className="loading-overlay" role="status" aria-live="polite">
+    <div className="loading-spinner" />
+    <div>Preparing the board...</div>
+  </div>
+);
 
 export const App = () => {
   const board = useBoard((state) => state.board);
@@ -75,6 +87,7 @@ export const App = () => {
   const isReaderOpen = useBoard((state) => state.isReaderOpen);
   const isShortcutsOpen = useBoard((state) => state.isShortcutsOpen);
   const isTourOpen = useBoard((state) => state.isTourOpen);
+  const isBoardLoading = useBoard((state) => state.isBoardLoading);
   return (
     <div className={`app${isTourOpen ? " is-touring" : ""}`}>
       <BoardBar />
@@ -94,16 +107,18 @@ export const App = () => {
             {isReaderOpen && <ReaderPanel />}
             {isContextPanelOpen && <ContextPanel />}
           </>
-        ) : (
+        ) : isBoardLoading ? null : (
           <div className="empty-state">
             <p>Connect a project and create a board to start.</p>
             <button className="primary" onClick={startTour}>Take the tour</button>
           </div>
         )}
       </div>
+      {isBoardLoading && <LoadingOverlay />}
       {board && <Toolbar />}
       {isShortcutsOpen && <ShortcutsDialog />}
       {isTourOpen && <TourOverlay />}
+      <TelemetryDialog />
       <Toast />
       <ImagePreviewLayer />
     </div>

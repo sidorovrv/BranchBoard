@@ -120,7 +120,7 @@ const useWheelOverNodes = () => {
 };
 
 const useDerivedNodes = (): Node[] => {
-  const graph = useBoard((state) => state.view.graph);
+  const graph = useGraphWithLiveMoves();
   const isInline = useSettings((state) => state.settings.subagentDisplay) === "inline";
   return useMemo(() => {
     const hidden = hiddenByCollapse(graph);
@@ -256,7 +256,8 @@ export const Canvas = () => {
   useEffect(() => {
     if (pendingFocus && nodes.find((node) => node.id === pendingFocus)?.measured) {
       useBoard.getState().requestFocus(undefined);
-      focus(pendingFocus);
+      const isCameraPinnedByRecording = document.documentElement.dataset.recording === "still";
+      if (!isCameraPinnedByRecording) focus(pendingFocus);
     }
   }, [pendingFocus, nodes, focus]);
 
@@ -421,7 +422,7 @@ export const Canvas = () => {
       proOptions={{ hideAttribution: true }}
     >
       <Background variant={BackgroundVariant.Dots} gap={22} size={1.6} />
-      <MiniMap pannable zoomable nodeComponent={MiniMapNode} nodeStrokeWidth={3} />
+      <MiniMap pannable zoomable nodeComponent={MiniMapNode} nodeStrokeWidth={3} onClick={(_event, position) => void setCenter(position.x, position.y, { zoom: getViewport().zoom, duration: FOCUS_DURATION_MS })} />
       <Controls showInteractive={false} />
       <ZoomReadout />
       <AlignmentGuides guides={guides} />

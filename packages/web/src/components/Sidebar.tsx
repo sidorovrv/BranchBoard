@@ -4,7 +4,7 @@ import { downloadFromApi } from "../api";
 import { useSidebarLayout } from "../sidebarLayout";
 import { useBoard } from "../store";
 import { useContextMenu } from "./ContextMenu";
-import { IconRow } from "./Icons";
+import { IconRow } from "../kit/Icons";
 import { ProjectDialog } from "./ProjectDialog";
 
 export const sendWorkspaceCommand = <T = any,>(command: Record<string, unknown>) => useBoard.getState().send<T>(command);
@@ -28,7 +28,7 @@ export const deleteBoard = async (board: Board) => {
 };
 
 const deleteProject = async (project: Project) => {
-  if (!confirm(`Move project “${project.name}” and all of its boards to the trash? The folder itself is not touched.`)) return;
+  if (!confirm(`Move project “${project.name}” and all of its boards to the trash?`)) return;
   await sendWorkspaceCommand({ type: "deleteProject", projectId: project.id });
   await useBoard.getState().loadBoards();
   const { board: current, boards, openBoard } = useBoard.getState();
@@ -79,7 +79,7 @@ export const EditableName = ({ value, isEditing, onEditingChange, onCommit, clas
 
 export type BoardActivity = "attention" | "working" | "limit" | "unseen" | "none";
 
-export const ACTIVITY_TITLES: Record<BoardActivity, string> = { attention: "A node is waiting for your answer", working: "Nodes are running or queued", limit: "A run hit the usage limit; regenerate it after the limit resets", unseen: "Finished since you last opened it", none: "" };
+export const ACTIVITY_TITLES: Record<BoardActivity, string> = { attention: "A node is waiting for your answer", working: "Nodes are running or queued", limit: "A run hit the usage limit", unseen: "Finished since you last opened it", none: "" };
 
 type DropPlacement = ListPlacement | undefined;
 
@@ -163,8 +163,9 @@ export const activityOf = (board: Board, runs: RunInfo[], activeId?: string): Bo
   const boardRuns = runs.filter((run) => run.boardId === board.id);
   if (boardRuns.some((run) => run.status === "awaiting_approval")) return "attention";
   if (boardRuns.length > 0) return "working";
+  if (board.id === activeId) return "none";
   if (board.hitUsageLimit) return "limit";
-  return board.hasUnseenResult && board.id !== activeId ? "unseen" : "none";
+  return board.hasUnseenResult ? "unseen" : "none";
 };
 
 const ACTIVITY_PRIORITY: BoardActivity[] = ["attention", "working", "limit", "unseen", "none"];
@@ -225,8 +226,8 @@ export const Sidebar = () => {
         <strong>Projects</strong>
         <button className="sidebar-add-project" onClick={() => setIsDialogOpen(true)} title="Connect a project folder" aria-label="Connect a project folder"><IconRow names={["add"]} />Add project</button>
       </header>
-      {projects.length === 0 && <div className="muted sidebar-empty">Connect a folder once, then create as many boards for it as you like.</div>}
-      {projects.length > 0 && <div className="muted sidebar-hint">Drag to reorder. Right-click a board to rename, export or import.</div>}
+      {projects.length === 0 && <div className="muted sidebar-empty">Add a project folder to create boards.</div>}
+      {projects.length > 0 && <div className="muted sidebar-hint">Drag to reorder. Right-click for more actions.</div>}
       {orderedProjects.map((project) => (
         <ProjectSection key={project.id} project={project} boards={boards.filter((board) => board.projectId === project.id)} activeId={activeId} orderedProjectIds={orderedProjects.map((candidate) => candidate.id)} />
       ))}

@@ -1,7 +1,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { isApiRuntime, isLocalBaseUrl, needsKey, runtimeInfo, type ApiRuntimeId, type CredentialStatus, type RuntimeId } from "@branchboard/core";
+import { hasCredential, isLocalBaseUrl, needsKey, runtimeInfo, type CredentialRuntimeId, type CredentialStatus, type RuntimeId } from "@branchboard/core";
 import { RefusedError } from "./boards";
+import type { ServerAddress } from "./runtimes/opencodeServer";
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -13,14 +14,14 @@ interface StoredCredential {
   updatedAt: number;
 }
 
-type StoredCredentials = Partial<Record<ApiRuntimeId, StoredCredential>>;
+type StoredCredentials = Partial<Record<CredentialRuntimeId, StoredCredential>>;
 
 export interface ApiCredential {
   key?: string;
   baseUrl: string;
 }
 
-export const normaliseBaseUrl = (runtimeId: ApiRuntimeId, requested: string | undefined): string => {
+export const normaliseBaseUrl = (runtimeId: CredentialRuntimeId, requested: string | undefined): string => {
   const { credential } = runtimeInfo(runtimeId);
   if (!credential) throw new RefusedError(`${runtimeId} does not use an API key`);
   if (!credential.baseUrlEditable || !requested?.trim()) return credential.defaultBaseUrl;
@@ -35,8 +36,8 @@ export const normaliseBaseUrl = (runtimeId: ApiRuntimeId, requested: string | un
   return url.href.replace(/\/+$/, "");
 };
 
-const requireApiRuntime = (runtimeId: RuntimeId): ApiRuntimeId => {
-  if (!isApiRuntime(runtimeId)) throw new RefusedError(`${runtimeId} does not use an API key`);
+const requireCredentialRuntime = (runtimeId: RuntimeId): CredentialRuntimeId => {
+  if (!hasCredential(runtimeId)) throw new RefusedError(`${runtimeId} does not use an API key`);
   return runtimeId;
 };
 
@@ -61,12 +62,12 @@ export const createCredentialStore = (dataDirectory: string) => {
 
   const status = (runtimeId: RuntimeId): CredentialStatus => {
     const info = runtimeInfo(runtimeId).credential;
-    const stored = isApiRuntime(runtimeId) ? load()[runtimeId] : undefined;
+    const stored = hasCredential(runtimeId) ? load()[runtimeId] : undefined;
     return { saved: Boolean(stored?.key), baseUrl: stored?.baseUrl ?? info?.defaultBaseUrl ?? "", updatedAt: stored?.key ? stored.updatedAt : undefined };
   };
 
   const set = (runtimeId: RuntimeId, key: string | null | undefined, requestedBaseUrl: string | undefined): CredentialStatus => {
-    const id = requireApiRuntime(runtimeId);
+    const id = requireCredentialRuntime(runtimeId);
     const credentials = load();
     const previous = credentials[id];
     const baseUrl = normaliseBaseUrl(id, requestedBaseUrl ?? previous?.baseUrl);
@@ -74,20 +75,28 @@ export const createCredentialStore = (dataDirectory: string) => {
     const keptKey = key === undefined ? (previous?.baseUrl === baseUrl ? previous.key : undefined) : (key ?? undefined);
     credentials[id] = { baseUrl, ...(keptKey ? { key: keptKey } : {}), updatedAt: Date.now() };
     save(credentials);
+    listeners.forEach((listener) => listener(id));
     return status(id);
   };
 
-  const credentialOf = (runtimeId: ApiRuntimeId): ApiCredential => {
+  const listeners = new Set<(runtimeId: CredentialRuntimeId) => void>();
+
+  const credentialOf = (runtimeId: CredentialRuntimeId): ApiCredential => {
     const stored = load()[runtimeId];
     return { key: stored?.key, baseUrl: stored?.baseUrl ?? runtimeInfo(runtimeId).credential!.defaultBaseUrl };
   };
 
-  const isReady = (runtimeId: ApiRuntimeId): boolean => {
+  const isReady = (runtimeId: CredentialRuntimeId): boolean => {
     const { key, baseUrl } = credentialOf(runtimeId);
     return Boolean(key) || !needsKey(runtimeId, baseUrl);
   };
 
-  return { status, set, credentialOf, isReady, secretValues: (): string[] => Object.values(load()).flatMap((entry) => (entry?.key ? [entry.key] : [])) };
+  const serverAddress = (): ServerAddress | undefined => {
+    const { key, baseUrl } = credentialOf("opencode");
+    return baseUrl ? { baseUrl, password: key } : undefined;
+  };
+
+  return { status, set, credentialOf, serverAddress, isReady, onChange: (listener: (runtimeId: CredentialRuntimeId) => void) => void listeners.add(listener), secretValues: (): string[] => Object.values(load()).flatMap((entry) => (entry?.key ? [entry.key] : [])) };
 };
 
 export type CredentialStore = ReturnType<typeof createCredentialStore>;

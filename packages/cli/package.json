@@ -1,8 +1,8 @@
 {
   "name": "branchboard",
-  "version": "0.2.0",
-  "description": "A whiteboard where every AI chat turn is a node and the wiring decides what each node knows. Runs locally on top of the claude or opencode command you already have.",
-  "keywords": ["ai", "chat", "whiteboard", "claude", "opencode", "local-first"],
+  "version": "0.3.0",
+  "description": "A whiteboard for AI chats: run chats side by side on a canvas, branch any answer and connect the answers you want to build on. Free, open source and local, with your claude, codex or opencode command or an API key.",
+  "keywords": ["ai", "llm", "chat", "whiteboard", "canvas", "infinite-canvas", "ai-canvas", "branching", "research", "claude", "claude-code", "codex", "opencode", "local-first"],
   "license": "MIT",
   "homepage": "https://github.com/sidorovrv/BranchBoard#readme",
   "repository": {

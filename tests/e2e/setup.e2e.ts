@@ -9,9 +9,9 @@ test.beforeEach(async ({ appPage }) => {
   appPage.on("dialog", (dialog) => void dialog.accept());
 });
 
-test.skip("an API key is saved without being shown again, and can be replaced or removed", async ({ appPage }) => {
+test("an API key is saved without being shown again, and can be replaced or removed", async ({ appPage }) => {
   await appPage.getByRole("button", { name: "Settings", exact: true }).click();
-  await appPage.getByRole("button", { name: "API keys" }).click();
+  await appPage.getByRole("button", { name: "Models" }).click();
   const card = appPage.locator(".key-entry", { hasText: "OpenAI-compatible" });
   await card.getByLabel("Address").fill("http://127.0.0.1:9/v1");
   await card.getByLabel(/API key/).fill(SECRET);

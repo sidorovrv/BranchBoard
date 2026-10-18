@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import type { GraphNode, NodeComment } from "@branchboard/core";
 
-export const ANSWER_SELECTOR = ".answer[data-roll]";
+export const ANSWER_SELECTOR = "[data-roll]";
 const HIGHLIGHT_NAME = "node-comment";
 
 interface HighlightRegistry {

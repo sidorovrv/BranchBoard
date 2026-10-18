@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useReactFlow, useViewport, ViewportPortal, type Node, type NodeChange } from "@xyflow/react";
 import { create } from "zustand";
-import { hiddenByCollapse, liveNodes, minSizeOf, snapMovingBoxes, snapResizedEdges, type Box, type GraphNode, type Guide } from "@branchboard/core";
+import { hiddenByCollapse, isHoldActive, liveNodes, minSizeOf, snapMovingBoxes, snapResizedEdges, type Box, type GraphNode, type Guide, type ModifierState, type ResizeDirection } from "@branchboard/core";
+import { useSettings } from "./settings";
 import { useBoard } from "./store";
 
 const SNAP_SCREEN_PX = 8;
@@ -34,11 +35,14 @@ export const useGuides = create<GuideStore>((set) => ({
   show: (next) => set((state) => (sameGuides(state.guides, next) ? state : { guides: next })),
 }));
 
-export const snapResize = (node: GraphNode, size: { w: number; h: number }, axes: { horizontal: boolean; vertical: boolean }, zoom: number): { w: number; h: number } => {
+export const isGuideHeld = (state: ModifierState): boolean => isHoldActive(useSettings.getState().settings.keybinds, "alignGuides", state);
+
+export const snapResize = (node: GraphNode, size: { w: number; h: number }, direction: ResizeDirection, zoom: number): { w: number; h: number } => {
   const graph = useBoard.getState().view.graph;
   const hidden = hiddenByCollapse(graph);
   const others = liveNodes(graph).filter((other) => other.id !== node.id && !hidden.has(other.id)).map((other) => boxOf(other));
-  const result = snapResizedEdges({ x: node.x, y: node.y, ...size }, axes, others, SNAP_SCREEN_PX / zoom);
+  const resized = { x: direction.x === -1 ? node.x + node.w - size.w : node.x, y: direction.y === -1 ? node.y + node.h - size.h : node.y, ...size };
+  const result = snapResizedEdges(resized, direction, others, SNAP_SCREEN_PX / zoom);
   useGuides.getState().show(result.guides);
   return { w: Math.round(size.w + result.dw), h: Math.round(size.h + result.dh) };
 };
@@ -47,25 +51,25 @@ export const clearGuides = () => useGuides.getState().show([]);
 
 export const useDragSnap = () => {
   const { getViewport } = useReactFlow();
-  const isAltHeld = useRef(false);
+  const isGuideActive = useRef(false);
   const isDragging = useRef(false);
   const offset = useRef(NO_OFFSET);
   const guides = useGuides((state) => state.guides);
   const showGuides = useGuides((state) => state.show);
 
   useEffect(() => {
-    const trackAlt = (event: KeyboardEvent) => {
-      isAltHeld.current = event.altKey;
+    const trackModifiers = (event: KeyboardEvent) => {
+      isGuideActive.current = isGuideHeld(event);
       if (event.type === "keyup" && event.key === "Alt" && isDragging.current) event.preventDefault();
     };
-    const releaseAlt = () => (isAltHeld.current = false);
-    window.addEventListener("keydown", trackAlt);
-    window.addEventListener("keyup", trackAlt);
-    window.addEventListener("blur", releaseAlt);
+    const releaseModifiers = () => (isGuideActive.current = false);
+    window.addEventListener("keydown", trackModifiers);
+    window.addEventListener("keyup", trackModifiers);
+    window.addEventListener("blur", releaseModifiers);
     return () => {
-      window.removeEventListener("keydown", trackAlt);
-      window.removeEventListener("keyup", trackAlt);
-      window.removeEventListener("blur", releaseAlt);
+      window.removeEventListener("keydown", trackModifiers);
+      window.removeEventListener("keyup", trackModifiers);
+      window.removeEventListener("blur", releaseModifiers);
     };
   }, []);
 
@@ -79,7 +83,7 @@ export const useDragSnap = () => {
       const moves = changes.filter(isPositionChange);
       if (moves.length === 0) return changes;
       if (moves.every((move) => move.dragging === false)) return shifted(changes, offset.current);
-      if (!isAltHeld.current) {
+      if (!isGuideActive.current) {
         offset.current = NO_OFFSET;
         showGuides([]);
         return changes;

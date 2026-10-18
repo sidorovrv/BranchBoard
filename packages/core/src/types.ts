@@ -1,3 +1,4 @@
+import type { CatalogCommand, ChatPart, GitChanges, QuestionSpec, TodoItem } from "./kit/types";
 import type { RecoveryId } from "./recovery";
 import type { CredentialStatus, RuntimeId } from "./runtimes";
 
@@ -33,18 +34,6 @@ export interface CostSummary {
   windowMs: number;
 }
 
-export interface LimitWindow {
-  id: string;
-  utilization: number;
-  resetsAt: number;
-}
-
-export interface RateLimits {
-  status: string;
-  windows: LimitWindow[];
-  updatedAt: number;
-}
-
 export interface Attachment {
   id: Id;
   name: string;
@@ -61,13 +50,6 @@ export interface NodeSummary {
   tokens: number;
 }
 
-export type TodoStatus = "pending" | "in_progress" | "completed";
-
-export interface TodoItem {
-  content: string;
-  status: TodoStatus;
-}
-
 export interface RevertedFile {
   path: string;
   afterRun: string | null;
@@ -82,6 +64,7 @@ export interface RevertRecord {
 export interface RollSnapshot {
   status: NodeStatus;
   runtimeRef?: RuntimeRef;
+  compactedAt?: number | null;
   contextHash?: string;
   contextNodeIds?: Id[];
   contextMode?: ContextMode;
@@ -127,6 +110,7 @@ export interface GraphNode {
   forceAssemble: boolean;
   rev: number;
   runtimeRef?: RuntimeRef;
+  compactedAt?: number | null;
   contextHash?: string;
   contextNodeIds?: Id[];
   contextMode?: ContextMode;
@@ -144,6 +128,7 @@ export interface GraphNode {
   comments?: NodeComment[];
   pinned?: boolean;
   satelliteOf?: Id;
+  satelliteRunStartedAt?: number;
   summary?: NodeSummary;
   deleted: boolean;
   deletedAt?: number;
@@ -228,6 +213,8 @@ export interface Board {
   budgetTokens?: number;
   summaryShare?: number;
   answerFormatsGuide?: boolean;
+  environment?: Record<string, string>;
+  discardedSessions?: RuntimeRef[];
   hasUnseenResult?: boolean;
   hitUsageLimit?: boolean;
   createdAt: number;
@@ -236,28 +223,9 @@ export interface Board {
   deletedAt?: number;
 }
 
-export type PartType = "text" | "reasoning" | "tool" | "error" | "todo";
-
-export interface Part {
-  id: string;
+export interface Part extends ChatPart {
   nodeId: Id;
   roll?: number;
-  seq: number;
-  type: PartType;
-  text: string;
-  meta?: Record<string, unknown>;
-}
-
-export interface QuestionOption {
-  label: string;
-  description?: string;
-}
-
-export interface QuestionSpec {
-  question: string;
-  header?: string;
-  options: QuestionOption[];
-  multiple?: boolean;
 }
 
 export interface PendingRequest {
@@ -285,6 +253,9 @@ export type RunEvent =
   | { type: "prompt"; text: string }
   | { type: "subagent.event"; key: string; event: RunEvent }
   | { type: "usage"; usage: Usage }
+  | { type: "retry"; attempt: number; at: number; reason: string }
+  | { type: "retry-restart"; partKeys: string[] }
+  | { type: "context.compacted" }
   | { type: "error"; message: string; recovery?: RecoveryId }
   | { type: "done"; stopped?: boolean };
 
@@ -308,7 +279,7 @@ export interface Turn {
 }
 
 export interface SessionPlan {
-  spine?: { nodeId: Id; runtimeRef: RuntimeRef };
+  spine?: { nodeId: Id; runtimeRef: RuntimeRef; compactedAt?: number };
   missingTurns: Turn[];
 }
 
@@ -327,24 +298,61 @@ export interface CatalogModel {
   efforts?: string[];
 }
 
-export interface CatalogCommand {
-  name: string;
-  description?: string;
-  template: string;
-  passThrough?: boolean;
-}
-
 export interface CatalogPermissionMode {
   id: string;
   name: string;
 }
 
+export interface EngineSetup {
+  phase: "idle" | "installing" | "failed" | "ready";
+  version?: string;
+  message?: string;
+  cause?: "offline" | "npm-missing" | "disk-full" | "other";
+}
+
+export interface CatalogSkill {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface PanelAction {
+  id: string;
+  label: string;
+}
+
+export interface PanelRow {
+  id: string;
+  label: string;
+  detail?: string;
+  actions?: PanelAction[];
+}
+
+export interface RuntimePanel {
+  id: string;
+  title: string;
+  hint?: string;
+  empty: string;
+  rows: PanelRow[];
+}
+
+export type LiveControlId = "followUp" | "background";
+
 export interface Catalog {
   agents: string[];
+  subagents?: string[];
+  skills?: CatalogSkill[];
   models: CatalogModel[];
   permissionModes?: CatalogPermissionMode[];
   commands?: CatalogCommand[];
   defaultPermissionMode?: string;
+  defaultModel?: string;
+  defaultAgent?: string;
+  meters?: ("cost" | "limits")[];
+  canCompact?: boolean;
+  controls?: LiveControlId[];
+  shellPrompts?: boolean;
+  engine?: EngineSetup;
   health: { ok: boolean; detail: string };
   credential?: CredentialStatus;
 }
@@ -378,6 +386,7 @@ export type GraphEdit =
   | { type: "detach"; nodeId: Id; attachmentId: Id }
   | { type: "reopen"; nodeId: Id }
   | { type: "queue"; nodeId: Id }
+  | { type: "resume"; nodeId: Id }
   | { type: "selectRoll"; nodeId: Id; roll: number }
   | { type: "editNode"; nodeId: Id; fields: Partial<Pick<GraphNode, "prompt" | "title" | "filePath" | "gitRef" | "agent" | "model" | "effort" | "permissionMode" | "forceAssemble">> }
   | { type: "editComments"; nodeId: Id; add?: NodeComment; update?: { id: Id; text: string }; removeId?: Id; clearRoll?: number }
@@ -393,13 +402,3 @@ export interface GitBranches {
   branches: string[];
 }
 
-export interface RemovedBlock {
-  after: number;
-  lines: string[];
-}
-
-export interface GitChanges {
-  added: number[];
-  removed: number;
-  removedBlocks: RemovedBlock[];
-}

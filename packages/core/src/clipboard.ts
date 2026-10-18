@@ -1,8 +1,9 @@
 import { contextHash } from "./context";
 import { applyPatch, liveEdges } from "./graph";
 import { indexBy, newId, now } from "./helpers";
+import type { TodoItem } from "./kit/types";
 import { activeRollOf, partsOfRoll, rollCountOf } from "./rolls";
-import type { BoardGraph, GraphEdge, GraphNode, Id, Part, Patch, RunEvent, TodoItem } from "./types";
+import type { BoardGraph, GraphEdge, GraphNode, Id, Part, Patch, RunEvent } from "./types";
 import { hasCycle, MAX_UNTRUSTED_EDGES, MAX_UNTRUSTED_NODES, MAX_UNTRUSTED_PARTS, sanitiseEdge, sanitiseList, sanitiseNode, sanitisePart } from "./untrusted";
 
 export const NODE_CLIPBOARD_FORMAT = "branchboard-nodes";

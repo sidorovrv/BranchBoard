@@ -15,6 +15,10 @@ export const updateCommand = (target: string = "latest"): string => `npm install
 
 export const releaseNotesUrl = (version: string): string => `${REPOSITORY_URL}releases/tag/v${version}`;
 
+export const thirdPartyNoticesUrl = (version: string): string => `${REPOSITORY_URL}blob/v${version}/THIRD-PARTY-NOTICES.md`;
+
+export const usageStatisticsUrl = (version: string): string => `${REPOSITORY_URL}blob/v${version}/SECURITY.md#usage-statistics`;
+
 const partsOf = (version: string) => {
   const [numbers, preRelease] = version.split(/-(.*)/s);
   return { numbers: numbers.split(".").map(Number), preRelease: preRelease?.split(".") };

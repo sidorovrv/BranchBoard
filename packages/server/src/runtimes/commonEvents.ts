@@ -1,5 +1,5 @@
 import { parseTodoItems, type PendingRequest, type QuestionSpec, type RunEvent } from "@branchboard/core";
-import type { EventMap, NativeEvent } from "../run/types";
+import type { EventMap, NativeEvent, RunFile } from "../run/types";
 
 export type LooseNative = NativeEvent & Record<string, any>;
 
@@ -20,6 +20,18 @@ export const streamEventMap: EventMap<LooseNative> = {
   "tool-done": (native) => [{ type: "tool.done", partKey: native.partId, output: native.output, isError: native.isError }],
 };
 
+export interface UsageFields {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  contextTokens?: number;
+  contextWindow?: number;
+  costUsd?: number;
+}
+
+export const usageNative = (fields: UsageFields): LooseNative => ({ type: "usage", ...fields });
+
 export const usageEvents = (native: LooseNative): RunEvent[] => [
   {
     type: "usage",
@@ -32,11 +44,21 @@ export const usageEvents = (native: LooseNative): RunEvent[] => [
       cacheCreationTokens: native.cacheCreationTokens,
       firstCallCacheReadTokens: native.firstCallCacheReadTokens,
       firstCallCacheCreationTokens: native.firstCallCacheCreationTokens,
+      costUsd: native.costUsd,
     },
   },
 ];
 
 export const doneEvents = (): RunEvent[] => [{ type: "done" }];
+
+export const IMAGE_MIMES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+export const isImageFile = (file: RunFile): boolean => IMAGE_MIMES.includes(file.mime);
+
+export const attachmentReferences = (files: RunFile[]): string => {
+  const referenced = files.filter((file) => !isImageFile(file));
+  return referenced.length > 0 ? `\n\nAttached files (read them with your tools):\n${referenced.map((file) => `- ${file.name}: ${file.path}`).join("\n")}` : "";
+};
 
 type RequestFields = Omit<PendingRequest, "boardId" | "nodeId" | "status" | "createdAt">;
 

@@ -1,6 +1,6 @@
 import { inheritChoices, withBoardDefaults, type RunChoices } from "./choices";
 import { BRANCH_TITLE_SEPARATOR, childIdsOf, makeNode, minSizeOf, NODE_HEIGHT, NODE_MAX_HEIGHT, NODE_MAX_WIDTH, NODE_WIDTH, NOTE_HEIGHT, NOTE_WIDTH, parentIdsOf, placeNode, type PlacementAnchor, type PlacementFlow } from "./graph";
-import { fileNameOf } from "./codeFiles";
+import { fileNameOf } from "./kit";
 import { deriveTitle } from "./helpers";
 import { commentsPrompt } from "./promptFormat";
 import { activeRollOf } from "./rolls";
@@ -47,7 +47,16 @@ const isPoint = (value: unknown): value is { x: number; y: number } =>
 const activeCommentsOf = (graph: BoardGraph, parentIds: Id[]): NodeComment[] =>
   parentIds.flatMap((id) => (graph.nodes[id]?.comments ?? []).filter((comment) => comment.roll === activeRollOf(graph.nodes[id])));
 
-const isPrefilledReply = (command: SeedCommand): boolean => command.type === "reply" && command.prompt === undefined;
+export const commentTargetOf = (graph: BoardGraph, nodeId: Id): GraphNode | undefined =>
+  childIdsOf(graph, nodeId)
+    .map((id) => graph.nodes[id])
+    .filter((child) => child && !child.deleted && child.kind === "turn" && child.status === "idle")
+    .sort((a, b) => a.createdAt - b.createdAt)[0];
+
+export const promptWithComment = (prompt: string, comment: Pick<NodeComment, "quote" | "text">): string =>
+  `${prompt.trim() === "" ? "" : `${prompt.replace(/\s+$/, "")}\n\n`}${commentsPrompt([comment])}`;
+
+const isPrefilledReply =(command: SeedCommand): boolean => command.type === "reply" && command.prompt === undefined;
 
 export const commentClearingEdits = (graph: BoardGraph, command: SeedCommand): Extract<GraphEdit, { type: "editComments" }>[] =>
   !isPrefilledReply(command)

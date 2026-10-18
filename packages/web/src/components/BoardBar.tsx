@@ -6,7 +6,7 @@ import { useSettings } from "../settings";
 import { sendBoardCommand, useBoard } from "../store";
 import { BoardTabs } from "./BoardTabs";
 import { HelpButton } from "./HelpMenu";
-import { IconRow } from "./Icons";
+import { IconRow } from "../kit/Icons";
 import { CostMeter, LimitsMeter } from "./LimitsMeter";
 import { SettingsDialog } from "./SettingsDialog";
 import { TrashDialog } from "./TrashDialog";
@@ -33,7 +33,7 @@ const SavedStatus = () => {
   return (
     <span className="saved-status">
       <span className="muted">Saved {formatAgo(Math.max(0, currentTime - savedAt))}</span>
-      <button disabled={isSaving} onClick={() => void saveNow()} title="Save now: write everything to disk again" aria-label="Save now"><IconRow names={["save"]} /></button>
+      <button disabled={isSaving} onClick={() => void saveNow()} title="Save now" aria-label="Save now"><IconRow names={["save"]} /></button>
     </span>
   );
 };
@@ -70,6 +70,7 @@ export const BoardBar = () => {
   const project = useBoard((state) => state.projects.find((candidate) => candidate.id === state.board?.projectId));
   const isTourOpen = useBoard((state) => state.isTourOpen);
   useRuntimeHealth(isTourOpen ? undefined : board?.id);
+  const meters = useBoard((state) => state.catalog?.meters) ?? [];
   const showMeters = useSettings((state) => state.settings.showTopbarMeters);
   const isSidebarOpen = useSettings((state) => state.settings.isSidebarOpen);
   const isContextPanelOpen = useSettings((state) => state.settings.isContextPanelOpen);
@@ -109,9 +110,10 @@ export const BoardBar = () => {
       <UpdateBanner />
       {board && (
         <>
-          {showMeters && !isApiRuntime(board.mode) && (
+          {showMeters && meters.length > 0 && (
             <>
-              {board.mode === "opencode" || board.mode === "opencode2" ? <CostMeter /> : <LimitsMeter />}
+              {meters.includes("cost") && <CostMeter />}
+              {meters.includes("limits") && <LimitsMeter runtime={board.mode} />}
               <span className="bar-divider" />
             </>
           )}
@@ -124,7 +126,7 @@ export const BoardBar = () => {
           ))}
         </>
       )}
-      <button onClick={() => setIsTrashOpen(true)} title="Trash: restore deleted nodes, boards and projects" aria-label="Trash"><IconRow names={["trash"]} /></button>
+      <button onClick={() => setIsTrashOpen(true)} title="Trash" aria-label="Trash"><IconRow names={["trash"]} /></button>
       <span className="bar-divider" />
       <HelpButton />
       <button onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Settings"><IconRow names={["settings"]} /></button>

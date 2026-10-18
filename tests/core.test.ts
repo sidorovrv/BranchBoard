@@ -8,11 +8,8 @@ import {
   collectBoard,
   contextHash,
   contextTurns,
-  decodeAnswers,
-  describeAnswers,
   describeContext,
   encoders,
-  encodeAnswers,
   estimateRepublication,
   hasAutoTitle,
   highlightSpans,
@@ -35,12 +32,12 @@ import {
   NOTE_WIDTH,
   orderedAncestorIds,
   planSession,
+  fidelityOf,
   renderInput,
   runEdit,
   seedFrom,
   type BoardGraph,
   type GraphEdit,
-  parseQuestionSpec,
   preferredPermissionMode,
   RUNTIME_DEFAULT_PERMISSION_MODE,
   describeSensitiveFiles,
@@ -240,6 +237,15 @@ describe("staleness and session plan", () => {
     expect(describeContext(graph, parts, "C").mode).toBe("exact");
   });
 
+  it("a compacted parent session is reused but no longer exact", () => {
+    let graph = finish(buildGraph(["A", "C"], [["A", "C"]]), "A");
+    graph = { ...graph, nodes: { ...graph.nodes, A: { ...graph.nodes.A, compactedAt: 1000 } } };
+    const plan = planSession(graph, parts, "C");
+    expect(plan.spine).toMatchObject({ nodeId: "A", compactedAt: 1000 });
+    expect(plan.missingTurns).toEqual([]);
+    expect(fidelityOf(plan)).toBe("injected");
+  });
+
   it("no valid parent session assembles the whole context", () => {
     const graph = buildGraph(["A", "C"], [["A", "C"]]);
     const plan = planSession(graph, parts, "C");
@@ -404,32 +410,6 @@ describe("export and import", () => {
       expect(accepted.nodes[0].agent).toBeUndefined();
       expect(asNodeClipboard({ ...tampered, nodes: [{ ...clipboard.nodes[0], status: "bogus" }] })).toBeUndefined();
     });
-  });
-});
-
-describe("question answers", () => {
-  it("parses question specs from both runtimes' shapes", () => {
-    expect(parseQuestionSpec({ question: "Pick", header: "H", options: [{ label: "a", description: "d" }, "b"], multiSelect: true })).toEqual({
-      question: "Pick",
-      header: "H",
-      options: [{ label: "a", description: "d" }, { label: "b", description: undefined }],
-      multiple: true,
-    });
-    expect(parseQuestionSpec({ question: "Solo", options: [] }).multiple).toBe(false);
-  });
-
-  it("round-trips an answer grid", () => {
-    const grid = [["apple"], ["cream", "nuts"]];
-    expect(decodeAnswers(2, encodeAnswers(grid))).toEqual(grid);
-  });
-
-  it("wraps a plain text answer as the first answer", () => {
-    expect(decodeAnswers(2, "just text")).toEqual([["just text"], []]);
-    expect(decodeAnswers(1, "42")).toEqual([["42"]]);
-  });
-
-  it("describes answers for display", () => {
-    expect(describeAnswers(2, encodeAnswers([["apple"], ["cream", "nuts"]]))).toBe("apple | cream, nuts");
   });
 });
 

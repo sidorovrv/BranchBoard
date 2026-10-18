@@ -1,4 +1,4 @@
-import { now, type Board, type BoardGraph, type GraphNode, type Id, type PendingRequest, type Project, type TrashListing, type TrashedNodeGroup } from "@branchboard/core";
+import { now, sessionReferencesOf, type Board, type BoardGraph, type GraphNode, type Id, type PendingRequest, type Project, type RuntimeRef, type TrashListing, type TrashedNodeGroup } from "@branchboard/core";
 import type { AttachmentStore } from "./attachments";
 import { RefusedError, type BoardService } from "./boards";
 import type { Repository } from "./db";
@@ -7,7 +7,9 @@ import { log } from "./log";
 export const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const ATTACHMENT_GRACE_MS = 60 * 60 * 1000;
 
-export const createTrashService = (repository: Repository, boards: BoardService, attachments: AttachmentStore) => {
+export type DropSessions = (board: Board, references: RuntimeRef[]) => void;
+
+export const createTrashService = (repository: Repository, boards: BoardService, attachments: AttachmentStore, dropSessions: DropSessions = () => undefined) => {
   const allProjects = () => repository.listAll<Project>("projects");
   const allBoards = () => repository.listAll<Board>("boards");
   const liveBoards = () => allBoards().filter((board) => !board.deleted);
@@ -80,6 +82,8 @@ export const createTrashService = (repository: Repository, boards: BoardService,
   };
 
   const purgeBoard = (boardId: Id) => {
+    const board = allBoards().find((candidate) => candidate.id === boardId);
+    if (board) dropSessions(board, [...sessionReferencesOf(repository.list<GraphNode>("nodes", boardId)), ...(board.discardedSessions ?? [])]);
     repository.removeBoardRows(boardId);
     boards.forget(boardId);
   };
@@ -92,6 +96,7 @@ export const createTrashService = (repository: Repository, boards: BoardService,
   const purgeNodes = (boardId: Id, nodeIds: Id[]) => {
     const state = boards.stateOf(boardId);
     const removed = new Set(nodeIds);
+    dropSessions(boards.stateOf(boardId).board, sessionReferencesOf(nodeIds.flatMap((id) => state.graph.nodes[id] ?? [])));
     const edgeIds = Object.values(state.graph.edges).filter((edge) => removed.has(edge.fromId) || removed.has(edge.toId)).map((edge) => edge.id);
     repository.remove("nodes", nodeIds);
     repository.remove("edges", edgeIds);
@@ -114,6 +119,21 @@ export const createTrashService = (repository: Repository, boards: BoardService,
     orphans.forEach((file) => attachments.remove(file.id));
     if (orphans.length > 0) log.info("trash", `Removed ${orphans.length} unreferenced attachment file(s)`);
     return orphans.length;
+  };
+
+  const sweepSessions = (): number => {
+    const held = boards.sessionIdsHeldByHistory();
+    let dropped = 0;
+    for (const board of allBoards().filter((candidate) => (candidate.discardedSessions ?? []).length > 0)) {
+      const inUse = new Set(sessionReferencesOf(repository.list<GraphNode>("nodes", board.id)).map((reference) => reference.sessionId));
+      const pending = board.discardedSessions!.filter((reference) => !inUse.has(reference.sessionId));
+      const orphans = pending.filter((reference) => !held.has(reference.sessionId));
+      if (orphans.length > 0) dropSessions(board, orphans);
+      dropped += orphans.length;
+      boards.saveBoard({ ...board, discardedSessions: pending.filter((reference) => held.has(reference.sessionId)) });
+    }
+    if (dropped > 0) log.info("trash", `Dropped ${dropped} discarded runtime session(s)`);
+    return dropped;
   };
 
   const attachmentIdsOfBoard = (boardId: Id): string[] =>
@@ -152,6 +172,7 @@ export const createTrashService = (repository: Repository, boards: BoardService,
       });
     removeUnreferenced(freed);
     sweepAttachments();
+    sweepSessions();
   };
 
   const emptyTrash = () => purge(() => true);
@@ -160,7 +181,7 @@ export const createTrashService = (repository: Repository, boards: BoardService,
 
   stampLegacyDeletions();
 
-  return { list, restoreProject, restoreBoard, emptyTrash, purgeExpired, sweepAttachments };
+  return { list, restoreProject, restoreBoard, emptyTrash, purgeExpired, sweepAttachments, sweepSessions };
 };
 
 export type TrashService = ReturnType<typeof createTrashService>;

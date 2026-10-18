@@ -4,9 +4,17 @@ import "@fontsource-variable/source-serif-4";
 import "@fontsource-variable/jetbrains-mono";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
+import "./kit/chat.css";
+import "./kit/settings.css";
 import { App } from "./App";
+import { boardChatHost } from "./chatHost";
+import { ChatHostContext } from "./kit/host";
 import { resolveTheme, useSettings } from "./settings";
 
 document.documentElement.dataset.theme = resolveTheme(useSettings.getState().settings.theme);
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  <ChatHostContext.Provider value={boardChatHost}>
+    <App />
+  </ChatHostContext.Provider>,
+);

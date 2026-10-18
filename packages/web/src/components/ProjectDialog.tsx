@@ -1,16 +1,18 @@
 import { useState } from "react";
-import { isApiRuntime, isRuntimeShown, RUNTIMES, type RuntimeId } from "@branchboard/core";
+import { isApiRuntime, RUNTIMES, runtimeInfo, type RuntimeId } from "@branchboard/core";
 import { pickPath } from "../api";
+import { ChipSelect } from "../kit/ChipSelect";
 import { PathBrowser } from "./PathBrowser";
 import { useBoard } from "../store";
-import { CredentialForm, SetupGuide, useRuntimeCatalog } from "./SetupGuide";
+import { CliSetup, CredentialForm, setUpEngine, useRuntimeCatalog } from "./SetupGuide";
 
-const RUNTIME_CHOICES = (["claude", "opencode", "anthropic", "openai"] as RuntimeId[]).filter(isRuntimeShown);
+const RUNTIME_CHOICES = ["claude", "codex", "opencode", "anthropic", "openai"] as RuntimeId[];
 
 const RUNTIME_LABELS: Partial<Record<RuntimeId, string>> = {
   claude: "Claude subscription (installed claude command)",
+  codex: "ChatGPT subscription (installed codex command)",
   fake: "Built-in demo (echoes its context)",
-  anthropic: "Anthropic API (your own API key, chat only)",
+  anthropic: "Anthropic API (your own API key)",
   openai: "OpenAI-compatible API (OpenAI, OpenRouter, Ollama, LM Studio…)",
 };
 
@@ -21,6 +23,7 @@ export const ProjectDialog = ({ onClose }: { onClose: () => void }) => {
   const [modelId, setModelId] = useState("");
   const isDemoShown = new URLSearchParams(location.search).has("demo");
   const [isBrowsing, setIsBrowsing] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [isBrowserShown, setIsBrowserShown] = useState(false);
   const { catalog, refresh } = useRuntimeCatalog(mode);
   const browse = async () => {
@@ -36,6 +39,12 @@ export const ProjectDialog = ({ onClose }: { onClose: () => void }) => {
   };
   const connect = async () => {
     const { send, loadBoards, openBoard } = useBoard.getState();
+    if (isApiRuntime(mode)) {
+      setIsConnecting(true);
+      const isEngineReady = await setUpEngine(mode, refresh);
+      setIsConnecting(false);
+      if (!isEngineReady) return;
+    }
     const project = await send<{ id: string }>({ type: "createProject", name: name.trim() || undefined, workspacePath, mode, defaultModel: modelId.trim() || undefined });
     if (!project) return;
     const board = await send<{ id: string }>({ type: "createBoard", projectId: project.id });
@@ -50,7 +59,7 @@ export const ProjectDialog = ({ onClose }: { onClose: () => void }) => {
       {isBrowserShown && <PathBrowser kind="folder" start={workspacePath.trim() || undefined} onPick={(path) => { setWorkspacePath(path); setIsBrowserShown(false); }} onClose={() => setIsBrowserShown(false)} />}
       <div className="dialog">
         <h3>Connect a project</h3>
-        <div className="muted">A project is a folder. You can create any number of boards for it afterwards.</div>
+        <div className="muted">A project is a folder. Its boards share that folder.</div>
         <div className="field">
           <label htmlFor="workspace-folder">Folder</label>
           <div className="row">
@@ -58,27 +67,31 @@ export const ProjectDialog = ({ onClose }: { onClose: () => void }) => {
             <button type="button" disabled={isBrowsing} onClick={() => void browse()}>{isBrowsing ? "Waiting for dialog…" : "Browse…"}</button>
           </div>
         </div>
-        <label>Name (optional, defaults to the folder name)<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label>
-          Runtime
-          <select value={mode} onChange={(event) => setMode(event.target.value as RuntimeId)}>
-            {choices.map((id) => <option key={id} value={id}>{RUNTIME_LABELS[id] ?? RUNTIMES[id].label}</option>)}
-          </select>
-        </label>
-        {(mode === "opencode" || mode === "opencode2") && <div className="muted">Opening a workspace lets OpenCode run its configured tools and shell commands there. Only open workspaces you trust.</div>}
+        <label>Name (optional)<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <div className="field">
+          <label>Runtime</label>
+          <ChipSelect icon="model" title="Runtime" value={mode} options={choices.map((id) => ({ value: id, label: RUNTIME_LABELS[id] ?? RUNTIMES[id].label }))} onChange={(id) => setMode(id as RuntimeId)} />
+        </div>
+        {runtimeInfo(mode).trustNote && <div className="muted">{RUNTIMES[mode].label} can read and edit files and run commands in this folder. Only connect folders you trust.</div>}
         {mode === "claude" && (
           <div className="muted">
-            Runs the claude command already installed on this machine, in the workspace, signed in the way you set it up yourself. Branchboard never handles sign-in or credentials for it. Tool calls and questions are asked on the board. Only open workspaces you trust. Your use is subject to Anthropic's{" "}
+            Uses the installed claude command and its existing sign-in. Can read and edit files and run commands in this folder, so only connect folders you trust. Your use is subject to Anthropic's{" "}
             <a href="https://code.claude.com/docs/en/legal-and-compliance" target="_blank" rel="noreferrer">legal and compliance terms</a>.
+          </div>
+        )}
+        {mode === "codex" && (
+          <div className="muted">
+            Uses the installed codex command and its codex login. Can read and edit files and run commands in this folder, so only connect folders you trust. Codex marks the folder as trusted in its own settings. See OpenAI's{" "}
+            <a href="https://learn.chatgpt.com/docs/app-server" target="_blank" rel="noreferrer">Codex app-server terms</a>.
           </div>
         )}
         {isApiRuntime(mode) && (
           <>
-            <div className="muted">Talks to the provider directly with your own key: chat only, no tools and no file access (images are sent). The key is saved on this computer, in the Branchboard data folder, and cannot be read back through the app.</div>
-            <CredentialForm runtimeId={mode} status={catalog?.credential} onChanged={() => void refresh(true)} />
+            <div className="muted">Runs on the OpenCode 2 engine with your own key, saved in the Branchboard data folder.</div>
+            <CredentialForm runtimeId={mode} catalog={catalog} refresh={refresh} isNoticeShown />
             {mode === "openai" && (
               <label>
-                Model id (optional, when the server cannot list its models)
+                Model id (optional)
                 <input value={modelId} spellCheck={false} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-4o-mini" />
               </label>
             )}
@@ -87,12 +100,12 @@ export const ProjectDialog = ({ onClose }: { onClose: () => void }) => {
         {isBlocked && !isApiRuntime(mode) && (
           <div className="setup-block">
             <div className="part-error">{catalog.health.detail}</div>
-            <SetupGuide runtimeId={mode} catalog={catalog} onCheckAgain={() => void refresh(true)} />
+            <CliSetup runtimeId={mode} onCheckAgain={() => void refresh(true)} />
           </div>
         )}
         <div className="dialog-actions">
           <button onClick={onClose}>Close</button>
-          <button className="primary" disabled={!workspacePath.trim() || isBlocked} title={isBlocked ? catalog.health.detail : undefined} onClick={() => void connect()}>Connect</button>
+          <button className="primary" disabled={!workspacePath.trim() || isBlocked || isConnecting} title={isBlocked ? catalog.health.detail : undefined} onClick={() => void connect()}>{isConnecting ? "Downloading the engine…" : "Connect"}</button>
         </div>
       </div>
     </div>

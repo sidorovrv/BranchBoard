@@ -7,6 +7,7 @@ import { createApp } from "../packages/server/src/app";
 import { cleanTitle, suggestTitle, titleInstruction } from "../packages/server/src/run/titles";
 import { pickSmallModel } from "../packages/server/src/runtimes/smallModel";
 import { fakeRuntime } from "../packages/server/src/runtimes/fake";
+import { generateThroughSession } from "../packages/server/src/run/askOnce";
 import type { RuntimeSteps } from "../packages/server/src/run/types";
 
 const PORT = 47124;
@@ -18,6 +19,7 @@ const TITLE_REPLY = '"Banana Facts."';
 const titlingRuntime: RuntimeSteps = {
   ...fakeRuntime,
   canSuggestTitles: true,
+  generateText: generateThroughSession(() => titlingRuntime),
   openSession: async (plan, scope) => ({ ...(await fakeRuntime.openSession(plan, scope)), sessionId: `titled-${Math.random()}` }),
   execute: async function* (handle, input, scope) {
     if (!input.startsWith("Write a title")) return yield* fakeRuntime.execute(handle, input, scope);
@@ -69,14 +71,18 @@ afterAll(() => {
 
 describe("title model", () => {
   const seenModels: (string | undefined)[] = [];
-  const recording = (titleModel?: RuntimeSteps["titleModel"]): RuntimeSteps => ({
-    ...titlingRuntime,
-    titleModel,
-    execute: async function* (handle, input, scope) {
-      seenModels.push(scope.model);
-      yield* titlingRuntime.execute(handle, input, scope);
-    },
-  });
+  const recording = (titleModel?: RuntimeSteps["titleModel"]): RuntimeSteps => {
+    const runtime: RuntimeSteps = {
+      ...titlingRuntime,
+      titleModel,
+      generateText: generateThroughSession(() => runtime),
+      execute: async function* (handle, input, scope) {
+        seenModels.push(scope.model);
+        yield* titlingRuntime.execute(handle, input, scope);
+      },
+    };
+    return runtime;
+  };
   const request = { scope: { boardId: "b", nodeId: "n", workspacePath: process.cwd(), model: "big/model" }, prompt: "p" };
 
   it("uses the runtime's cheaper model for the title when it names one", async () => {

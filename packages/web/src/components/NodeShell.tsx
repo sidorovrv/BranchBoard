@@ -1,29 +1,32 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Handle, Position, useConnection, useStore as useFlowStore, type Node, type NodeProps } from "@xyflow/react";
-import { activeRollOf, cacheReadShareOf, childIdsOf, describeToolGroup, edgesAtSide, isOnFlowAxis, isOutputSide, SIDES, usedSidesOf, type Side, groupToolRuns, toolGroupStatus, fileEditOf, fileEditsOf, formatCost, formatDuration, formatTokens, isChosen, isInFlight, isStale, isSummaryUsable, NODE_MAX_HEIGHT, NODE_MAX_WIDTH, preferredPermissionMode, UNSET_CHOICE, lockedNodeIds, minSizeOf, partsOfRoll, rollNumbersOf, satelliteIdsOf, todoProgress, toolFilePathOf, toolInputView, isRepeatedToolName, type GraphNode, type Part, type TodoItem } from "@branchboard/core";
+import { activeRollOf, cacheReadShareOf, childIdsOf, edgesAtSide, isOnFlowAxis, isOutputSide, SIDES, usedSidesOf, type Side, formatCost, formatDuration, formatTokens, isChosen, isInFlight, isStale, isSummaryUsable, NODE_MAX_HEIGHT, NODE_MAX_WIDTH, preferredPermissionMode, UNSET_CHOICE, lockedNodeIds, minSizeOf, partsOfRoll, rollNumbersOf, shownSatelliteIdsOf, type GraphNode, type Part } from "@branchboard/core";
 import { availableNodeActions, commitGraphEdit, createAndFocus } from "../actions";
+import { fetchWorkspaceFiles } from "../api";
 import { attachToNode, droppedFiles, hasFiles } from "../attachments";
 import { useAutosavedText } from "../autosave";
 import { useCommentHighlights } from "../commentAnchors";
-import { clearGuides, snapResize } from "../dragSnap";
+import { clearGuides, isGuideHeld, snapResize } from "../dragSnap";
 import { SEEN_DWELL_MS, useIsUnseenResult, usePageVisible, useSeenResults } from "../seenResults";
-import { useGraphWithLiveMoves } from "../liveMoves";
-import { useSettings } from "../settings";
+import { useGraphWithLiveMoves, useLiveMoves } from "../liveMoves";
+import { useSettings, type NodeTagId } from "../settings";
 import { tintStyleOf } from "../tint";
 import { sendBoardCommand, useBoard } from "../store";
+import { cancelScheduledSend, formatRunCountdown, scheduleSend, useNow, useScheduledSends } from "../scheduledSends";
 import { AttachButton, AttachmentList, FileGallery } from "./AttachmentList";
-import { ChipSelect } from "./ChipSelect";
-import { CodeBody, ExtractFileButton } from "./CodeNode";
-import { DiffStat, DiffView, FileEditsSummary } from "./FileEdits";
+import { ScheduleRunDialog, SendMenu } from "./ScheduleRun";
+import { ChipSelect } from "../kit/ChipSelect";
+import { ChatView, PartView } from "../kit/ChatView";
+import { Icon, IconRow } from "../kit/Icons";
+import { Markdown } from "../kit/Markdown";
+import { Selectable } from "../kit/Selectable";
+import { CodeBody } from "./CodeNode";
+import { NodeLiveControls, NodePrompt, NodeRequests, useNodeRevert } from "./ChatAdapters";
 import { useContextMenu, type MenuItem } from "./ContextMenu";
-import { ComposerPicker, insertPick, triggerAt, usePickerItems, type PickerItem } from "./ComposerPicker";
-import { Icon, IconRow } from "./Icons";
-import { Markdown } from "./Markdown";
-import { NodeRequests } from "./NodeRequests";
-import { PromptBlock } from "./PromptBlock";
-import { PromptEditor, type PromptEditorHandle } from "./PromptEditor";
+import { ComposerFrame } from "../kit/ComposerFrame";
+import { ComposerPicker, insertPick, triggerAt, usePickerItems, type PickerItem } from "../kit/ComposerPicker";
+import { PromptEditor, type PromptEditorHandle } from "../kit/PromptEditor";
 import { RecoveryButton } from "./RecoveryButton";
-import { Selectable } from "./Selectable";
 
 const STATUS_LABELS: Record<GraphNode["status"], string> = {
   idle: "Ready",
@@ -47,72 +50,6 @@ const EMPTY_PARTS: Part[] = [];
 const FRESH_NODE_MS = 3000;
 const UNSEEN_GLOW_MAX_SCALE = 14;
 
-const ToolCard = ({ part }: { part: Part }) => {
-  const edit = fileEditOf(part.meta?.tool, part.meta?.input);
-  const filePath = toolFilePathOf(part.meta?.input);
-  const inputView = edit ? undefined : toolInputView(part.meta?.input);
-  const toolName = String(part.meta?.tool);
-  const summaryText = isRepeatedToolName(part.text, toolName) ? (inputView?.summary ?? "") : part.text;
-  return (
-    <details className={`tool-card tool-${String(part.meta?.status)}`}>
-      <summary>
-        <span className="tool-name">{toolName}</span>
-        <span className="tool-text">{summaryText}</span>
-        {edit && <DiffStat change={edit} isPill />}
-        {filePath && <ExtractFileButton path={filePath} />}
-        <span className="tool-status">{String(part.meta?.status)}</span>
-      </summary>
-      {edit && <DiffView rows={edit.rows} />}
-      {inputView && <pre className="copyable nodrag tool-primary">{inputView.primaryText}</pre>}
-      {inputView?.remaining && <pre className="copyable nodrag">{JSON.stringify(inputView.remaining, null, 2)}</pre>}
-      {!edit && !inputView && part.meta?.input !== undefined && <pre className="copyable nodrag">{JSON.stringify(part.meta.input, null, 2)}</pre>}
-      {part.meta?.output !== undefined && <pre className="copyable nodrag">{String(part.meta.output)}</pre>}
-    </details>
-  );
-};
-
-const TODO_ICONS = { completed: "todoDone", in_progress: "todoActive", pending: "todoOpen" } as const;
-
-const TodoList = ({ part }: { part: Part }) => {
-  const items = (part.meta?.items ?? []) as TodoItem[];
-  const { done, total } = todoProgress(items);
-  return (
-    <div className="todo-list">
-      <div className="todo-head">Todos <span className="muted">{done}/{total}</span></div>
-      <ul>
-        {items.map((item, index) => (
-          <li key={index} className={`todo-${item.status}`}>
-            <Icon name={TODO_ICONS[item.status]} />
-            <span>{item.content}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-};
-
-const ToolGroup = ({ parts }: { parts: Part[] }) => {
-  const status = toolGroupStatus(parts);
-  return (
-    <details className={`tool-group tool-${status}`}>
-      <summary>
-        <span className="tool-text">{describeToolGroup(parts)}</span>
-        <span className="tool-status">{status}</span>
-      </summary>
-      <div className="tool-group-body">{parts.map((part) => <ToolCard key={part.id} part={part} />)}</div>
-    </details>
-  );
-};
-
-const PartView = ({ part, isFinished, isLast, node }: { part: Part; isFinished: boolean; isLast: boolean; node?: GraphNode }) => {
-  if (part.type === "todo") return <TodoList part={part} />;
-  if (part.type === "tool") return <ToolCard part={part} />;
-  if (part.type === "error") return <div className="part-error"><Selectable>{part.text}</Selectable>{node && <RecoveryButton node={node} part={part} />}</div>;
-  if (part.type === "reasoning" && part.text.trim() === "") return isFinished || !isLast ? null : <div className="thinking-note">Thinking…</div>;
-  if (part.type === "reasoning") return <details className="reasoning"><summary>Reasoning</summary><div><Selectable>{part.text}</Selectable></div></details>;
-  return <Markdown text={part.text} isStreaming={!isFinished} />;
-};
-
 const EFFORT_LABELS: Record<string, string> = { default: "Default effort", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
 
 const Composer = ({ node }: { node: GraphNode }) => {
@@ -130,7 +67,9 @@ const Composer = ({ node }: { node: GraphNode }) => {
   const [caret, setCaret] = useState(0);
   const [pickerIndex, setPickerIndex] = useState(0);
   const trigger = useMemo(() => triggerAt(prompt, caret), [prompt, caret]);
-  const pickerItems = usePickerItems(trigger);
+  const boardId = useBoard((state) => state.board?.id);
+  const searchFiles = useMemo(() => (boardId ? (query: string) => fetchWorkspaceFiles(boardId, query) : undefined), [boardId]);
+  const pickerItems = usePickerItems(trigger, { catalog: catalog && { ...catalog, commands: catalog.commands ?? [] }, searchFiles });
   useEffect(() => setPickerIndex(0), [trigger?.kind, trigger?.query]);
   const pick = (item: PickerItem) => {
     if (!trigger) return;
@@ -152,8 +91,22 @@ const Composer = ({ node }: { node: GraphNode }) => {
   const preferredMode = preferredPermissionMode(permissionModes, useSettings((state) => state.settings.defaultPermissionMode));
   const chosenMode = permissionModes.some((mode) => mode.id === permissionMode) ? permissionMode : (preferredMode ?? catalog?.defaultPermissionMode);
   const run = () => {
+    cancelScheduledSend(node.id);
     discardDraft();
     return sendBoardCommand({ type: "run", nodeId: node.id, prompt, agent: agent || undefined, model: model || undefined, effort: chosenEffort, permissionMode: chosenMode });
+  };
+  const scheduledAt = useScheduledSends((state) => state.runAt[node.id]);
+  const now = useNow(scheduledAt !== undefined);
+  const [openSendPanel, setOpenSendPanel] = useState<"menu" | "schedule">();
+  const closeSendPanel = () => setOpenSendPanel(undefined);
+  const isSendable = scheduledAt !== undefined || prompt.trim() !== "";
+  const schedule = (at: number) => {
+    if (boardId) scheduleSend(node.id, at, run, { boardId, title: node.title, prompt });
+    closeSendPanel();
+  };
+  const unschedule = () => {
+    cancelScheduledSend(node.id);
+    closeSendPanel();
   };
   const handleEnterToRun = (event: KeyboardEvent): boolean => {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return false;
@@ -162,31 +115,35 @@ const Composer = ({ node }: { node: GraphNode }) => {
     return true;
   };
   return (
-    <div className="composer nodrag nowheel">
-      <ComposerPicker items={pickerItems} activeIndex={pickerIndex} onPick={pick} />
-      <PromptEditor
-        ref={editor}
-        className="composer-editor"
-        autoFocus={Date.now() - node.createdAt < FRESH_NODE_MS}
-        value={prompt}
-        placeholder="Ask something… (Shift+Enter for a new line, / for commands, @ for files and agents)"
-        onChange={setPrompt}
-        onCaret={setCaret}
-        onBlur={saveDraft}
-        onKeyDown={(event) => handlePickerKey(event) || handleEnterToRun(event)}
-      />
-      <AttachmentList node={node} isEditable />
-      <div className="composer-row">
-        <div className="composer-chips">
+    <ComposerFrame
+      picker={<ComposerPicker items={pickerItems} activeIndex={pickerIndex} onPick={pick} />}
+      editor={
+        <PromptEditor
+          ref={editor}
+          className="composer-editor"
+          autoFocus={Date.now() - node.createdAt < FRESH_NODE_MS}
+          value={prompt}
+          placeholder="Ask something… (Shift+Enter for a new line, / for commands, @ for files and agents)"
+          onChange={setPrompt}
+          onCaret={setCaret}
+          onBlur={saveDraft}
+          onKeyDown={(event) => handlePickerKey(event) || handleEnterToRun(event)}
+        />
+      }
+      attachments={<AttachmentList node={node} isEditable />}
+      leading={
+        <>
           <AttachButton node={node} />
           {permissionModes.length > 0 && chosenMode && (
-            <ChipSelect icon="permission" title="Permission mode" value={chosenMode} options={permissionModes.map((mode) => ({ value: mode.id, label: mode.name }))} onChange={choose("permissionMode", setPermissionMode)} />
+            <ChipSelect icon="permission" title="Permission mode: what the agent may do unasked" value={chosenMode} options={permissionModes.map((mode) => ({ value: mode.id, label: mode.name }))} onChange={choose("permissionMode", setPermissionMode)} />
           )}
           {(catalog?.agents.length ?? 0) > 1 && (
             <ChipSelect icon="branch" title="Agent" value={agent} options={(catalog?.agents ?? []).map((name) => ({ value: name, label: name }))} onChange={choose("agent", setAgent)} />
           )}
-        </div>
-        <div className="composer-send">
+        </>
+      }
+      trailing={
+        <>
           <ChipSelect
             icon="model"
             title="Model"
@@ -197,10 +154,21 @@ const Composer = ({ node }: { node: GraphNode }) => {
           {efforts.length > 0 && (
             <ChipSelect icon="effort" title="Effort" value={chosenEffort} options={efforts.map((name) => ({ value: name, label: EFFORT_LABELS[name] ?? name }))} onChange={choose("effort", setEffort)} />
           )}
-          <button className="send-button primary" disabled={!prompt.trim()} onClick={run} title="Send (Enter)" aria-label="Send"><Icon name="send" /></button>
-        </div>
-      </div>
-    </div>
+        </>
+      }
+      send={
+        scheduledAt === undefined
+          ? { label: "Send (Enter)", disabled: !isSendable, onClick: () => void run() }
+          : { label: "Scheduled run: change time", disabled: !isSendable, countdown: formatRunCountdown(scheduledAt - now), onClick: () => setOpenSendPanel("schedule") }
+      }
+      sendOptions={{ label: "More send options", disabled: !isSendable, onClick: () => setOpenSendPanel(openSendPanel === "menu" ? undefined : "menu") }}
+      overlay={
+        <>
+          {openSendPanel === "menu" && <SendMenu onSchedule={() => setOpenSendPanel("schedule")} onClose={closeSendPanel} />}
+          {openSendPanel === "schedule" && <ScheduleRunDialog scheduledAt={scheduledAt} onSchedule={schedule} onUnschedule={unschedule} onClose={closeSendPanel} />}
+        </>
+      }
+    />
   );
 };
 
@@ -229,26 +197,6 @@ const NodeBody = ({ node, parts, roll }: { node: GraphNode; parts: Part[]; roll:
   return node.status === "idle" ? <Composer node={node} /> : <ChatBody node={node} parts={parts} roll={roll} />;
 };
 
-const FOLLOW_TOLERANCE_PX = 24;
-
-const useFollowScroll = (isStreaming: boolean, version: unknown) => {
-  const element = useRef<HTMLDivElement>(null);
-  const isFollowing = useRef(true);
-  const isEnabled = useSettings((state) => state.settings.followScroll);
-  const trackUserScroll = () => {
-    const target = element.current;
-    if (target) isFollowing.current = target.scrollHeight - target.scrollTop - target.clientHeight <= FOLLOW_TOLERANCE_PX;
-  };
-  useEffect(() => {
-    if (!isStreaming) isFollowing.current = true;
-  }, [isStreaming]);
-  useLayoutEffect(() => {
-    const target = element.current;
-    if (isEnabled && isStreaming && isFollowing.current && target) target.scrollTop = target.scrollHeight;
-  }, [isEnabled, isStreaming, version]);
-  return { element, trackUserScroll };
-};
-
 const SubagentInline = ({ satellite }: { satellite: GraphNode }) => {
   const allParts = useBoard((state) => state.view.parts[satellite.id]) ?? EMPTY_PARTS;
   const parts = useMemo(() => partsOfRoll(allParts, activeRollOf(satellite)), [allParts, satellite]);
@@ -269,37 +217,42 @@ const SubagentInline = ({ satellite }: { satellite: GraphNode }) => {
   );
 };
 
-const useInlineSubagents = (node: GraphNode): GraphNode[] => {
+const useInlineSubagents = (node: GraphNode, roll: number): GraphNode[] => {
   const graph = useBoard((state) => state.view.graph);
   const isInline = useSettings((state) => state.settings.subagentDisplay) === "inline";
-  return useMemo(() => (isInline && node.kind === "turn" ? satelliteIdsOf(graph, node.id).map((id) => graph.nodes[id]) : []), [isInline, graph, node.id, node.kind]);
+  return useMemo(() => (isInline && node.kind === "turn" ? shownSatelliteIdsOf(graph, node.id, roll).map((id) => graph.nodes[id]) : []), [isInline, graph, node.id, node.kind, roll]);
 };
 
 const ChatBody = ({ node, parts, roll }: { node: GraphNode; parts: Part[]; roll: number }) => {
   const isFinished = SETTLED_STATUSES.includes(node.status) || roll !== activeRollOf(node);
-  const { element, trackUserScroll } = useFollowScroll(isInFlight(node), parts);
-  const inlineSubagents = useInlineSubagents(node);
-  const fileEdits = useMemo(() => fileEditsOf(parts), [parts]);
+  const answer = useRef<HTMLDivElement>(null);
+  const inlineSubagents = useInlineSubagents(node, roll);
   const isGrouping = useSettings((state) => state.settings.groupToolCalls);
-  useCommentHighlights(node, roll, element);
-  const runs = useMemo(() => groupToolRuns(parts), [parts]);
-  useLayoutEffect(() => {
-    if (isFinished && element.current) element.current.scrollTop = element.current.scrollHeight;
-  }, []);
+  const isFollowing = useSettings((state) => state.settings.followScroll);
+  const revert = useNodeRevert(node);
+  useCommentHighlights(node, roll, answer);
   return (
-    <>
-      {node.quoteText && <div className="quote-chip"><Selectable>Regarding: {node.quoteText}</Selectable></div>}
-      <PromptBlock node={node} />
-      <NodeRequests nodeId={node.id} />
-      <div className="answer nowheel" ref={element} data-roll={roll} onScroll={trackUserScroll}>
-        {isGrouping
-          ? runs.map((run, index) => (run.kind === "tools" ? <ToolGroup key={run.parts[0].id} parts={run.parts} /> : <PartView key={run.part.id} part={run.part} isFinished={isFinished} isLast={index === runs.length - 1} node={node} />))
-          : parts.map((part, index) => <PartView key={part.id} part={part} isFinished={isFinished} isLast={index === parts.length - 1} node={node} />)}
-        {inlineSubagents.map((satellite) => <SubagentInline key={satellite.id} satellite={satellite} />)}
-        {isFinished && <FileEditsSummary edits={fileEdits} node={node} />}
-        {node.stopped && <div className="stopped-note">stopped</div>}
-      </div>
-    </>
+    <ChatView
+      parts={parts}
+      isFinished={isFinished}
+      isStreaming={isInFlight(node)}
+      isGrouping={isGrouping}
+      isFollowing={isFollowing}
+      roll={roll}
+      answerRef={answer}
+      revert={revert}
+      isStopped={node.stopped}
+      renderRecovery={(part) => <RecoveryButton node={node} part={part as Part} />}
+      header={
+        <>
+          {node.quoteText && <div className="quote-chip"><Selectable>Regarding: {node.quoteText}</Selectable></div>}
+          <NodePrompt node={node} />
+          <NodeRequests nodeId={node.id} />
+        </>
+      }
+      afterParts={inlineSubagents.map((satellite) => <SubagentInline key={satellite.id} satellite={satellite} />)}
+      footer={<NodeLiveControls node={node} />}
+    />
   );
 };
 
@@ -319,7 +272,7 @@ export const ELAPSED_TICK_MS = 200;
 
 const cacheBadgeTitle = (usage: GraphNode["usage"]): string => {
   const firstCall = usage?.firstCallCacheCreationTokens === undefined ? "" : `. First call: ${formatTokens(usage.firstCallCacheReadTokens ?? 0)} read, ${formatTokens(usage.firstCallCacheCreationTokens)} written`;
-  return `Share of input tokens read from the prompt cache. Total: ${formatTokens(usage?.cacheReadTokens ?? 0)} read, ${formatTokens(usage?.cacheCreationTokens ?? 0)} written${firstCall}`;
+  return `Prompt cache: share of input tokens read from the prompt cache. Total: ${formatTokens(usage?.cacheReadTokens ?? 0)} read, ${formatTokens(usage?.cacheCreationTokens ?? 0)} written${firstCall}`;
 };
 
 const Elapsed = ({ node }: { node: GraphNode }) => {
@@ -332,7 +285,7 @@ const Elapsed = ({ node }: { node: GraphNode }) => {
   }, [isLive]);
   const finishedAt = isLive ? currentTime : node.completedAt;
   if (node.startedAt === undefined || finishedAt === undefined || !(isLive || SETTLED_STATUSES.includes(node.status))) return null;
-  return <span className="badge elapsed">{formatDuration(Math.max(0, finishedAt - node.startedAt))}</span>;
+  return <span className="badge elapsed" title="Run time">{formatDuration(Math.max(0, finishedAt - node.startedAt))}</span>;
 };
 
 interface RollSwitcherProps {
@@ -363,31 +316,54 @@ const RollSwitcher = ({ node, isViewOnly, shownRoll, onView }: RollSwitcherProps
   );
 };
 
-const Badges = ({ node, stale, isBlocked, summaryState }: { node: GraphNode; stale: boolean; isBlocked: boolean; summaryState: "none" | "fresh" | "stale" }) => (
-  <div className="badges">
-    {node.kind === "subagent" && <span className="badge"><IconRow names={["subagent"]} />Subagent</span>}
-    {node.kind === "subagent" && node.agent && <span className="badge" title="Agent">{node.agent}</span>}
-    <span className={`badge status-${node.status}`}>{STATUS_LABELS[node.status]}</span>
-    {summaryState !== "none" && <span className={`badge ${summaryState === "stale" ? "stale" : ""}`} title={summaryState === "fresh" ? "Summary stored; used when context is re-sent" : "Summary is out of date and ignored"}>summary{summaryState === "stale" ? " (old)" : ""}</span>}
-    <Elapsed node={node} />
-    {isBlocked && <span className="badge blocked" title="A child node is running. Stop it to edit this one"><IconRow names={["lock"]} />Locked</span>}
-    {node.forceAssemble && <span className="badge fidelity-assembled" title="The whole context will be re-sent as text">assemble</span>}
-    {node.kind === "turn" && node.model && <span className="badge">{node.model}</span>}
-    {node.kind === "turn" && node.agent && <span className="badge">{node.agent}</span>}
-    {node.kind === "turn" && isChosen(node.effort) && <span className="badge" title="Effort">{node.effort}</span>}
-    {node.kind === "turn" && isChosen(node.permissionMode) && <span className="badge" title="Permission mode">{node.permissionMode}</span>}
-    {node.contextMode && <span className={`badge fidelity-${node.contextMode}`}>{node.contextMode}</span>}
-    {stale && <span data-tour="stale" className="badge stale">context changed</span>}
-    {node.usage && <span className="badge">{node.usage.inputTokens + node.usage.outputTokens} tok</span>}
-    {node.usage?.costUsd !== undefined && <span className="badge" title="Cost reported by the runtime for this run">{formatCost(node.usage.costUsd)}</span>}
-    {node.usage?.contextTokens !== undefined && node.usage.contextWindow && (
-      <span className="badge" title="Context window used by the last model call">ctx {formatTokens(node.usage.contextTokens)}/{formatTokens(node.usage.contextWindow)} ({Math.round((node.usage.contextTokens / node.usage.contextWindow) * 100)}%)</span>
-    )}
-    {cacheReadShareOf(node.usage) !== undefined && (
-      <span className="badge" title={cacheBadgeTitle(node.usage)}>cache {Math.round(cacheReadShareOf(node.usage)! * 100)}%</span>
-    )}
-  </div>
-);
+const LOW_DETAIL_CHIP_MAX_SCALE = 4;
+
+const CommentsChip = ({ node, zoom }: { node: GraphNode; zoom: number }) => {
+  const openComments = (node.comments ?? []).filter((comment) => comment.roll === activeRollOf(node)).length;
+  if (openComments === 0) return null;
+  const isLowDetail = zoom < LOW_DETAIL_ZOOM;
+  return (
+    <span className={`comments-chip ${isLowDetail ? "is-low-detail" : ""}`} style={isLowDetail ? { transform: `scale(${Math.min(LOW_DETAIL_CHIP_MAX_SCALE, 1 / zoom)})` } : undefined} title="Comments waiting to be sent with the next reply">
+      <Icon name="comment" />
+      {openComments}
+    </span>
+  );
+};
+
+const Badges = ({ node, stale, isBlocked, summaryState }: { node: GraphNode; stale: boolean; isBlocked: boolean; summaryState: "none" | "fresh" | "stale" }) => {
+  const shownTags = useSettings((state) => state.settings.shownTags);
+  const shows = (id: NodeTagId) => shownTags.includes(id);
+  const isClaudeCostShown = useSettings((state) => state.settings.showClaudeCost);
+  const isClaudeBoard = useBoard((state) => state.board?.mode === "claude");
+  const showsCost = isClaudeCostShown || !isClaudeBoard;
+  const hasTags = node.kind === "subagent" || shownTags.length > 0;
+  if (!hasTags) return null;
+  return (
+    <div className="badges">
+      {node.kind === "subagent" && <span className="badge"><IconRow names={["subagent"]} />Subagent</span>}
+      {node.kind === "subagent" && node.agent && shows("agent") && <span className="badge" title="Agent">{node.agent}</span>}
+      {shows("status") && <span className={`badge status-${node.status}`} title="Status">{STATUS_LABELS[node.status]}</span>}
+      {shows("summary") && summaryState !== "none" && <span className={`badge ${summaryState === "stale" ? "stale" : ""}`} title={summaryState === "fresh" ? "Summary stored; used when context is re-sent" : "Summary is out of date and ignored"}>summary{summaryState === "stale" ? " (old)" : ""}</span>}
+      {shows("runTime") && <Elapsed node={node} />}
+      {shows("locked") && isBlocked && <span className="badge blocked" title="A child node is running. Stop it to edit this one"><IconRow names={["lock"]} />Locked</span>}
+      {shows("assemble") && node.forceAssemble && <span className="badge fidelity-assembled" title="The whole context will be re-sent as text">assemble</span>}
+      {shows("model") && node.kind === "turn" && node.model && <span className="badge" title="Model">{node.model}</span>}
+      {shows("agent") && node.kind === "turn" && node.agent && <span className="badge" title="Agent">{node.agent}</span>}
+      {shows("effort") && node.kind === "turn" && isChosen(node.effort) && <span className="badge" title="Effort">{node.effort}</span>}
+      {shows("permissionMode") && node.kind === "turn" && isChosen(node.permissionMode) && <span className="badge" title="Permission mode">{node.permissionMode}</span>}
+      {shows("contextMode") && node.contextMode && <span className={`badge fidelity-${node.contextMode}`} title={`Context mode: ${node.contextMode}`}>{node.contextMode}</span>}
+      {shows("contextChanged") && stale && <span data-tour="stale" className="badge stale" title="Context status: an ancestor changed after this answer">context changed</span>}
+      {shows("tokens") && node.usage && <span className="badge" title="Tokens used by this run">{node.usage.inputTokens + node.usage.outputTokens} tok</span>}
+      {shows("cost") && showsCost && node.usage?.costUsd !== undefined && <span className="badge" title="Cost: reported by the runtime for this run">{formatCost(node.usage.costUsd)}</span>}
+      {shows("contextWindow") && node.usage?.contextTokens !== undefined && node.usage.contextWindow && (
+        <span className="badge" title="Context window: used by the last model call">ctx {formatTokens(node.usage.contextTokens)}/{formatTokens(node.usage.contextWindow)} ({Math.round((node.usage.contextTokens / node.usage.contextWindow) * 100)}%)</span>
+      )}
+      {shows("cache") && cacheReadShareOf(node.usage) !== undefined && (
+        <span className="badge" title={cacheBadgeTitle(node.usage)}>cache {Math.round(cacheReadShareOf(node.usage)! * 100)}%</span>
+      )}
+    </div>
+  );
+};
 
 const NodeActions = ({ node }: { node: GraphNode }) => {
   const graphVersion = useBoard((state) => state.view.graph);
@@ -419,44 +395,61 @@ const NextPrompt = ({ node }: { node: GraphNode }) => {
   );
 };
 
-interface ResizeAxes {
-  horizontal: boolean;
-  vertical: boolean;
+type EdgeDirection = -1 | 0 | 1;
+
+interface ResizeDirection {
+  x: EdgeDirection;
+  y: EdgeDirection;
 }
 
-const RESIZE_HANDLES: { className: string; title: string; axes: ResizeAxes }[] = [
-  { className: "is-right", title: "Drag to change the width", axes: { horizontal: true, vertical: false } },
-  { className: "is-bottom", title: "Drag to change the height", axes: { horizontal: false, vertical: true } },
-  { className: "is-corner", title: "Drag to resize", axes: { horizontal: true, vertical: true } },
+const LIVE_RESIZE_SETTLE_MS = 400;
+
+const RESIZE_HANDLES: { className: string; title: string; direction: ResizeDirection }[] = [
+  { className: "is-right", title: "Drag to change the width", direction: { x: 1, y: 0 } },
+  { className: "is-left", title: "Drag to change the width", direction: { x: -1, y: 0 } },
+  { className: "is-bottom", title: "Drag to change the height", direction: { x: 0, y: 1 } },
+  { className: "is-top", title: "Drag to change the height", direction: { x: 0, y: -1 } },
+  { className: "is-corner", title: "Drag to resize", direction: { x: 1, y: 1 } },
+  { className: "is-corner-bl", title: "Drag to resize", direction: { x: -1, y: 1 } },
+  { className: "is-corner-tl", title: "Drag to resize", direction: { x: -1, y: -1 } },
+  { className: "is-corner-tr", title: "Drag to resize", direction: { x: 1, y: -1 } },
 ];
 
 const useCornerResize = (node: GraphNode) => {
   const zoom = useFlowStore((state) => state.transform[2]);
   const [dragSize, setDragSize] = useState<{ w: number; h: number }>();
   useEffect(() => setDragSize(undefined), [node.w, node.h]);
-  const beginResize = (event: ReactPointerEvent, axes: ResizeAxes) => {
+  const beginResize = (event: ReactPointerEvent, direction: ResizeDirection) => {
     event.stopPropagation();
     event.preventDefault();
     const origin = { x: event.clientX, y: event.clientY, w: node.w, h: node.h };
-    let latest = { w: node.w, h: node.h };
+    const min = minSizeOf(node.kind);
+    let latest = { x: node.x, y: node.y, w: node.w, h: node.h };
     const move = (moveEvent: PointerEvent) => {
       const clampSize = (size: { w: number; h: number }) => ({
-        w: axes.horizontal ? Math.round(Math.min(NODE_MAX_WIDTH, Math.max(minSizeOf(node.kind).w, size.w))) : node.w,
-        h: axes.vertical ? Math.round(Math.min(NODE_MAX_HEIGHT, Math.max(minSizeOf(node.kind).h, size.h))) : node.h,
+        w: direction.x !== 0 ? Math.round(Math.min(NODE_MAX_WIDTH, Math.max(min.w, size.w))) : node.w,
+        h: direction.y !== 0 ? Math.round(Math.min(NODE_MAX_HEIGHT, Math.max(min.h, size.h))) : node.h,
       });
-      const raw = clampSize({ w: origin.w + (moveEvent.clientX - origin.x) / zoom, h: origin.h + (moveEvent.clientY - origin.y) / zoom });
-      if (moveEvent.altKey) latest = clampSize(snapResize(node, raw, axes, zoom));
-      else {
-        clearGuides();
-        latest = raw;
-      }
-      setDragSize(latest);
+      const raw = clampSize({
+        w: origin.w + (direction.x * (moveEvent.clientX - origin.x)) / zoom,
+        h: origin.h + (direction.y * (moveEvent.clientY - origin.y)) / zoom,
+      });
+      const isGuided = isGuideHeld(moveEvent);
+      const size = isGuided ? clampSize(snapResize(node, raw, direction, zoom)) : raw;
+      if (!isGuided) clearGuides();
+      latest = {
+        x: direction.x === -1 ? node.x + node.w - size.w : node.x,
+        y: direction.y === -1 ? node.y + node.h - size.h : node.y,
+        ...size,
+      };
+      setDragSize(size);
+      useLiveMoves.getState().update({ [node.id]: { x: latest.x, y: latest.y } });
     };
     const finish = () => {
       clearGuides();
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
-      void sendBoardCommand({ type: "moveNodes", positions: { [node.id]: latest } });
+      void sendBoardCommand({ type: "moveNodes", positions: { [node.id]: latest } }).finally(() => setTimeout(() => useLiveMoves.getState().clear(), LIVE_RESIZE_SETTLE_MS));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
@@ -551,13 +544,15 @@ const NodeShellComponent = ({ data, selected }: NodeProps<BranchNode>) => {
         <div className="node-head">
           <TitleLabel node={node} />
           {node.pinned && <span className="pin-mark" title="Pinned: it cannot be moved or resized"><Icon name="pin" /></span>}
+          {!isLowDetail && <CommentsChip node={node} zoom={zoom} />}
         </div>
+        {isLowDetail && <CommentsChip node={node} zoom={zoom} />}
         {(node.kind === "turn" || node.kind === "subagent") && <Badges node={node} stale={stale} isBlocked={isBlocked} summaryState={summaryState} />}
         {isLowDetail && <div className="lod-title" style={{ fontSize: Math.min(LOW_DETAIL_FONT_SCREEN_PX / zoom, Math.sqrt((node.w * node.h * LOW_DETAIL_FILL) / (Math.max(node.title.length, 1) * LOW_DETAIL_CHAR_ASPECT))) }}>{node.title}</div>}
         {!isLowDetail && <NodeBody node={node} parts={parts} roll={shownRoll} />}
         {!isLowDetail && <RollSwitcher node={node} isViewOnly={isViewOnly} shownRoll={shownRoll} onView={setViewedRoll} />}
         {hiddenCount > 0 && <div className="collapsed-note">{hiddenCount} collapsed</div>}
-        {!node.pinned && RESIZE_HANDLES.map(({ className, title, axes }) => <div key={className} className={`resize-handle ${className} nodrag nopan`} onPointerDown={(event) => beginResize(event, axes)} title={title}><span /></div>)}
+        {!node.pinned && RESIZE_HANDLES.map(({ className, title, direction }) => <div key={className} className={`resize-handle ${className} nodrag nopan`} onPointerDown={(event) => beginResize(event, direction)} title={title}><span /></div>)}
       </div>
       {selected && isOnlySelected && !isLowDetail && (
         <div className="node-below nodrag">

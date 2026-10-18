@@ -4,6 +4,7 @@ import { installCommandFor, RUNTIMES } from "@branchboard/core";
 import { accessLinkOf, loadAccessToken } from "../../server/src/accessToken";
 import { dataDirectoryId, defaultDataDirectory } from "../../server/src/dataDirectory";
 import { locateClaude } from "../../server/src/runtimes/claudeLocator";
+import { locateCodex } from "../../server/src/runtimes/codexLocator";
 import { locateOpencode } from "../../server/src/runtimes/opencodeLocator";
 import { installProcessHandlers, startServer } from "../../server/src/start";
 import { VERSION } from "../../server/src/version";
@@ -14,7 +15,7 @@ import { runAutoUpdate, runUpdate, shouldAutoUpdate } from "./update";
 
 const HELP = `Branchboard ${VERSION}
 
-A whiteboard where every AI chat turn is a node. It runs on your computer and uses the claude or opencode command you already have installed.
+A whiteboard where every AI chat turn is a node. It runs on your computer and uses the claude, codex or opencode command you already have installed.
 
 Usage: branchboard [options]
 
@@ -30,9 +31,9 @@ Usage: branchboard [options]
   update --check     Only report the newest version
 `;
 
-type CliRuntimeId = "opencode" | "claude";
+type CliRuntimeId = "opencode" | "claude" | "codex";
 
-const CLI_LOCATORS: Record<CliRuntimeId, () => { path?: string }> = { opencode: locateOpencode, claude: locateClaude };
+const CLI_LOCATORS: Record<CliRuntimeId, () => { path?: string }> = { opencode: locateOpencode, claude: locateClaude, codex: locateCodex };
 
 export const runtimeSummary = (platform: string = process.platform, locators: Partial<Record<CliRuntimeId, () => { path?: string }>> = CLI_LOCATORS): string[] =>
   (Object.keys(locators) as CliRuntimeId[]).map((id) => {
@@ -76,7 +77,6 @@ export const runCli = async (argv: string[]): Promise<void> => {
   if (parsed.kind === "version") return void console.log(VERSION);
   if (parsed.kind === "update") return process.exit(await runUpdate(parsed));
   if (parsed.kind === "error") return fatal(`${parsed.message}\n\n${HELP}`, 2);
-  process.env.BRANCHBOARD_LOG_LEVEL ??= "info";
   if (parsed.offline) process.env.BRANCHBOARD_OFFLINE = "1";
   const dataDirectory = parsed.dataDirectory ?? defaultDataDirectory();
   const requestedPort = parsed.port ?? portFromEnvironment(process.env.PORT);

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement, type ReactNode } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import {
   BINDABLE_ACTIONS,
   NODE_MAX_HEIGHT,
@@ -10,12 +10,15 @@ import {
   RUNTIME_IDS,
   bindingProblem,
   clickBindingOf,
+  holdBindingOf,
+  environmentTextOf,
   describeUpdateStatus,
   formatAgo,
   releaseNotesUrl,
+  thirdPartyNoticesUrl,
   updateCommand,
-  API_RUNTIMES_ARE_SHOWN,
   isApiRuntime,
+  telemetryTiles,
   isDefaultBinding,
   isSidePointerButton,
   keyBindingOf,
@@ -25,78 +28,25 @@ import {
   type BindingKind,
   type Keybinds,
   type RuntimeId,
+  type RuntimePanel,
 } from "@branchboard/core";
 import { useAbout } from "../aboutStore";
+import { fetchRuntimePanels, runPanelAction } from "../api";
 import { shortcutCapture } from "../actions";
 import { displayBinding, displayModifier, displayShortcuts } from "../platform";
-import { ACTIVE_JOBS_SHOWN_MAX, ALT_CLICK_ZOOM_MAX, ALT_CLICK_ZOOM_MIN, KEYBOARD_PAN_SPEED_MAX, KEYBOARD_PAN_SPEED_MIN, useSettings, type Settings } from "../settings";
+import { ACTIVE_JOBS_SHOWN_MAX, ALT_CLICK_ZOOM_MAX, ALT_CLICK_ZOOM_MIN, KEYBOARD_PAN_SPEED_MAX, KEYBOARD_PAN_SPEED_MIN, NODE_TAGS, useSettings } from "../settings";
 import { sendBoardCommand, useBoard } from "../store";
-import { ChipSelect } from "./ChipSelect";
-import { Icon, type IconName } from "./Icons";
-import { CredentialForm, useRuntimeCatalog } from "./SetupGuide";
+import { ChipSelect } from "../kit/ChipSelect";
+import { Icon } from "../kit/Icons";
+import { NumberInput, SettingFields, SettingRow, SettingsDialog as KitSettingsDialog, ToggleSwitch, type SettingField, type SettingsSection } from "../kit/Settings";
+import { CredentialForm, ServerAddressForm, useRuntimeCatalog } from "./SetupGuide";
+import { useTelemetry } from "../telemetryStore";
+import { TelemetryTiles } from "./TelemetryTiles";
 import { copyUpdateCommand } from "./UpdateBanner";
 
-interface FieldBase {
-  label: string;
-  description: string;
-}
-
-interface ToggleField extends FieldBase {
-  kind: "toggle";
-  key: keyof Settings;
-}
-
-interface NumberField extends FieldBase {
-  kind: "number";
-  key: keyof Settings;
-  min: number;
-  max: number;
-  unit: string;
-}
-
-interface SliderField extends FieldBase {
-  kind: "slider";
-  key: keyof Settings;
-  min: number;
-  max: number;
-  step: number;
-  unit: string;
-}
-
-interface ChoiceField extends FieldBase {
-  kind: "choice";
-  key: keyof Settings;
-  options: { value: string; label: string }[];
-}
-
-interface ModelField extends FieldBase {
-  kind: "model";
-  key: keyof Settings;
-}
-
-interface PermissionModeField extends FieldBase {
-  kind: "permissionMode";
-  key: keyof Settings;
-}
-
-interface BoardToggleField extends FieldBase {
-  kind: "boardToggle";
-}
-
-interface BoardShareField extends FieldBase {
-  kind: "boardShare";
-}
-
-type SettingField = ToggleField | NumberField | SliderField | ChoiceField | ModelField | PermissionModeField | BoardToggleField | BoardShareField;
-
-interface SettingsSection {
-  id: string;
-  label: string;
-  icon: IconName;
-  summary: string;
+interface BoardSettingsSection extends SettingsSection {
   fields: SettingField[];
   Editor?: () => ReactElement;
-  isPinnedToBottom?: boolean;
 }
 
 const DEFAULT_SHARE_PERCENT = 60;
@@ -104,6 +54,7 @@ const DEFAULT_SHARE_PERCENT = 60;
 const CAPTURE_PROMPTS: Record<BindingKind, string> = {
   key: "Press a key or key combination, or a mouse button (middle, 4 or 5). Esc cancels.",
   click: `Press a mouse button (middle, 4 or 5), or hold ${displayModifier("Alt")}, ${displayModifier("Ctrl")} or Shift and click. Esc cancels.`,
+  hold: `Hold ${displayModifier("Alt")}, ${displayModifier("Ctrl")}, Shift or a combination of them, then release. Esc cancels.`,
 };
 
 const ShortcutRow = ({ action, keybinds }: { action: BindableAction; keybinds: Keybinds }) => {
@@ -124,15 +75,27 @@ const ShortcutRow = ({ action, keybinds }: { action: BindableAction; keybinds: K
       setBindings([...bindings, binding]);
       setIsCapturing(false);
     };
+    let heldPeak = "";
     const onKeyDown = (event: KeyboardEvent) => {
       event.preventDefault();
       event.stopPropagation();
       if (event.key === "Escape") return setIsCapturing(false);
+      if (action.kind === "hold") {
+        const held = holdBindingOf(event);
+        if (held.length > heldPeak.length) heldPeak = held;
+        return;
+      }
       const binding = action.kind === "key" ? keyBindingOf(event) : undefined;
       if (binding) accept(binding);
     };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (action.kind !== "hold" || !heldPeak) return;
+      event.preventDefault();
+      event.stopPropagation();
+      accept(heldPeak);
+    };
     const onClick = (event: MouseEvent) => {
-      if (action.kind === "key") return setIsCapturing(false);
+      if (action.kind !== "click") return setIsCapturing(false);
       event.preventDefault();
       event.stopPropagation();
       const binding = clickBindingOf(event);
@@ -140,7 +103,7 @@ const ShortcutRow = ({ action, keybinds }: { action: BindableAction; keybinds: K
       if (binding) accept(binding);
     };
     const onSideButton = (event: MouseEvent) => {
-      if (!isSidePointerButton(event.button)) return;
+      if (action.kind === "hold" || !isSidePointerButton(event.button)) return;
       event.preventDefault();
       event.stopPropagation();
       const binding = clickBindingOf(event);
@@ -148,6 +111,7 @@ const ShortcutRow = ({ action, keybinds }: { action: BindableAction; keybinds: K
     };
     shortcutCapture.isActive = true;
     window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
     window.addEventListener("click", onClick, true);
     window.addEventListener("mousedown", onSideButton, true);
     window.addEventListener("mouseup", onSideButton, true);
@@ -155,6 +119,7 @@ const ShortcutRow = ({ action, keybinds }: { action: BindableAction; keybinds: K
     return () => {
       shortcutCapture.isActive = false;
       window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
       window.removeEventListener("click", onClick, true);
       window.removeEventListener("mousedown", onSideButton, true);
       window.removeEventListener("mouseup", onSideButton, true);
@@ -169,12 +134,8 @@ const ShortcutRow = ({ action, keybinds }: { action: BindableAction; keybinds: K
   const conflictText = Object.entries(shared).map(([binding, labels]) => `${displayBinding(binding)} is also used by ${labels.map((label) => `“${label}”`).join(", ")}`).join(". ");
   const description = problem ?? (isCapturing ? CAPTURE_PROMPTS[action.kind] : conflictText || (bindings.length === 0 ? "No shortcut set" : ""));
   return (
-    <div className={`setting-row shortcut-row${hasConflict ? " has-conflict" : ""}`}>
-      <div className="setting-text">
-        <div className="setting-label">{action.label}</div>
-        {description && <div className={`setting-description${problem || (hasConflict && !isCapturing) ? " is-problem" : ""}`}>{description}</div>}
-      </div>
-      <div className="setting-control shortcut-control">
+    <SettingRow label={action.label} description={description} className={`shortcut-row${hasConflict ? " has-conflict" : ""}`} isProblem={Boolean(problem) || (hasConflict && !isCapturing)}>
+      <div className="shortcut-control">
         {bindings.map((binding) => (
           <span key={binding} className="shortcut-chip">
             <kbd>{displayBinding(binding)}</kbd>
@@ -186,13 +147,36 @@ const ShortcutRow = ({ action, keybinds }: { action: BindableAction; keybinds: K
         </button>
         {!isDefaultBinding(keybinds, action.id) && <button type="button" className="shortcut-reset" onClick={() => setBindings(action.defaults)} title="Restore the default shortcuts">Reset</button>}
       </div>
-    </div>
+    </SettingRow>
   );
 };
 
 const ShortcutsEditor = () => {
   const keybinds = useSettings((state) => state.settings.keybinds);
   return <>{BINDABLE_ACTIONS.map((action) => <ShortcutRow key={action.id} action={action} keybinds={keybinds} />)}</>;
+};
+
+const TelemetrySettings = ({ isOffline }: { isOffline: boolean }) => {
+  const overview = useTelemetry((state) => state.overview);
+  const { load, setConsent } = useTelemetry.getState();
+  const [isPreviewShown, setIsPreviewShown] = useState(false);
+  useEffect(() => void load(), [load]);
+  if (!overview) return null;
+  const copyPath = () => void navigator.clipboard.writeText(overview.sentLogPath).then(() => useBoard.getState().notify("Copied"));
+  return (
+    <>
+      <SettingRow label="Send aggregated anonymous telemetry" description={`Counts of runs, nodes and boards, sent once a day.${isOffline ? " Branchboard runs with --offline and sends nothing." : ""}`}>
+        <ToggleSwitch checked={overview.consent === "granted"} label="Send aggregated anonymous telemetry" onChange={(isGranted) => void setConsent(isGranted)} />
+      </SettingRow>
+      <SettingRow label="Show what is sent" description="The counts for today so far.">
+        <button onClick={() => setIsPreviewShown(!isPreviewShown)}>{isPreviewShown ? "Hide" : "Show"}</button>
+      </SettingRow>
+      {isPreviewShown && <div className="telemetry-preview"><TelemetryTiles tiles={telemetryTiles(overview.preview)} /></div>}
+      <SettingRow label="Log of sent counts" description={overview.sentLogPath}>
+        <button onClick={copyPath}>Copy path</button>
+      </SettingRow>
+    </>
+  );
 };
 
 const UpdatesEditor = () => {
@@ -206,12 +190,16 @@ const UpdatesEditor = () => {
       <SettingRow label={`Branchboard v${about.version}`} description={describeUpdateStatus(about)}>
         {version && <a href={releaseNotesUrl(version)} target="_blank" rel="noreferrer">Release notes</a>}
       </SettingRow>
+      <SettingRow label="Third-party licences" description="The Anthropic and OpenAI runtimes download and run OpenCode (MIT).">
+        <a href={thirdPartyNoticesUrl(about.version)} target="_blank" rel="noreferrer">Show notices</a>
+      </SettingRow>
       <SettingRow label="Check for updates" description={`${checked}${about.checkError ? ` The last check failed: ${about.checkError}.` : ""}`}>
         <button disabled={isChecking || about.isOffline} onClick={() => void load(true)}>{isChecking ? "Checking…" : "Check now"}</button>
       </SettingRow>
-      <SettingRow label="How to update" description={`Run this in a terminal, or run “branchboard update”. Branchboard cannot restart itself, so stop it (Ctrl+C) and start it again afterwards.`}>
+      <SettingRow label="How to update" description="Run the command in a terminal, then restart Branchboard.">
         <button onClick={() => copyUpdateCommand(version ?? "latest")} title={updateCommand(version ?? "latest")}>Copy update command</button>
       </SettingRow>
+      <TelemetrySettings isOffline={about.isOffline} />
     </>
   );
 };
@@ -227,7 +215,7 @@ const KeyEntry = ({ runtimeId }: { runtimeId: RuntimeId }) => {
         <div className="setting-label">{RUNTIMES[runtimeId].label}</div>
         {catalog && <span className={`key-status ${catalog.health.ok ? "is-ready" : ""}`}>{catalog.health.ok ? "Ready" : status?.saved ? "Not working" : "No key"}</span>}
       </div>
-      <CredentialForm runtimeId={runtimeId} status={status} onChanged={() => void refresh(true)} />
+      <CredentialForm runtimeId={runtimeId} catalog={catalog} refresh={refresh} />
     </div>
   );
 };
@@ -235,41 +223,144 @@ const KeyEntry = ({ runtimeId }: { runtimeId: RuntimeId }) => {
 const KeysEditor = () => (
   <>
     {API_RUNTIME_IDS.map((runtimeId) => <KeyEntry key={runtimeId} runtimeId={runtimeId} />)}
+    <div className="key-entry">
+      <div className="key-entry-header">
+        <div className="setting-label">{RUNTIMES.opencode.label} server</div>
+      </div>
+      <ServerAddressForm runtimeId="opencode" />
+    </div>
   </>
 );
 
-const ALL_SECTIONS: SettingsSection[] = [
+const RuntimePanelsEditor = () => {
+  const board = useBoard((state) => state.board);
+  const [panels, setPanels] = useState<RuntimePanel[]>();
+  const [problem, setProblem] = useState<string>();
+  const load = () => {
+    if (!board) return;
+    fetchRuntimePanels(board.id, board.mode).then(
+      (loaded) => (setPanels(loaded), setProblem(undefined)),
+      (error) => (setPanels(undefined), setProblem(error instanceof Error ? error.message : String(error))),
+    );
+  };
+  useEffect(load, [board?.id, board?.mode]);
+  const act = (panelId: string, rowId: string, actionId: string) =>
+    runPanelAction(board!.id, board!.mode, panelId, rowId, actionId).then(load, (error) => setProblem(error instanceof Error ? error.message : String(error)));
+  if (!board) return <SettingRow label="Runtime details" description="Open a board to see the details of its runtime." />;
+  if (problem) return <SettingRow label="Runtime details" description={problem} />;
+  if (!panels) return <SettingRow label="Runtime details" description="Loading…" />;
+  return (
+    <>
+      {panels.map((panel) => (
+        <div key={panel.id} className="panel-group">
+          <div className="setting-label">{panel.title}</div>
+          {panel.hint && <div className="setting-description">{panel.hint}</div>}
+          {panel.rows.length === 0 && <div className="setting-description">{panel.empty}</div>}
+          {panel.rows.map((row) => (
+            <SettingRow key={row.id} label={row.label} description={row.detail ?? ""}>
+              {row.actions?.map((action) => <button key={action.id} onClick={() => void act(panel.id, row.id, action.id)}>{action.label}</button>)}
+            </SettingRow>
+          ))}
+        </div>
+      ))}
+    </>
+  );
+};
+
+const ModelControl = ({ label }: { label: string }) => {
+  const value = String(useSettings((state) => state.settings.defaultModel));
+  const update = useSettings((state) => state.update);
+  const models = useBoard((state) => state.catalog?.models) ?? [];
+  const options = models.some((model) => model.id === value) ? models : [{ id: value, name: value }, ...models];
+  return <ChipSelect icon="model" title={label} value={value} options={options.map((model) => ({ value: model.id, label: model.name }))} onChange={(next) => update("defaultModel", next)} />;
+};
+
+const PermissionModeControl = ({ label }: { label: string }) => {
+  const value = String(useSettings((state) => state.settings.defaultPermissionMode));
+  const update = useSettings((state) => state.update);
+  const catalog = useBoard((state) => state.catalog);
+  const defaultMode = catalog?.permissionModes?.find((mode) => mode.id === catalog.defaultPermissionMode);
+  const runtimeDefault = { value: RUNTIME_DEFAULT_PERMISSION_MODE, label: defaultMode ? `Runtime default (${defaultMode.name})` : "Runtime default" };
+  const options = [runtimeDefault, ...(catalog?.permissionModes ?? []).map((mode) => ({ value: mode.id, label: mode.name }))];
+  const shown = options.some((option) => option.value === value) ? value : RUNTIME_DEFAULT_PERMISSION_MODE;
+  return <ChipSelect icon="permission" title={label} value={shown} options={options} onChange={(next) => update("defaultPermissionMode", next)} />;
+};
+
+const BoardToggleControl = ({ label }: { label: string }) => {
+  const board = useBoard((state) => state.board);
+  return <ToggleSwitch checked={board?.answerFormatsGuide !== false} label={label} disabled={!board} onChange={(checked) => void sendBoardCommand({ type: "updateBoard", answerFormatsGuide: checked })} />;
+};
+
+const BoardShareControl = ({ label }: { label: string }) => {
+  const board = useBoard((state) => state.board);
+  const percent = Math.round((board?.summaryShare ?? DEFAULT_SHARE_PERCENT / 100) * 100);
+  const commit = (draft: string) => void sendBoardCommand({ type: "updateBoard", summaryShare: Math.min(100, Math.max(0, Number(draft) || 0)) / 100 });
+  return <NumberInput value={percent} min={0} max={100} unit="% of window" label={label} disabled={!board} onCommit={commit} />;
+};
+
+const BoardEnvironmentControl = ({ label }: { label: string }) => {
+  const board = useBoard((state) => state.board);
+  const saved = environmentTextOf(board?.environment);
+  const [draft, setDraft] = useState(saved);
+  useEffect(() => setDraft(saved), [saved, board?.id]);
+  return (
+    <textarea
+      className="environment-input"
+      rows={4}
+      value={draft}
+      disabled={!board}
+      placeholder="NAME=value"
+      aria-label={label}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => draft !== saved && void sendBoardCommand({ type: "updateBoard", environment: draft })}
+    />
+  );
+};
+
+const SECTIONS: BoardSettingsSection[] = [
   {
     id: "ai",
     label: "AI",
     icon: "psychology",
-    summary: "How new chats start and how long conversations are handled.",
+    summary: "Defaults for new chats.",
     fields: [
-      { key: "defaultModel", kind: "model", label: "Default model", description: "Preselected for new top-level chat nodes. Replies and branches keep their parent's model. A board whose runtime has no match keeps its own default." },
-      { key: "defaultPermissionMode", kind: "permissionMode", label: "Default permission mode", description: "Preselected for new top-level chat nodes in runtimes that have permission modes (Claude). Runtime default is Accept edits: file edits in the project folder run without asking. Manual asks before every tool call; Auto and Don't ask run tools with little or no confirmation. Replies and branches keep their parent's mode." },
-      { kind: "boardShare", label: "Summarise long context", description: "When the context that has to be re-sent passes this share of the model window, the biggest finished stretch of the conversation is summarised first. Applies to the open board. 0 turns it off." },
-      { kind: "boardToggle", label: "Tell agents about charts and tables", description: "Adds a short system note (about 350 tokens) to every run so agents know how to write chart, table and file-link blocks. Applies to the open board." },
+      { kind: "custom", label: "Default model", description: "Model preselected for new chats. Replies and branches use their parent's model.", control: <ModelControl label="Default model" /> },
+      { kind: "custom", label: "Default permission mode", description: "Permission mode preselected for new chats. Replies and branches use their parent's mode.", control: <PermissionModeControl label="Default permission mode" /> },
     ],
   },
   {
+    id: "boards",
+    label: "Boards",
+    icon: "dashboard",
+    summary: "Settings of the open board.",
+    fields: [
+      { kind: "custom", label: "Summarise long context", description: "Summarise earlier turns before a run when the re-sent context exceeds this share of the model window. 0 turns it off.", control: <BoardShareControl label="Summarise long context" /> },
+      { kind: "custom", label: "Environment variables", description: "One NAME=value per line, passed to OpenCode shell commands.", control: <BoardEnvironmentControl label="Environment variables" /> },
+      { kind: "custom", label: "Tell agents about charts and tables", description: "Add a system note of about 350 tokens to every run that explains chart, table and file-link blocks.", control: <BoardToggleControl label="Tell agents about charts and tables" /> },
+    ],
+    Editor: RuntimePanelsEditor,
+  },
+  {
     id: "keys",
-    label: "API keys",
+    label: "Models",
     icon: "key",
-    summary: "Keys for the Anthropic and OpenAI-compatible API runtimes. A saved key is stored on this computer. Replace or remove it to change it.",
-    fields: [],
+    summary: "Claude cost display, API keys and the OpenCode server.",
+    fields: [
+      { key: "showClaudeCost", kind: "toggle", label: "Show Claude CLI cost", description: "Show the cost tag on Claude CLI nodes. The cost is an estimate at API prices." },
+    ],
     Editor: KeysEditor,
   },
   {
     id: "nodes",
     label: "Nodes",
     icon: "tune",
-    summary: "How nodes are created and how they behave while working.",
+    summary: "Node creation, layout and behaviour.",
     fields: [
       {
         key: "flowDirection",
         kind: "choice",
-        label: "Preferred flow direction",
-        description: "Which sides of a node show connection points. Nodes can be connected on every side; the other two sides only show a point while a wire uses them.",
+        label: "Flow direction",
+        description: "Sides of a node that show connection points.",
         options: [
           { value: "horizontal", label: "Horizontal" },
           { value: "vertical", label: "Vertical" },
@@ -279,19 +370,19 @@ const ALL_SECTIONS: SettingsSection[] = [
         key: "keyboardPan",
         kind: "choice",
         label: "Move the board with the keyboard",
-        description: "Hold the keys to pan the board while no text box is focused. A key bound to an action in Shortcuts keeps that action.",
+        description: "Pan the board with held keys while no text box is focused.",
         options: [
           { value: "none", label: "Off" },
           { value: "wasd", label: "W A S D" },
           { value: "arrows", label: "Arrow keys" },
         ],
       },
-      { key: "keyboardPanSpeed", kind: "slider", label: "Keyboard movement speed", description: "How fast the board moves while a movement key is held. 100% is about 900 pixels per second; up to 500%.", min: KEYBOARD_PAN_SPEED_MIN, max: KEYBOARD_PAN_SPEED_MAX, step: 5, unit: "%" },
+      { key: "keyboardPanSpeed", kind: "slider", label: "Keyboard movement speed", description: "100% is about 900 pixels per second.", min: KEYBOARD_PAN_SPEED_MIN, max: KEYBOARD_PAN_SPEED_MAX, step: 5, unit: "%" },
       {
         key: "boardNavigation",
         kind: "choice",
         label: "Switching boards",
-        description: "Use the list of projects and boards on the left, tabs in the top bar, or both.",
+        description: "Where to switch between boards.",
         options: [
           { value: "sidebar", label: "Left bar" },
           { value: "tabs", label: "Tabs" },
@@ -302,26 +393,26 @@ const ALL_SECTIONS: SettingsSection[] = [
         key: "subagentDisplay",
         kind: "choice",
         label: "Subagents",
-        description: "Show each subagent a turn starts as its own node beside the turn, or inline inside the turn's card.",
+        description: "Show each subagent as its own node or inside the turn's card.",
         options: [
           { value: "node", label: "Own node" },
           { value: "inline", label: "Inline" },
         ],
       },
-      { key: "defaultNodeWidth", kind: "number", label: "Default width", description: "For new top-level nodes. Nodes made from another node match that node.", min: NODE_MIN_WIDTH, max: NODE_MAX_WIDTH, unit: "px" },
-      { key: "defaultNodeHeight", kind: "number", label: "Default height", description: "For new top-level nodes. Nodes made from another node match that node.", min: NODE_MIN_HEIGHT, max: NODE_MAX_HEIGHT, unit: "px" },
-      { key: "altClickZoom", kind: "slider", label: `${displayModifier("Alt")}-click zoom`, description: `How much of the screen a node fills after ${displayModifier("Alt")}-clicking it. 100% fits the whole node edge to edge; lower leaves space around it.`, min: ALT_CLICK_ZOOM_MIN, max: ALT_CLICK_ZOOM_MAX, step: 5, unit: "%" },
-      { key: "snapNextPrompt", kind: "toggle", label: "Snap on Next Prompt", description: "A node made with “Next prompt…” is placed directly below its parent. If that spot is taken, it goes further below, past the nodes already there." },
-      { key: "followScroll", kind: "toggle", label: "Follow streaming answers", description: "Keep a streaming answer scrolled to the bottom. Scrolling up yourself pauses it until the next run." },
-      { key: "groupToolCalls", kind: "toggle", label: "Group tool calls", description: "Fold each run of consecutive tool calls into one line such as “Read 3 files, ran a command”. Click it to see the individual calls." },
-      { key: "blinkForAttention", kind: "toggle", label: "Blink nodes that need an answer", description: "On the minimap and when zoomed out, a node waiting for a question or permission blinks." },
+      { key: "defaultNodeWidth", kind: "number", label: "Default width", description: "Width of new top-level nodes.", min: NODE_MIN_WIDTH, max: NODE_MAX_WIDTH, unit: "px" },
+      { key: "defaultNodeHeight", kind: "number", label: "Default height", description: "Height of new top-level nodes.", min: NODE_MIN_HEIGHT, max: NODE_MAX_HEIGHT, unit: "px" },
+      { key: "altClickZoom", kind: "slider", label: `${displayModifier("Alt")}-click zoom`, description: `Share of the screen a node fills after ${displayModifier("Alt")}-click.`, min: ALT_CLICK_ZOOM_MIN, max: ALT_CLICK_ZOOM_MAX, step: 5, unit: "%" },
+      { key: "snapNextPrompt", kind: "toggle", label: "Snap on Next Prompt", description: "Place “Next prompt…” nodes directly below their parent." },
+      { key: "followScroll", kind: "toggle", label: "Follow streaming answers", description: "Keep streaming answers scrolled to the bottom." },
+      { key: "groupToolCalls", kind: "toggle", label: "Group tool calls", description: "Fold all tool calls between two text outputs into one line, for example “Read 3 files, ran a command”." },
+      { key: "blinkForAttention", kind: "toggle", label: "Blink nodes that need an answer", description: "Blink nodes that wait for a question or permission on the minimap and when zoomed out." },
     ],
   },
   {
     id: "shortcuts",
     label: "Shortcuts",
     icon: "keyboard",
-    summary: "Each action can have several shortcuts. A shortcut that another action also uses is highlighted.",
+    summary: "Each action accepts several shortcuts. Shared shortcuts are highlighted.",
     fields: [],
     Editor: ShortcutsEditor,
   },
@@ -329,23 +420,23 @@ const ALL_SECTIONS: SettingsSection[] = [
     id: "topbar",
     label: "Top bar",
     icon: "health",
-    summary: "What the bar above the board shows.",
+    summary: "Contents of the top bar.",
     fields: [
-      { key: "showTopbarMeters", kind: "toggle", label: "Show limits and cost", description: "The usage limit meters (Claude) or the cost of the last hour (OpenCode) next to the save status." },
-      { key: "activeJobsShown", kind: "number", label: "Active jobs shown", description: "How many runs the jobs list in the board's top right corner shows at once; scroll for the rest. 0 hides the list completely.", min: 0, max: ACTIVE_JOBS_SHOWN_MAX, unit: "jobs" },
+      { key: "showTopbarMeters", kind: "toggle", label: "Show limits and cost", description: "Show usage limits (Claude) or the cost of the last hour (OpenCode) next to the save status." },
+      { key: "activeJobsShown", kind: "number", label: "Active jobs shown", description: "Runs listed at once in the active jobs list. 0 hides the list.", min: 0, max: ACTIVE_JOBS_SHOWN_MAX, unit: "jobs" },
     ],
   },
   {
     id: "appearance",
     label: "Appearance",
     icon: "palette",
-    summary: "Colours and typefaces.",
+    summary: "Colours, typefaces and node tags.",
     fields: [
       {
         key: "theme",
         kind: "choice",
         label: "Theme",
-        description: "Follow the system, or always use light or dark colours.",
+        description: "Colour scheme.",
         options: [
           { value: "system", label: "System" },
           { value: "light", label: "Light" },
@@ -356,193 +447,49 @@ const ALL_SECTIONS: SettingsSection[] = [
         key: "answerFont",
         kind: "choice",
         label: "Answer font",
-        description: "The typeface of answers inside nodes. Code always uses JetBrains Mono.",
+        description: "Typeface of answers.",
         options: [
           { value: "sans", label: "Sans" },
           { value: "serif", label: "Serif" },
         ],
       },
+      { key: "shownTags", kind: "checklist", label: "Node tags", description: "Tags shown in the header of a node.", options: NODE_TAGS.map((tag) => ({ value: tag.id, label: tag.label })) },
     ],
   },
   {
     id: "updates",
     label: "Version and updates",
     icon: "update",
-    summary: "Which version is running, whether a newer one exists and how to install it.",
+    summary: "Installed version and updates.",
     fields: [],
     Editor: UpdatesEditor,
     isPinnedToBottom: true,
   },
 ];
 
-const SECTIONS = ALL_SECTIONS.filter((section) => API_RUNTIMES_ARE_SHOWN || section.id !== "keys");
-
-const SettingRow = ({ label, description, children }: { label: string; description: string; children?: ReactNode }) => (
-  <div className="setting-row">
-    <div className="setting-text">
-      <div className="setting-label">{label}</div>
-      <div className="setting-description">{description}</div>
-    </div>
-    {children && <div className="setting-control">{children}</div>}
-  </div>
-);
-
-const ToggleSwitch = ({ checked, label, disabled, onChange }: { checked: boolean; label: string; disabled?: boolean; onChange: (checked: boolean) => void }) => (
-  <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} className={`switch ${checked ? "on" : ""}`} onClick={() => onChange(!checked)}>
-    <span className="switch-thumb" />
-  </button>
-);
-
-const ToggleControl = ({ field }: { field: ToggleField }) => {
-  const value = useSettings((state) => state.settings[field.key]);
-  const update = useSettings((state) => state.update);
-  return <ToggleSwitch checked={Boolean(value)} label={field.label} onChange={(checked) => update(field.key, checked)} />;
-};
-
-const NumberInput = ({ value, min, max, unit, disabled, onCommit }: { value: number; min: number; max: number; unit: string; disabled?: boolean; onCommit: (draft: string) => void }) => {
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => setDraft(String(value)), [value]);
-  const commit = () => onCommit(draft);
-  return (
-    <span className="number-control">
-      <input type="number" min={min} max={max} value={draft} disabled={disabled} onChange={(event) => setDraft(event.target.value)} onBlur={commit} onKeyDown={(event) => event.key === "Enter" && commit()} />
-      <span className="muted">{unit}</span>
-    </span>
-  );
-};
-
-const NumberControl = ({ field }: { field: NumberField }) => {
-  const value = useSettings((state) => state.settings[field.key]);
-  const update = useSettings((state) => state.update);
-  return <NumberInput value={Number(value)} min={field.min} max={field.max} unit={field.unit} onCommit={(draft) => update(field.key, draft)} />;
-};
-
-const SliderControl = ({ field }: { field: SliderField }) => {
-  const value = Number(useSettings((state) => state.settings[field.key]));
-  const update = useSettings((state) => state.update);
-  return (
-    <span className="slider-control">
-      <input type="range" min={field.min} max={field.max} step={field.step} value={value} aria-label={field.label} onChange={(event) => update(field.key, event.target.value)} />
-      <span className="muted">{value}{field.unit}</span>
-    </span>
-  );
-};
-
-const ChoiceControl =({ field }: { field: ChoiceField }) => {
-  const value = useSettings((state) => state.settings[field.key]);
-  const update = useSettings((state) => state.update);
-  return (
-    <div className="segmented" role="radiogroup" aria-label={field.label}>
-      {field.options.map((option) => (
-        <button key={option.value} type="button" role="radio" aria-checked={option.value === value} className={option.value === value ? "active" : ""} onClick={() => update(field.key, option.value)}>{option.label}</button>
-      ))}
-    </div>
-  );
-};
-
-const ModelControl = ({ field }: { field: ModelField }) => {
-  const value = String(useSettings((state) => state.settings[field.key]));
-  const update = useSettings((state) => state.update);
-  const models = useBoard((state) => state.catalog?.models) ?? [];
-  const options = models.some((model) => model.id === value) ? models : [{ id: value, name: value }, ...models];
-  return <ChipSelect icon="model" title={field.label} value={value} options={options.map((model) => ({ value: model.id, label: model.name }))} onChange={(next) => update(field.key, next)} />;
-};
-
-const PermissionModeControl = ({ field }: { field: PermissionModeField }) => {
-  const value = String(useSettings((state) => state.settings[field.key]));
-  const update = useSettings((state) => state.update);
-  const catalog = useBoard((state) => state.catalog);
-  const defaultMode = catalog?.permissionModes?.find((mode) => mode.id === catalog.defaultPermissionMode);
-  const runtimeDefault = { value: RUNTIME_DEFAULT_PERMISSION_MODE, label: defaultMode ? `Runtime default (${defaultMode.name})` : "Runtime default" };
-  const options = [runtimeDefault, ...(catalog?.permissionModes ?? []).map((mode) => ({ value: mode.id, label: mode.name }))];
-  const shown = options.some((option) => option.value === value) ? value : RUNTIME_DEFAULT_PERMISSION_MODE;
-  return <ChipSelect icon="permission" title={field.label} value={shown} options={options} onChange={(next) => update(field.key, next)} />;
-};
-
-const BoardToggleControl = ({ field }: { field: BoardToggleField }) => {
-  const board = useBoard((state) => state.board);
-  return <ToggleSwitch checked={board?.answerFormatsGuide !== false} label={field.label} disabled={!board} onChange={(checked) => void sendBoardCommand({ type: "updateBoard", answerFormatsGuide: checked })} />;
-};
-
-const BoardShareControl = () => {
-  const board = useBoard((state) => state.board);
-  const percent = Math.round((board?.summaryShare ?? DEFAULT_SHARE_PERCENT / 100) * 100);
-  const commit = (draft: string) => void sendBoardCommand({ type: "updateBoard", summaryShare: Math.min(100, Math.max(0, Number(draft) || 0)) / 100 });
-  return <NumberInput value={percent} min={0} max={100} unit="% of window" disabled={!board} onCommit={commit} />;
-};
-
-const CONTROLS: { [K in SettingField["kind"]]: (props: { field: Extract<SettingField, { kind: K }> }) => ReactElement } = {
-  toggle: ToggleControl,
-  number: NumberControl,
-  slider: SliderControl,
-  choice: ChoiceControl,
-  model: ModelControl,
-  permissionMode: PermissionModeControl,
-  boardToggle: BoardToggleControl,
-  boardShare: BoardShareControl,
-};
-
-const FieldRow = ({ field }: { field: SettingField }) => {
-  const Control = CONTROLS[field.kind] as (props: { field: SettingField }) => ReactElement;
-  return (
-    <SettingRow label={field.label} description={field.description}>
-      <Control field={field} />
-    </SettingRow>
-  );
-};
-
-const RESET_CONFIRMATION = "Restore every setting, including your shortcuts, to its default? This cannot be undone.";
-
-const SectionButton = ({ section, isActive, onSelect }: { section: SettingsSection; isActive: boolean; onSelect: () => void }) => (
-  <button className={isActive ? "active" : ""} aria-current={isActive} onClick={onSelect}>
-    <Icon name={section.icon} />
-    {section.label}
-  </button>
-);
-
-const VersionLink = ({ section, isActive, onSelect }: { section: SettingsSection; isActive: boolean; onSelect: () => void }) => {
-  const version = useAbout((state) => state.about?.version);
-  return (
-    <button className={`settings-version${isActive ? " active" : ""}`} aria-current={isActive} onClick={onSelect} title={section.label}>
-      {version ? `Version ${version}` : section.label}
-    </button>
-  );
+const RESET = {
+  label: "Reset to defaults",
+  title: "Restore every setting to its default",
+  confirmation: "Restore every setting, including shortcuts, to its default?",
 };
 
 export const SettingsDialog = ({ onClose }: { onClose: () => void }) => {
-  const [sectionId, setSectionId] = useState(useBoard.getState().settingsSectionId ?? SECTIONS[0].id);
+  const settings = useSettings((state) => state.settings);
+  const update = useSettings((state) => state.update);
   const reset = useSettings((state) => state.reset);
-  const section = SECTIONS.find((candidate) => candidate.id === sectionId) ?? SECTIONS[0];
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [onClose]);
+  const version = useAbout((state) => state.about?.version);
+  const sections = SECTIONS.map((section) => (section.isPinnedToBottom && version ? { ...section, navText: `Version ${version}` } : section));
   return (
-    <div className="dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="dialog settings-dialog" role="dialog" aria-label="Settings">
-        <nav className="settings-nav">
-          <h3>Settings</h3>
-          {SECTIONS.filter((candidate) => !candidate.isPinnedToBottom).map((candidate) => <SectionButton key={candidate.id} section={candidate} isActive={candidate.id === section.id} onSelect={() => setSectionId(candidate.id)} />)}
-          <span className="spacer" />
-          {SECTIONS.filter((candidate) => candidate.isPinnedToBottom).map((candidate) => <VersionLink key={candidate.id} section={candidate} isActive={candidate.id === section.id} onSelect={() => setSectionId(candidate.id)} />)}
-          <button className="settings-reset" onClick={() => confirm(RESET_CONFIRMATION) && reset()} title="Restore every setting to its default">Reset to defaults</button>
-        </nav>
-        <div className="settings-content">
-          <header className="settings-header">
-            <div>
-              <h4>{section.label}</h4>
-              <div className="settings-summary">{section.summary}</div>
-            </div>
-            <button className="icon-button" onClick={onClose} title="Close (Esc)" aria-label="Close"><Icon name="close" /></button>
-          </header>
-          <div className="settings-fields">
-            <div className="settings-group">
-              {section.Editor ? <section.Editor /> : section.fields.map((field) => <FieldRow key={field.label} field={field} />)}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <KitSettingsDialog title="Settings" closeLabel="Close" sections={sections} initialSectionId={useBoard.getState().settingsSectionId ?? SECTIONS[0].id} reset={{ ...RESET, onReset: reset }} onClose={onClose}>
+      {(section) => {
+        const { fields, Editor } = SECTIONS.find((candidate) => candidate.id === section.id) ?? SECTIONS[0];
+        return (
+          <>
+            <SettingFields fields={fields} values={settings} onChange={(key, value) => update(key as keyof typeof settings, value)} />
+            {Editor && <Editor />}
+          </>
+        );
+      }}
+    </KitSettingsDialog>
   );
 };

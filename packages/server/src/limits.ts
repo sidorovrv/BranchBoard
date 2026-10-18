@@ -13,6 +13,13 @@ export interface LimitsStore {
   current(): RateLimits | undefined;
 }
 
+export interface LimitsBook {
+  of(runtime: string): LimitsStore;
+  current(runtime: string): RateLimits | undefined;
+}
+
+const LEGACY_RUNTIME = "claude";
+
 const isRecord = (value: unknown): value is Record<string, any> => typeof value === "object" && value !== null;
 
 const windowsOf = (info: Record<string, any>): LimitWindow[] =>
@@ -23,42 +30,45 @@ const windowsOf = (info: Record<string, any>): LimitWindow[] =>
 const isSavedLimits = (value: unknown): value is RateLimits =>
   isRecord(value) && typeof value.status === "string" && typeof value.updatedAt === "number" && Array.isArray(value.windows);
 
-const loadSaved = (filePath: string): RateLimits | undefined => {
+const loadSaved = (filePath: string): Map<string, RateLimits> => {
   try {
     const saved: unknown = JSON.parse(readFileSync(filePath, "utf8"));
-    return isSavedLimits(saved) ? saved : undefined;
+    if (isSavedLimits(saved)) return new Map([[LEGACY_RUNTIME, saved]]);
+    return new Map(Object.entries(isRecord(saved) ? saved : {}).filter((entry): entry is [string, RateLimits] => isSavedLimits(entry[1])));
   } catch {
-    return undefined;
+    return new Map();
   }
 };
 
-const save = (filePath: string, limits: RateLimits) => {
+const save = (filePath: string, latest: Map<string, RateLimits>) => {
   try {
     mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, JSON.stringify(limits));
+    writeFileSync(filePath, JSON.stringify(Object.fromEntries(latest)));
   } catch (error) {
     log.warn("limits", "Could not save the usage limits", error);
   }
 };
 
-const appendHistory = (historyPath: string, limits: RateLimits, source?: LimitsSource) => {
+const appendHistory = (historyPath: string, runtime: string, limits: RateLimits, source?: LimitsSource) => {
   try {
     mkdirSync(dirname(historyPath), { recursive: true });
-    appendFileSync(historyPath, `${JSON.stringify({ at: new Date(limits.updatedAt).toISOString(), ...source, status: limits.status, windows: limits.windows })}\n`);
+    appendFileSync(historyPath, `${JSON.stringify({ at: new Date(limits.updatedAt).toISOString(), runtime, ...source, status: limits.status, windows: limits.windows })}\n`);
   } catch (error) {
     log.warn("limits", "Could not write the usage limits history", error);
   }
 };
 
-export const createLimitsStore = (filePath?: string, historyPath?: string): LimitsStore => {
-  let latest: RateLimits | undefined = filePath ? loadSaved(filePath) : undefined;
-  return {
+export const createLimitsStore = (filePath?: string, historyPath?: string): LimitsBook => {
+  const latest = filePath ? loadSaved(filePath) : new Map<string, RateLimits>();
+  const of = (runtime: string): LimitsStore => ({
     record: (info, source) => {
       if (!isRecord(info)) return;
-      latest = { status: typeof info.status === "string" ? info.status : "unknown", windows: windowsOf(info), updatedAt: now() };
+      const limits: RateLimits = { status: typeof info.status === "string" ? info.status : "unknown", windows: windowsOf(info), updatedAt: now() };
+      latest.set(runtime, limits);
       if (filePath) save(filePath, latest);
-      if (historyPath) appendHistory(historyPath, latest, source);
+      if (historyPath) appendHistory(historyPath, runtime, limits, source);
     },
-    current: () => latest,
-  };
+    current: () => latest.get(runtime),
+  });
+  return { of, current: (runtime) => latest.get(runtime) };
 };

@@ -6,11 +6,11 @@ import { activeRollOf, ANSWER_FORMATS_GUIDE, answerText, encodeAnswers, REJECTED
 import { createApp } from "../packages/server/src/app";
 import { createLimitsStore } from "../packages/server/src/limits";
 import { createChannel } from "../packages/server/src/run/channel";
-import { createLimiter } from "../packages/server/src/run/limiter";
+import { createLimiter, withSlot } from "../packages/server/src/run/limiter";
 import { createClaudeRuntime, TOOL_TIMEOUT_MS } from "../packages/server/src/runtimes/claude";
 import { createApprovalBroker, type ApprovalHandler } from "../packages/server/src/runtimes/claudeApprovals";
 import { locateClaude } from "../packages/server/src/runtimes/claudeLocator";
-import { attachmentDirectories, buildClaudeArguments, buildUserMessage, createStreamState, supportsSubagentText, translateClaudeMessage } from "../packages/server/src/runtimes/claudeStream";
+import { attachmentDirectories, backgroundGraceOf, buildClaudeArguments, buildUserMessage, createStreamState, finalEvents, FOLLOW_UP_GRACE_MS, linesUntilFollowUpEnds, QUEUED_TURN_GRACE_MS, supportsSubagentText, translateClaudeMessage } from "../packages/server/src/runtimes/claudeStream";
 import { BUNDLED_COMMANDS, listWorkspaceCommands, withBundledCommands } from "../packages/server/src/runtimes/claudeCommands";
 import { fakeRuntime } from "../packages/server/src/runtimes/fake";
 import { opencodeRuntime } from "../packages/server/src/runtimes/opencodeAuto";
@@ -182,6 +182,66 @@ describe("stream translation", () => {
     expect(natives).toEqual([{ type: "text", partId: "m9:0", delta: "whole answer" }]);
   });
 
+  describe("background subagents", () => {
+    const launch = [initMessage("s1"), toolUse("m1", "agent1", "Agent", { description: "Compute", prompt: "2+2" }), { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "a" }] }, { type: "system", subtype: "task_started", tool_use_id: "agent1", is_backgrounded: true }, toolResult("agent1", "Async agent launched")];
+    const result = (turns: number) => ({ ...successResult("x"), num_turns: turns });
+
+    it("keeps the satellite open after the launch result and closes it on its notification", () => {
+      const { natives } = translate([...launch, { type: "system", subtype: "task_notification", tool_use_id: "agent1", status: "completed" }]);
+      expect(natives.filter((native) => native.type === "subagent-done")).toEqual([{ type: "subagent-done", key: "agent1" }]);
+      expect(natives.findIndex((native) => native.type === "tool-done")).toBeLessThan(natives.findIndex((native) => native.type === "subagent-done"));
+    });
+
+    it("holds every result once a task ran and waits between turns only after the tasks end", () => {
+      const state = createStreamState();
+      const feed = (message: unknown) => translateClaudeMessage(message, state);
+      launch.forEach(feed);
+      expect(feed(result(3))).toEqual([]);
+      expect(backgroundGraceOf(state)).toBeUndefined();
+      feed({ type: "system", subtype: "task_notification", tool_use_id: "agent1", status: "completed" });
+      feed({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+      expect(backgroundGraceOf(state)).toBe(FOLLOW_UP_GRACE_MS);
+      feed(initMessage("s1"));
+      expect(backgroundGraceOf(state)).toBeUndefined();
+      expect(feed(result(0))).toEqual([]);
+      expect(backgroundGraceOf(state)).toBe(QUEUED_TURN_GRACE_MS);
+      feed(initMessage("s1"));
+      expect(feed(result(1))).toEqual([]);
+      feed(initMessage("s1"));
+      expect(feed(result(1))).toEqual([]);
+      expect(backgroundGraceOf(state)).toBe(QUEUED_TURN_GRACE_MS);
+      const final = finalEvents(state);
+      expect(final.map((native) => native.type)).toEqual(["usage", "done"]);
+      expect(final[0]).toMatchObject({ outputTokens: 21 });
+    });
+
+    it("keeps reading queued turns that start soon after a result and ends when none follows", async () => {
+      const state = createStreamState();
+      const feed = (message: unknown) => translateClaudeMessage(message, state);
+      launch.forEach(feed);
+      feed({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+      async function* source() {
+        yield "first";
+        feed(result(1));
+        yield "after result";
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        feed(initMessage("s1"));
+        yield "queued turn";
+        feed(result(1));
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        yield "never read";
+      }
+      const read: string[] = [];
+      for await (const line of linesUntilFollowUpEnds(source(), state, (current) => (backgroundGraceOf(current) === undefined ? undefined : 100))) read.push(line);
+      expect(read).toEqual(["first", "after result", "queued turn"]);
+    });
+
+    it("finishes at the first result when nothing ran in the background", () => {
+      const { natives } = translate([initMessage("s1"), result(1)]);
+      expect(natives.map((native) => native.type)).toEqual(["session", "usage", "done"]);
+    });
+  });
+
   it("starts each tool once and finishes it from the tool result", () => {
     const call = toolUse("m2", "t1", "Bash", { command: "ls", description: "Lists files" });
     const { natives } = translate([call, call, toolResult("t1", [{ type: "text", text: "a.txt" }]), toolResult("t2", "boom", true)]);
@@ -232,6 +292,11 @@ describe("stream translation", () => {
     expect(natives.find((native) => native.type === "usage")).toMatchObject({ contextTokens: 30710, contextWindow: 200000 });
   });
 
+  it("reports the cost the CLI puts on the result", () => {
+    const { natives } = translate([{ ...successResult("ok"), total_cost_usd: 0.0123 }]);
+    expect(natives.find((native) => native.type === "usage")).toMatchObject({ costUsd: 0.0123 });
+  });
+
   it("splits cache reads and writes, and keeps the first call's split", () => {
     const { natives } = translate([
       { type: "assistant", message: { id: "m1", content: [], usage: { input_tokens: 2, cache_creation_input_tokens: 1500, cache_read_input_tokens: 180000, output_tokens: 4 } } },
@@ -266,7 +331,7 @@ describe("limits store", () => {
   };
 
   it("starts empty and keeps the latest windows with a timestamp", () => {
-    const store = createLimitsStore();
+    const store = createLimitsStore().of("claude");
     expect(store.current()).toBeUndefined();
     store.record(sample);
     expect(store.current()).toMatchObject({ status: "allowed", windows: [{ id: "five_hour", utilization: 0.44, resetsAt: 1791054000 }, { id: "seven_day", utilization: 0.15, resetsAt: 1791540000 }] });
@@ -274,23 +339,38 @@ describe("limits store", () => {
   });
 
   it("ignores info that is not an object", () => {
-    const store = createLimitsStore();
+    const store = createLimitsStore().of("claude");
     store.record(undefined);
     store.record("nope");
     expect(store.current()).toBeUndefined();
   });
 
-  it("appends every reading with its board and node to the history file", () => {
+  it("appends every reading with its runtime, board and node to the history file", () => {
     const directory = mkdtempSync(join(tmpdir(), "branchboard-limits-"));
     const historyPath = join(directory, "limits-history.jsonl");
-    const store = createLimitsStore(join(directory, "limits.json"), historyPath);
+    const store = createLimitsStore(join(directory, "limits.json"), historyPath).of("claude");
     store.record(sample, { boardId: "board-1", nodeId: "node-1" });
     store.record({ ...sample, unifiedWindows: { five_hour: { utilization: 0.5, resetsAt: 1791054000 } } });
     const records = readFileSync(historyPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expect(records).toHaveLength(2);
-    expect(records[0]).toMatchObject({ boardId: "board-1", nodeId: "node-1", status: "allowed", windows: [{ id: "five_hour", utilization: 0.44 }, { id: "seven_day", utilization: 0.15 }] });
+    expect(records[0]).toMatchObject({ runtime: "claude", boardId: "board-1", nodeId: "node-1", status: "allowed", windows: [{ id: "five_hour", utilization: 0.44 }, { id: "seven_day", utilization: 0.15 }] });
     expect(records[1]).toMatchObject({ windows: [{ id: "five_hour", utilization: 0.5 }] });
     expect(records[1].boardId).toBeUndefined();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("keeps one entry per runtime and reads a single saved entry as claude's", () => {
+    const directory = mkdtempSync(join(tmpdir(), "branchboard-limits-"));
+    const filePath = join(directory, "limits.json");
+    const single = { status: "allowed", windows: [{ id: "five_hour", utilization: 0.3, resetsAt: 1791054000 }], updatedAt: 1 };
+    writeFileSync(filePath, JSON.stringify(single));
+    const book = createLimitsStore(filePath);
+    expect(book.current("claude")).toEqual(single);
+    expect(book.current("codex")).toBeUndefined();
+    book.of("codex").record({ status: "ok", unifiedWindows: { five_hour: { utilization: 0.1, resetsAt: 1791054000 } } });
+    const reopened = createLimitsStore(filePath);
+    expect(reopened.current("claude")).toEqual(single);
+    expect(reopened.current("codex")).toMatchObject({ status: "ok", windows: [{ id: "five_hour", utilization: 0.1 }] });
     rmSync(directory, { recursive: true, force: true });
   });
 });
@@ -427,7 +507,7 @@ describe("title generation", () => {
       process.emitLine("Banana Facts");
       process.finish(0);
     });
-    expect(await runtime.generateTitle!("title this", scope, new AbortController().signal)).toBe("Banana Facts");
+    expect(await runtime.generateText!("title this", "title", scope, new AbortController().signal)).toBe("Banana Facts");
     const [{ args, cwd, process }] = launched;
     expect(args).toEqual(expect.arrayContaining(["-p", "--model", "haiku", "--no-session-persistence", "--max-turns", "1", "--safe-mode"]));
     expect(args[args.indexOf("--tools") + 1]).toBe("");
@@ -444,7 +524,7 @@ describe("title generation", () => {
       launch.process.emitLine("Fallback Name");
       launch.process.finish(0);
     });
-    expect(await runtime.generateTitle!("title this", scope, new AbortController().signal)).toBe("Fallback Name");
+    expect(await runtime.generateText!("title this", "title", scope, new AbortController().signal)).toBe("Fallback Name");
     expect(launched[1].args).toEqual(expect.arrayContaining(["--strict-mcp-config", "--disable-slash-commands"]));
     expect(launched[1].args).not.toContain("--safe-mode");
   });
@@ -452,7 +532,7 @@ describe("title generation", () => {
   it("reports a real failure instead of retrying it", async () => {
     launched.length = 0;
     const runtime = titleRuntime(({ process }) => process.finish(1, "Not logged in"));
-    await expect(runtime.generateTitle!("title this", scope, new AbortController().signal)).rejects.toThrow(/Not logged in/);
+    await expect(runtime.generateText!("title this", "title", scope, new AbortController().signal)).rejects.toThrow(/Not logged in/);
     expect(launched).toHaveLength(1);
   });
 });
@@ -487,7 +567,7 @@ describe("runtime availability", () => {
     try {
       expect(listWorkspaceCommands(root).sort((left, right) => left.name.localeCompare(right.name))).toEqual([
         { name: "plain", description: undefined, template: "Just do it." },
-        { name: "review", description: "Review the change", template: "Review $ARGUMENTS carefully." },
+        { name: "review", description: "Review the change", model: "haiku", template: "Review $ARGUMENTS carefully." },
       ]);
       expect(listWorkspaceCommands(join(root, "missing"))).toEqual([]);
       const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", listCommands: () => [{ name: "ship", template: "Ship it" }] });
@@ -508,7 +588,8 @@ describe("runtime availability", () => {
       limiter,
     });
     const diagnostics = await runtime.diagnostics!(workspace);
-    expect(diagnostics).toEqual({ executable: EXECUTABLE, processSlots: { active: 0, limit: 2, waiting: 0 }, supportsSubagentText: true, authMethod: "claude.ai", isSignedIn: true });
+    expect(diagnostics).toEqual({ executable: EXECUTABLE, supportsSubagentText: true, authMethod: "claude.ai", isSignedIn: true });
+    expect(runtime.slots).toBe(limiter);
     const broken = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "1.0.0", probeAuth: async () => "not json", limiter });
     expect(await broken.diagnostics!(workspace)).toMatchObject({ supportsSubagentText: false });
   });
@@ -521,8 +602,7 @@ describe("runtime availability", () => {
     const controller = new AbortController();
     const waitingStates: boolean[] = [];
     const scope = { boardId: "b", nodeId: "n", workspacePath: workspace, files: [], signal: controller.signal, setRuntimeRef: () => undefined, setWaitingForSlot: (isWaiting: boolean) => waitingStates.push(isWaiting), waitForAnswer: async () => "reject" };
-    const handle = await runtime.openSession({ missingTurns: [] }, scope);
-    const started = runtime.execute(handle, "hello", scope)[Symbol.asyncIterator]().next();
+    const started = withSlot(runtime.slots, controller.signal, scope.setWaitingForSlot, async () => "ran");
     await waitFor(() => limiter.waitingCount() === 1);
     expect(waitingStates).toEqual([true]);
     controller.abort();

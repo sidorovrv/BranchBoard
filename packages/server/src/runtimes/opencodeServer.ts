@@ -1,24 +1,62 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { log } from "../log";
+import { createLimiter } from "../run/limiter";
+import { RecoverableError } from "../run/types";
+import { failureOf, redactFailureText } from "./failures";
 import type { Location } from "./opencodeLocator";
 import { killTree, withoutCurrentDirectorySearch } from "./spawnProcess";
 
 export interface OpencodeServer {
   baseUrl: string;
   authorization: string;
+  startedAt: number;
+  pool: ServerPool;
   child?: ChildProcess;
 }
+
+export interface ServerLaunch {
+  path: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+export interface ServerAddress {
+  baseUrl: string;
+  password?: string;
+}
+
+let serverAddressProvider: () => ServerAddress | undefined = () => undefined;
+
+export const provideServerAddress = (provider: () => ServerAddress | undefined) => {
+  serverAddressProvider = provider;
+};
+
+export const configuredServerAddress = (): ServerAddress | undefined => serverAddressProvider();
 
 export interface ServerFlavor {
   logName: string;
   label: string;
   healthPath: string;
-  locate(): Location;
+  remote?(): ServerAddress | undefined;
+  locate?(): Location;
   missingMessage: string;
+  launch?(directory: string): ServerLaunch | Promise<ServerLaunch>;
+  isShared?: boolean;
+  onReady?(server: OpencodeServer, directory: string): Promise<void>;
+  secrets?(): string[];
 }
 
+export type ServerPool = ReturnType<typeof createServerPool>;
+
+export const MAX_CONCURRENT_OPENCODE_RUNS = 4;
+export const opencodeSlots = createLimiter(MAX_CONCURRENT_OPENCODE_RUNS);
+
+const SHARED_KEY = "shared";
+const ENGINE_MESSAGE_STATUSES = [400, 503];
+const HEADER_TIMEOUT_MS = 60000;
+const EVENT_STREAM_PATH = "/api/event";
 const STARTUP_TIMEOUT_MS = 20000;
 const HEALTH_REQUEST_TIMEOUT_MS = 2000;
 const OUTPUT_TAIL_CHARS = 2000;
@@ -60,16 +98,46 @@ export async function* serverSentEvents<Event>(response: Response, signal: Abort
 export const createServerPool = (flavor: ServerFlavor) => {
   const servers = new Map<string, Promise<OpencodeServer>>();
 
+  const secrets = () => flavor.secrets?.() ?? [];
+
+  const fetchWithHeaderTimeout = async (url: string, path: string, init: RequestInit): Promise<Response> => {
+    if (path.startsWith(EVENT_STREAM_PATH)) return fetch(url, init);
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), HEADER_TIMEOUT_MS);
+    try {
+      return await fetch(url, { ...init, signal: init.signal ? AbortSignal.any([init.signal, timeout.signal]) : timeout.signal });
+    } catch (error) {
+      if (init.signal?.aborted || !timeout.signal.aborted) throw error;
+      throw new Error(failureOf({ isTimeout: true }).message);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   const call = async (server: OpencodeServer, directory: string, path: string, init: RequestInit = {}) => {
     const separator = path.includes("?") ? "&" : "?";
-    const response = await fetch(`${server.baseUrl}${path}${separator}directory=${encodeURIComponent(directory)}`, {
+    const response = await fetchWithHeaderTimeout(`${server.baseUrl}${path}${separator}directory=${encodeURIComponent(directory)}`, path, {
       ...init,
       headers: { authorization: server.authorization, "content-type": "application/json", ...init.headers },
     });
     if (!response.ok) {
       const body = await response.text().catch(() => "");
-      log.error(flavor.logName, `${init.method ?? "GET"} ${path} failed with ${response.status}`, body);
-      throw new Error(`${flavor.label} ${path} failed with ${response.status}${body ? `: ${body.slice(0, 300)}` : ""}`);
+      const parsed = (() => {
+        try {
+          return JSON.parse(body);
+        } catch {
+          return undefined;
+        }
+      })();
+      const reportedByEngine = ENGINE_MESSAGE_STATUSES.includes(response.status) && typeof parsed?._tag === "string" && typeof parsed.message === "string";
+      const failure = failureOf(
+        reportedByEngine
+          ? { status: response.status, tag: parsed._tag, message: parsed.message }
+          : { status: response.status, type: parsed?.type ?? parsed?.error?.type, message: `${flavor.label} ${path} failed with ${response.status}`, body: body.slice(0, 300) },
+        secrets(),
+      );
+      log.error(flavor.logName, `${init.method ?? "GET"} ${path} failed with ${response.status}`, redactFailureText(body, secrets()));
+      throw failure.recovery ? new RecoverableError(failure.message, failure.recovery) : new Error(failure.message);
     }
     return response;
   };
@@ -125,19 +193,27 @@ export const createServerPool = (flavor: ServerFlavor) => {
     throw new Error(`${flavor.label} serve did not become healthy in time`);
   };
 
-  const startServer = async (directory: string): Promise<OpencodeServer> => {
-    const located = flavor.locate();
+  const launchFor = async (directory: string): Promise<ServerLaunch> => {
+    if (flavor.launch) return flavor.launch(directory);
+    const located = flavor.locate!();
     if (!located.path) {
       log.error(flavor.logName, `Could not find the ${flavor.label} executable`, located.searched.join("\n"));
-      throw new Error(flavor.missingMessage);
+      throw new RecoverableError(flavor.missingMessage, "setup");
     }
+    return { path: located.path, args: [], env: {} };
+  };
+
+  const keyOf = (directory: string) => (flavor.isShared ? SHARED_KEY : directory);
+
+  const startServer = async (directory: string): Promise<OpencodeServer> => {
+    const launch = await launchFor(directory);
     const password = randomBytes(16).toString("hex");
     const port = await freePort();
-    log.info(flavor.logName, `Spawning ${located.path} serve on port ${port} in ${directory}`);
+    log.info(flavor.logName, `Spawning ${launch.path} serve on port ${port} in ${directory}`);
     const isWindows = process.platform === "win32";
-    const child = spawn(isWindows ? `"${located.path}"` : located.path, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
+    const child = spawn(isWindows ? `"${launch.path}"` : launch.path, [...launch.args, "serve", "--hostname", "127.0.0.1", "--port", String(port)], {
       cwd: directory,
-      env: withoutCurrentDirectorySearch({ ...process.env, OPENCODE_SERVER_PASSWORD: password }),
+      env: withoutCurrentDirectorySearch({ ...process.env, ...launch.env, OPENCODE_SERVER_PASSWORD: password }),
       shell: isWindows,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -151,20 +227,21 @@ export const createServerPool = (flavor: ServerFlavor) => {
     child.stderr?.on("data", remember);
     const failure = new Promise<never>((_resolve, reject) => {
       child.on("error", (error) => {
-        log.error(flavor.logName, `Could not spawn ${located.path}`, error);
+        log.error(flavor.logName, `Could not spawn ${launch.path}`, error);
         reject(new Error(`Could not start ${flavor.label}: ${error.message}. Is it installed and on PATH?`));
       });
       child.on("exit", (code, signal) => {
         log.error(flavor.logName, `${flavor.label} serve (pid ${child.pid}) exited with code ${code} signal ${signal}`, output.trim() || undefined);
-        servers.delete(directory);
+        servers.delete(keyOf(directory));
         reject(new Error(`${flavor.label} serve exited with code ${code} in ${directory}. ${output.trim()}`));
       });
     });
     failure.catch(() => undefined);
-    const server: OpencodeServer = { baseUrl: `http://127.0.0.1:${port}`, authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`, child };
+    const server: OpencodeServer = { baseUrl: `http://127.0.0.1:${port}`, authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`, startedAt: Date.now(), pool, child };
     process.on("exit", () => killTree(child));
     try {
       await Promise.race([waitUntilHealthy(server), failure]);
+      await flavor.onReady?.(server, directory);
     } catch (error) {
       killTree(child);
       if (error instanceof Error && error.message.includes("did not become healthy")) throw new Error(`${error.message} ${output.trim()}`);
@@ -173,14 +250,40 @@ export const createServerPool = (flavor: ServerFlavor) => {
     return server;
   };
 
+  const connectRemote = async (address: ServerAddress): Promise<OpencodeServer> => {
+    const authorization = address.password ? `Basic ${Buffer.from(`opencode:${address.password}`).toString("base64")}` : "";
+    const server: OpencodeServer = { baseUrl: address.baseUrl, authorization, startedAt: 0, pool };
+    const response = await requestHealth(server).catch((error) => {
+      throw new RecoverableError(`${flavor.label} at ${address.baseUrl} did not answer (${error?.cause?.code ?? error?.message ?? error}).`, "setup");
+    });
+    if (response.status === 401) throw new RecoverableError(`${flavor.label} at ${address.baseUrl} refused the password.`, "setup");
+    if (!response.ok) throw new RecoverableError(`${flavor.label} at ${address.baseUrl} answered with status ${response.status}.`, "setup");
+    log.info(flavor.logName, `Connected to ${address.baseUrl}`);
+    return server;
+  };
+
+  const remoteKeyOf = (address: ServerAddress) => `remote:${address.baseUrl}:${createHash("sha256").update(address.password ?? "").digest("hex").slice(0, 8)}`;
+
   const serverFor = (directory: string): Promise<OpencodeServer> => {
-    const existing = servers.get(directory);
+    const address = flavor.remote?.();
+    const key = address ? remoteKeyOf(address) : keyOf(directory);
+    const existing = servers.get(key);
     if (existing) return existing;
-    const started = startServer(directory);
-    servers.set(directory, started);
-    started.catch(() => servers.delete(directory));
+    const started = address ? connectRemote(address) : startServer(directory);
+    servers.set(key, started);
+    started.catch(() => servers.delete(key));
     return started;
   };
 
-  return { servers, call, callJson, post, serverFor };
+  const stopAll = async () => {
+    const running = [...servers.values()];
+    servers.clear();
+    listeners.forEach((listener) => listener());
+    await Promise.all(running.map((started) => started.then((server) => server.child && killTree(server.child), () => undefined)));
+  };
+
+  const listeners = new Set<() => void>();
+
+  const pool = { servers, secrets, call, callJson, post, serverFor, stopAll, onStop: (listener: () => void) => void listeners.add(listener) };
+  return pool;
 };

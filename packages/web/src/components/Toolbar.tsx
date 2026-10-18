@@ -4,7 +4,7 @@ import { actionById, titleWithShortcut } from "../actions";
 import { useSearchHighlights } from "../searchHighlight";
 import { useSettings } from "../settings";
 import { useBoard } from "../store";
-import { IconRow } from "./Icons";
+import { IconRow } from "../kit/Icons";
 
 const MAX_RESULTS = 8;
 const HIGHLIGHT_REFRESH_MS = 700;

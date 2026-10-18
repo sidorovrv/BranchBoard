@@ -1,9 +1,9 @@
-import type { GraphNode, Part, RollSnapshot } from "./types";
+import type { GraphNode, Part, RollSnapshot, RuntimeRef } from "./types";
 
 const FIRST_ROLL = 1;
 const NO_ROLL = 0;
 
-const SNAPSHOT_FIELDS = ["status", "runtimeRef", "contextHash", "contextNodeIds", "contextMode", "usage", "stopped", "startedAt", "completedAt", "workspaceSnapshot", "fileHashes", "reverted"] as const;
+const SNAPSHOT_FIELDS = ["status", "runtimeRef", "compactedAt", "contextHash", "contextNodeIds", "contextMode", "usage", "stopped", "startedAt", "completedAt", "workspaceSnapshot", "fileHashes", "reverted"] as const;
 
 const hasLegacyRun = (node: GraphNode): boolean => node.runtimeRef !== undefined || node.completedAt !== undefined;
 
@@ -32,7 +32,7 @@ const rollsWithActive = (node: GraphNode): Record<number, RollSnapshot> => ({
 
 export const rollPatchForQueue = (node: GraphNode): Partial<GraphNode> => {
   const next = rollCountOf(node) + 1;
-  return { status: "queued", rolls: rollsWithActive(node), activeRoll: next, rollCount: next };
+  return { status: "queued", startedAt: undefined, completedAt: undefined, rolls: rollsWithActive(node), activeRoll: next, rollCount: next };
 };
 
 export const rollPatchForSelect = (node: GraphNode, roll: number): Partial<GraphNode> => {
@@ -45,5 +45,10 @@ export const rollPatchForSelect = (node: GraphNode, roll: number): Partial<Graph
 
 export const rollPatchForDiscard = (node: GraphNode): Partial<GraphNode> =>
   rollCountOf(node) === 0 ? {} : { rolls: {}, activeRoll: NO_ROLL, rollCount: rollCountOf(node), comments: [] };
+
+export const sessionReferencesOf = (nodes: GraphNode[]): RuntimeRef[] => {
+  const references = nodes.flatMap((node) => [node.runtimeRef, ...Object.values(node.rolls ?? {}).map((roll) => roll.runtimeRef)]);
+  return [...new Map(references.filter((reference): reference is RuntimeRef => reference !== undefined).map((reference) => [reference.sessionId, reference])).values()];
+};
 
 export const canSelectRoll = (node: GraphNode, roll: number): boolean => roll !== activeRollOf(node) && node.rolls?.[roll] !== undefined;

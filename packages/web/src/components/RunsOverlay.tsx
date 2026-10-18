@@ -3,6 +3,7 @@ import { buildNodeClipboard, formatDuration, type NodeClipboard, type RunInfo } 
 import { fetchBoardView } from "../api";
 import { isUnseenCompletion, useSeenResults } from "../seenResults";
 import { useSettings } from "../settings";
+import { cancelScheduledSend, formatRunCountdown, useScheduledSends, type ScheduledDetails } from "../scheduledSends";
 import { currentViewCentre, sendBoardCommand, useBoard } from "../store";
 import { useContextMenu, type MenuItem } from "./ContextMenu";
 import { ELAPSED_TICK_MS } from "./NodeShell";
@@ -101,7 +102,41 @@ const RunRow = ({ run, now, onHide }: { run: RunInfo; now: number; onHide: (run:
   );
 };
 
-const dayLabelOf = (completedAt: number): string => {
+interface ScheduledJob extends ScheduledDetails {
+  nodeId: string;
+  at: number;
+  where: string;
+}
+
+const goToScheduledJob = async (job: ScheduledJob) => {
+  const store = useBoard.getState();
+  if (store.board?.id !== job.boardId) await store.openBoard(job.boardId);
+  useBoard.getState().requestFocus(job.nodeId);
+};
+
+const ScheduledRow = ({ job, now }: { job: ScheduledJob; now: number }) => {
+  const { open, element } = useContextMenu();
+  const menu: MenuItem[] = [{ label: "Unschedule", isDanger: true, run: () => cancelScheduledSend(job.nodeId) }];
+  return (
+    <li className="run-row status-scheduled" onContextMenu={open(menu)}>
+      <button className="run-open" onClick={() => void goToScheduledJob(job)} title={`${job.where}\n${job.prompt}\n\nRuns at ${new Date(job.at).toLocaleString()}. Click to go to the node. Right-click for more.`}>
+        <span className="board-dot is-queued" aria-hidden="true" />
+        <span className="run-text">
+          <span className="run-title">{job.title}</span>
+          {job.where && <span className="run-where muted">{job.where}</span>}
+        </span>
+        <span className="run-state">
+          <span className="run-status status-scheduled">Scheduled</span>
+          <span className="muted">{formatRunCountdown(job.at - now)}</span>
+        </span>
+      </button>
+      <button className="run-stop" onClick={() => cancelScheduledSend(job.nodeId)} title="Unschedule this run" aria-label={`Unschedule ${job.title}`}>×</button>
+      {element}
+    </li>
+  );
+};
+
+const dayLabelOf =(completedAt: number): string => {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
   const today = start.getTime();
@@ -125,9 +160,10 @@ const runKeyOf = (run: RunInfo): string => `${run.boardId}/${run.nodeId}`;
 
 const hideKeyOf = (run: RunInfo): string => `${runKeyOf(run)}@${run.startedAt ?? 0}`;
 
-const RunList = ({ runs, finishedRuns, filter, visibleRows, now, onHide }: { runs: RunInfo[]; finishedRuns: RunInfo[]; filter: RunFilter; visibleRows: number; now: number; onHide: (run: RunInfo) => void }) => {
+const RunList = ({ runs, scheduled, finishedRuns, filter, visibleRows, now, onHide }: { runs: RunInfo[]; scheduled: ScheduledJob[]; finishedRuns: RunInfo[]; filter: RunFilter; visibleRows: number; now: number; onHide: (run: RunInfo) => void }) => {
   const shownActive = filter !== "completed" ? runs : [];
-  const shownFinished = filter !== "active" ? finishedRuns : [];
+  const shownScheduled = filter !== "completed" ? scheduled : [];
+  const shownFinished = filter !== "active" ? [...finishedRuns].sort((first, second) => (second.completedAt ?? 0) - (first.completedAt ?? 0)) : [];
   const list = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const element = list.current;
@@ -138,10 +174,15 @@ const RunList = ({ runs, finishedRuns, filter, visibleRows, now, onHide }: { run
     const neededHeight = lastVisible.getBoundingClientRect().bottom - element.getBoundingClientRect().top + element.scrollTop + LIST_BOTTOM_PADDING_PX;
     element.style.maxHeight = `${Math.ceil(neededHeight)}px`;
   });
-  if (shownActive.length === 0 && shownFinished.length === 0) return <div className="muted runs-empty">{filter === "completed" ? "Nothing has finished yet." : "Nothing is running or queued."}</div>;
+  if (shownActive.length === 0 && shownScheduled.length === 0 && shownFinished.length === 0) return <div className="muted runs-empty">{filter === "completed" ? "Nothing has finished yet." : "Nothing is running, queued or scheduled."}</div>;
   return (
     <div className="runs-list nowheel" ref={list}>
-      {shownActive.length > 0 && <ul>{shownActive.map((run) => <RunRow key={runKeyOf(run)} run={run} now={now} onHide={onHide} />)}</ul>}
+      {(shownActive.length > 0 || shownScheduled.length > 0) && (
+        <ul>
+          {shownActive.map((run) => <RunRow key={runKeyOf(run)} run={run} now={now} onHide={onHide} />)}
+          {shownScheduled.map((job) => <ScheduledRow key={`scheduled/${job.nodeId}`} job={job} now={now} />)}
+        </ul>
+      )}
       {groupedByDay(shownFinished).map((group) => (
         <section key={group.label}>
           <h5>{group.label}</h5>
@@ -157,16 +198,29 @@ export const RunsOverlay = () => {
   const finishedRuns = useBoard((state) => state.finishedRuns);
   const seen = useSeenResults((state) => state.seen);
   const limit = useSettings((state) => state.settings.activeJobsShown);
+  const scheduledAt = useScheduledSends((state) => state.runAt);
+  const scheduledDetails = useScheduledSends((state) => state.details);
+  const boards = useBoard((state) => state.boards);
+  const projects = useBoard((state) => state.projects);
   const [isOpen, setIsOpen] = useState(false);
   const [filter, setFilter] = useState<RunFilter>("all");
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set());
   const [now, setNow] = useState(Date.now());
   const { open, element } = useContextMenu();
+  const scheduledJobs: ScheduledJob[] = Object.entries(scheduledDetails)
+    .map(([nodeId, details]) => {
+      const board = boards.find((candidate) => candidate.id === details.boardId);
+      const projectName = projects.find((project) => project.id === board?.projectId)?.name;
+      return { ...details, nodeId, at: scheduledAt[nodeId], where: [projectName, board?.title].filter(Boolean).join(" / ") };
+    })
+    .filter((job) => job.at !== undefined)
+    .sort((first, second) => first.at - second.at);
+  const isTicking = runs.length > 0 || scheduledJobs.length > 0;
   useEffect(() => {
-    if (!isOpen && runs.length === 0) return;
+    if (!isOpen && !isTicking) return;
     const timer = setInterval(() => setNow(Date.now()), ELAPSED_TICK_MS);
     return () => clearInterval(timer);
-  }, [isOpen, runs.length]);
+  }, [isOpen, isTicking]);
   useEffect(() => {
     if (!isOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && setIsOpen(false);
@@ -203,7 +257,7 @@ export const RunsOverlay = () => {
       </div>
       {isOpen && (
         <>
-          <RunList runs={listedRuns} finishedRuns={listedFinished} filter={filter} visibleRows={limit} now={now} onHide={hide} />
+          <RunList runs={listedRuns} scheduled={scheduledJobs} finishedRuns={listedFinished} filter={filter} visibleRows={limit} now={now} onHide={hide} />
         </>
       )}
       {element}

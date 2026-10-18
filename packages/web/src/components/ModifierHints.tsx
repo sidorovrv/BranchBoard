@@ -18,7 +18,7 @@ const fixedHints = (group: GroupName): Hint[] => FIXED_SHORTCUTS.filter((row) =>
 const boundHints = (keybinds: Keybinds, group: GroupName, held: GroupName[]): Hint[] =>
   BINDABLE_ACTIONS.flatMap((action) =>
     (keybinds[action.id] ?? [])
-      .map((binding) => ({ modifiers: modifiersOfBinding(binding), keys: [...modifiersOfBinding(binding).slice(1), keyOfBinding(binding)].join("+"), text: action.label }))
+      .map((binding) => (action.kind === "hold" ? { modifiers: binding.split("+"), keys: [...binding.split("+").slice(1), "Drag"].join("+"), text: action.label } : { modifiers: modifiersOfBinding(binding), keys: [...modifiersOfBinding(binding).slice(1), keyOfBinding(binding)].join("+"), text: action.label }))
       .filter(({ modifiers }) => modifiers[0] === group && modifiers.every((modifier) => held.includes(modifier as GroupName)))
       .map(({ keys, text }) => ({ keys: keys.split("+").map(displayModifier).join("+"), text })),
   );

@@ -15,7 +15,7 @@ export const turnOf = (node: GraphNode, parts: PartsByNode): Turn => ({
   nodeId: node.id,
   kind: node.kind,
   title: node.title,
-  input: withQuote(node.prompt, node.quoteText),
+  input: renderRequest(node.prompt, node.quoteText),
   output: node.kind === "turn" ? answerText(parts[node.id], activeRollOf(node)) : "",
   attachments: node.attachments ?? [],
 });
@@ -86,13 +86,13 @@ export const planSession = (graph: BoardGraph, parts: PartsByNode, id: Id): Sess
   const covered = new Set<Id>(spineParent ? [spineParent.id, ...(spineParent.contextNodeIds ?? [])] : []);
   const missingIds = ancestors.filter((ancestorId) => !covered.has(ancestorId));
   return {
-    spine: spineParent ? { nodeId: spineParent.id, runtimeRef: spineParent.runtimeRef! } : undefined,
+    spine: spineParent ? { nodeId: spineParent.id, runtimeRef: spineParent.runtimeRef!, ...(spineParent.compactedAt ? { compactedAt: spineParent.compactedAt } : {}) } : undefined,
     missingTurns: turnsWithSummary(graph, parts, missingIds),
   };
 };
 
 export const fidelityOf = (plan: SessionPlan): ContextMode => {
-  if (plan.missingTurns.length === 0) return "exact";
+  if (plan.missingTurns.length === 0 && !plan.spine?.compactedAt) return "exact";
   return plan.spine ? "injected" : "assembled";
 };
 
@@ -114,12 +114,12 @@ export const attachmentsToSend = (plan: SessionPlan, node: GraphNode): Attachmen
 export const renderTurns = (turns: Turn[]): string =>
   turns.length === 0 ? "" : ["<branchboard_context>", ...turns.flatMap(renderTurnLines), "</branchboard_context>"].join("\n");
 
-const withQuote = (prompt: string, quoteText: string | undefined): string =>
+export const renderRequest = (prompt: string, quoteText: string | undefined): string =>
   quoteText ? `Regarding this passage from the previous answer:\n${quoteText.split("\n").map((line) => `> ${line}`).join("\n")}\n\n${prompt}` : prompt;
 
 export const renderInput = (plan: SessionPlan, prompt: string, quoteText?: string): string => {
   const contextBlock = renderTurns(plan.missingTurns);
-  const request = withQuote(prompt, quoteText);
+  const request = renderRequest(prompt, quoteText);
   return contextBlock ? `${contextBlock}\n\n${request}` : request;
 };
 

@@ -41,28 +41,12 @@ export const deriveTitle = (text: string, fallback: string): string => {
 
 const SECOND_MS = 1000;
 const MINUTE_MS = 60 * SECOND_MS;
-const HOUR_MS = 60 * MINUTE_MS;
-const DAY_MS = 24 * HOUR_MS;
-
-export const formatAgo = (elapsedMs: number): string => {
-  if (elapsedMs < MINUTE_MS) return "just now";
-  if (elapsedMs < HOUR_MS) return `${Math.floor(elapsedMs / MINUTE_MS)}m ago`;
-  if (elapsedMs < DAY_MS) return `${Math.floor(elapsedMs / HOUR_MS)}h ago`;
-  return `${Math.floor(elapsedMs / DAY_MS)}d ago`;
-};
 
 export const formatDuration = (elapsedMs: number): string => {
   if (elapsedMs < MINUTE_MS) return `${(elapsedMs / SECOND_MS).toFixed(1)}s`;
   const minutes = Math.floor(elapsedMs / MINUTE_MS);
   const seconds = Math.floor((elapsedMs % MINUTE_MS) / SECOND_MS);
   return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
-};
-
-export const formatCountdown = (remainingMs: number): string => {
-  if (remainingMs < MINUTE_MS) return "under a minute";
-  if (remainingMs < HOUR_MS) return `${Math.floor(remainingMs / MINUTE_MS)} min`;
-  if (remainingMs < DAY_MS) return `${Math.floor(remainingMs / HOUR_MS)} h ${Math.floor((remainingMs % HOUR_MS) / MINUTE_MS)} min`;
-  return `${Math.floor(remainingMs / DAY_MS)} d ${Math.floor((remainingMs % DAY_MS) / HOUR_MS)} h`;
 };
 
 export const formatTokens = (tokens: number): string => (tokens < 1000 ? `${tokens}` : `${(tokens / 1000).toFixed(1)}k`);

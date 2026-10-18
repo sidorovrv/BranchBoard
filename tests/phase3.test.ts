@@ -12,8 +12,8 @@ import { embedFiles, importBoardDocument, MAX_FILE_BYTES, recoveryOfMessage, san
 import { createApp } from "../packages/server/src/app";
 import { quoteForCmdShell } from "../packages/server/src/runtimes/spawnProcess";
 import { locateExecutable } from "../packages/server/src/runtimes/executableLocator";
-import { highlightCode } from "../packages/web/src/highlight";
-import { sanitizeSchema } from "../packages/web/src/markdownSchema";
+import { highlightCode } from "../packages/web/src/kit/highlight";
+import { sanitizeSchema } from "../packages/web/src/kit/markdownSchema";
 
 const PORT = 47311;
 const ACCESS = "b".repeat(64);
@@ -159,6 +159,20 @@ describe("R-1b recovery actions", () => {
     await waitFor(async () => (await view(boardId)).graph.nodes[node].status === "error");
     expect((await view(boardId)).parts[node].find((part) => part.type === "error")?.meta?.recovery).toBe("usageLimit");
     expect(recoveryOfMessage("something else")).toBeUndefined();
+  });
+
+  it("continues a failed node inside the same roll", async () => {
+    const node = (await command({ type: "reply", boardId, prompt: "/limit" })).json.nodeId;
+    await waitFor(async () => (await view(boardId)).graph.nodes[node].status === "error");
+    const before = (await view(boardId)).graph.nodes[node];
+    expect((await command({ type: "regenerate", boardId, nodeId: node, continue: true })).status).toBe(200);
+    await waitFor(async () => (await view(boardId)).graph.nodes[node].status === "done");
+    const after = (await view(boardId)).graph.nodes[node];
+    expect(after.rollCount).toBe(before.rollCount);
+    expect(after.activeRoll).toBe(before.activeRoll);
+    const parts = (await view(boardId)).parts[node];
+    expect(parts.some((part) => part.type === "error")).toBe(true);
+    expect(parts.some((part) => part.type === "text" && part.text.includes("Continue where you stopped."))).toBe(true);
   });
 });
 

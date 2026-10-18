@@ -3,7 +3,7 @@ import { DEFAULT_BOARD_TITLE, type Board } from "@branchboard/core";
 import { useSidebarLayout } from "../sidebarLayout";
 import { useBoard } from "../store";
 import { useContextMenu, type MenuItem } from "./ContextMenu";
-import { IconRow } from "./Icons";
+import { IconRow } from "../kit/Icons";
 import { ProjectDialog } from "./ProjectDialog";
 import { ACTIVITY_TITLES, activityOf, createBoardIn, deleteBoard, EditableName, EXPORT_MENU_ITEMS, importBoard, sendWorkspaceCommand } from "./Sidebar";
 

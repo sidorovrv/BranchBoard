@@ -11,7 +11,7 @@ interface ProviderEntry {
 }
 
 const NOT_FOR_TEXT = /embed|whisper|tts|image|moderation|audio|realtime|transcribe/i;
-const LIGHT_NAMES = /nano|mini|flash|haiku|small|lite|fast|air|instant/i;
+export const LIGHT_NAMES = /nano|mini|flash|haiku|small|lite|fast|air|instant/i;
 
 const priceOf = (model: ProviderModel): number => (model.cost?.input ?? Number.POSITIVE_INFINITY) + (model.cost?.output ?? Number.POSITIVE_INFINITY);
 

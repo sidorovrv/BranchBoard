@@ -21,7 +21,7 @@ export const collectBoard = ({ board, graph, parts }: BoardSnapshot): BoardDocum
   return {
     format: DOCUMENT_FORMAT,
     version: DOCUMENT_VERSION,
-    board,
+    board: { ...board, environment: undefined, discardedSessions: undefined },
     nodes,
     edges: liveEdges(graph),
     parts: nodes.flatMap((node) => parts[node.id] ?? []),

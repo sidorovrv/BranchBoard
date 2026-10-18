@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { accessLinkOf, loadAccessToken } from "./accessToken";
 import { createApp } from "./app";
 import { firstExisting } from "./dataDirectory";
-import { configureLogFile, log } from "./log";
+import { configureLogFile, DEFAULT_CONSOLE_LEVEL, log } from "./log";
 
 export const DEFAULT_PORT = 4777;
 const CHANNEL_CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -37,14 +37,18 @@ export const startServer = async ({ port, dataDirectory, webRoot, extraOrigins =
   configureLogFile(join(dataDirectory, "logs", "server.log"));
   log.info("startup", `Node ${process.version} on ${process.platform}, cwd ${process.cwd()}`);
   log.info("startup", `Database: ${databasePath}`);
-  log.info("startup", `Log level: ${process.env.BRANCHBOARD_LOG_LEVEL ?? "debug"} (set BRANCHBOARD_LOG_LEVEL to debug, info, warn or error)`);
+  log.info("startup", `Console log level: ${process.env.BRANCHBOARD_LOG_LEVEL ?? DEFAULT_CONSOLE_LEVEL} (set BRANCHBOARD_LOG_LEVEL to debug, info, warn or error)`);
   const accessToken = loadAccessToken(join(dataDirectory, "access-token"));
-  const { listen, startPerfSampling, perfLog, codeFileSync, channel, close } = createApp({ databasePath, webRoot, security: { port, extraOrigins, accessToken } });
+  const { listen, startPerfSampling, perfLog, codeFileSync, channel, telemetry, close } = createApp({ databasePath, webRoot, security: { port, extraOrigins, accessToken } });
   const server = await listen(port);
   const stopPerfSampling = startPerfSampling();
   const stopCodeFileSync = codeFileSync.start();
   void channel.refresh();
-  const channelTimer = setInterval(() => void channel.refresh(), CHANNEL_CHECK_INTERVAL_MS);
+  void telemetry.sendPendingDays();
+  const channelTimer = setInterval(() => {
+    void channel.refresh();
+    void telemetry.sendPendingDays();
+  }, CHANNEL_CHECK_INTERVAL_MS);
   channelTimer.unref();
   log.info("startup", `Performance samples: ${perfLog.file}`);
   log.info("startup", "Branchboard is running");

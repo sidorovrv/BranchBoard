@@ -1,4 +1,4 @@
-import { isUsageLimitMessage } from "./usageLimit";
+import { isUsageLimitMessage } from "./kit/usageLimit";
 
 export const RECOVERY_IDS = ["assemble", "setup", "signIn", "usageLimit", "report", "retry"] as const;
 

@@ -1,0 +1,46 @@
+.settings-backdrop { position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.25); }
+.settings-dialog { display: flex; width: 980px; max-width: calc(100vw - 64px); height: 680px; max-height: calc(100vh - 64px); overflow: hidden; border: 1px solid var(--border); border-radius: 18px; background: var(--card); color: var(--text); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.3); }
+.settings-nav { display: flex; flex-direction: column; gap: 4px; width: 232px; flex: none; padding: 28px 14px 18px; background: var(--subtle); border-right: 1px solid var(--border); }
+.settings-nav h3 { margin: 0 0 18px 12px; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+.settings-nav button:not(.settings-reset):not(.settings-pinned) { display: flex; align-items: center; gap: 10px; text-align: left; padding: 9px 12px; border: 0; border-radius: 10px; background: none; color: var(--muted); font-size: 14.5px; font-weight: 500; cursor: pointer; }
+.settings-nav button:not(.settings-reset):not(.settings-pinned) .icon { width: 20px; height: 20px; }
+.settings-nav button:not(.settings-reset):not(.settings-pinned):hover { background: var(--hover-strong); color: var(--text); }
+.settings-nav button.active:not(.settings-reset):not(.settings-pinned) { background: var(--hover-strong); color: var(--text); font-weight: 600; }
+.settings-nav button.active:not(.settings-reset):not(.settings-pinned) .icon { color: var(--accent); }
+.settings-nav .settings-reset, .settings-nav .settings-pinned { align-self: flex-start; margin-left: 12px; padding: 4px 0; border: 0; background: none; color: var(--muted); font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.settings-nav .settings-reset:hover, .settings-nav .settings-pinned:hover, .settings-nav .settings-pinned.active { color: var(--text); }
+.settings-nav .spacer { flex: 1; }
+.settings-content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.settings-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 28px 36px 18px; }
+.settings-header h4 { margin: 0 0 4px; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+.settings-summary { font-size: 14px; line-height: 1.45; color: var(--muted); }
+.settings-fields { flex: 1; overflow: auto; padding: 0 36px 32px; }
+.settings-group { border: 1px solid var(--border); border-radius: 14px; background: var(--subtle); }
+.setting-row { display: flex; align-items: center; justify-content: space-between; gap: 40px; padding: 18px 22px; }
+.setting-row + .setting-row { border-top: 1px solid var(--border); }
+.setting-text { min-width: 0; max-width: 520px; }
+.setting-label { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+.setting-description { font-size: 13px; line-height: 1.5; color: var(--muted); }
+.setting-description.is-problem { color: var(--danger); }
+.setting-control { flex: none; display: flex; align-items: center; gap: 8px; }
+.setting-control .chip-select { justify-content: space-between; gap: 10px; min-width: 200px; height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--text); font-size: 14px; }
+.setting-control .chip-select:hover, .setting-control .chip-select.is-open { border: 1px solid var(--accent); background: var(--card); }
+.setting-control .chip-select .icon:last-of-type { opacity: 0.7; }
+.setting-control .chip-select:focus-visible, .setting-number input:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.setting-slider { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+.setting-slider input { width: 160px; padding: 0; accent-color: var(--accent); }
+.setting-slider span { min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
+.setting-number { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.setting-number input { width: 92px; height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--text); font: inherit; font-size: 14px; font-variant-numeric: tabular-nums; }
+.setting-checklist { display: flex; flex-direction: column; gap: 6px; width: 240px; max-height: 190px; overflow-y: auto; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); font-size: 14px; }
+.setting-checklist label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.setting-segmented { display: inline-flex; padding: 3px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
+.setting-segmented button { border: 0; border-radius: 9px; background: none; padding: 6px 16px; color: var(--muted); font-size: 14px; cursor: pointer; }
+.setting-segmented button:hover:not(.active) { color: var(--text); }
+.setting-segmented button.active { background: var(--hover-strong); color: var(--text); font-weight: 600; }
+.setting-switch { position: relative; width: 44px; height: 26px; padding: 0; border: 0; border-radius: 99px; background: var(--hover-strong); transition: background 0.15s; cursor: pointer; }
+.setting-switch.on { background: var(--accent); }
+.setting-switch:disabled { opacity: 0.45; cursor: not-allowed; }
+.setting-switch-thumb { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); transition: transform 0.15s; }
+.setting-switch.on .setting-switch-thumb { transform: translateX(18px); }
+.setting-switch:focus-visible, .setting-segmented button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
