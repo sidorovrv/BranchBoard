@@ -1,6 +1,6 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { activeRollOf, answerText, encodeAnswers, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type BoardView, type RunEvent } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
@@ -26,6 +26,7 @@ import {
 } from "../packages/server/src/runtimes/codexStream";
 import type { LooseNative } from "../packages/server/src/runtimes/commonEvents";
 import { codexFailureOf } from "../packages/server/src/runtimes/failures";
+import { fakeCodexPath } from "./e2e/fakeCodex";
 import type { ProcessExit, RunningProcess } from "../packages/server/src/runtimes/spawnProcess";
 
 const FIXTURES = join("tests", "fixtures", "codex", "0.163.0");
@@ -623,9 +624,8 @@ describe("codex runtime sessions and runs", () => {
 describe("codex runs through the board", () => {
   const HOST = "127.0.0.1:47125";
   const directory = mkdtempSync(join(tmpdir(), "branchboard-codex-"));
-  const fakeCodex = join("tests", "e2e", process.platform === "win32" ? "fake-codex.cmd" : "fake-codex.mjs");
   const codexLimits = createLimitsStore().of("codex");
-  const codex = createCodexRuntime({ locate: () => ({ path: resolve(fakeCodex), searched: [] }), limits: codexLimits });
+  const codex = createCodexRuntime({ locate: () => ({ path: fakeCodexPath(), searched: [] }), limits: codexLimits });
   const server = createApp({ databasePath: join(directory, "test.db"), security: { port: 47125, extraOrigins: [] }, webRoot: join(directory, "none"), runtimes: { fake: fakeRuntime, opencode: opencodeRuntime, claude: fakeRuntime, codex } });
   let boardId = "";
 

@@ -1,6 +1,6 @@
-import { join } from "node:path";
 import type { Locator, Page, Route } from "@playwright/test";
 import type { Catalog } from "@branchboard/core";
+import { fakeCodexPath } from "./fakeCodex";
 import { expect, test, type Instance } from "./fixtures";
 
 const BOARD_CATALOG = /\/api\/runtime\/catalog\?board=/;
@@ -100,7 +100,7 @@ test("a form asks typed fields, hides a conditional field until its condition ho
 });
 
 test("a Codex project runs a turn, asks for a command on the board and shows the plan limits", async ({ appPage, instance }) => {
-  process.env.BRANCHBOARD_CODEX_PATH = join(import.meta.dirname, process.platform === "win32" ? "fake-codex.cmd" : "fake-codex.mjs");
+  process.env.BRANCHBOARD_CODEX_PATH = fakeCodexPath();
   const command = send(appPage, instance);
   const project = await command({ type: "createProject", workspacePath: instance.dataDirectory, mode: "codex", name: "Codex" });
   const board = await command({ type: "createBoard", projectId: project.id, title: "Codex board" });
