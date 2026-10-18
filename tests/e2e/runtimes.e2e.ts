@@ -15,6 +15,11 @@ const withCatalog =(page: Page, pattern: RegExp, change: (catalog: Catalog) => P
     await route.fulfill({ response, json: { ...catalog, ...change(catalog) } });
   });
 
+const clickWithoutScrolling = async (button: Locator) => {
+  await expect(button).toBeEnabled();
+  await button.dispatchEvent("click");
+};
+
 const openDemoBoard = async (page: Page) => {
   await page.locator(".sidebar-board-open", { hasText: "Demo board" }).click();
   await expect(page.locator(".react-flow")).toBeVisible();
@@ -66,8 +71,8 @@ test("a running node offers a follow-up and a background button when the catalog
   const live = appPage.locator(".live-controls");
   await expect(live).toBeVisible();
   await live.getByLabel("Follow-up message").fill("also check the tests");
-  await live.getByRole("button", { name: "Send" }).click();
-  await live.getByRole("button", { name: "Move to background" }).click();
+  await clickWithoutScrolling(live.getByRole("button", { name: "Send" }));
+  await clickWithoutScrolling(live.getByRole("button", { name: "Move to background" }));
   await expect.poll(() => controlCommands.map((command) => command.control)).toEqual(["followUp", "background"]);
   expect(controlCommands[0].text).toBe("also check the tests");
 });

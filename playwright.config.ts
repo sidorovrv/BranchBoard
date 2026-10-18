@@ -6,6 +6,7 @@ export default defineConfig({
   fullyParallel: true,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "list",
+  use: { trace: "on-first-retry" },
   projects: [
     { name: "chromium", use: devices["Desktop Chrome"] },
     ...(process.platform === "darwin" ? [{ name: "webkit", use: devices["Desktop Safari"] }] : []),
