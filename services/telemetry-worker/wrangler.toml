@@ -9,4 +9,4 @@ enabled = false
 [[d1_databases]]
 binding = "DB"
 database_name = "branchboard-telemetry"
-database_id = "bce3017d-53aa-4b32-86aa-7c0378217afb"
+database_id = "REPLACE_WITH_DATABASE_ID"

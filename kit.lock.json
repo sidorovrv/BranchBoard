@@ -1,7 +1,6 @@
 {
   "kit": "0.1.0",
   "files": {
-    "docs/KIT.md": "2f97f83552e39af6058d089cf6c8704e9f140cc4a6af8ca9fefe10c80db005f6",
     "packages/core/src/kit/charts.ts": "596de649f5f493b37c7af52693485f601d67462a155135984c01b80f622da5dd",
     "packages/core/src/kit/codeFiles.ts": "ed9eb10132c58e9356c793e5a540262b5c524c3fb680271a38d066e3189d784b",
     "packages/core/src/kit/commands.test.ts": "a2947b339ecfda599dc07449b98447353a56abf5955d16f369fc59cc586e3bd5",

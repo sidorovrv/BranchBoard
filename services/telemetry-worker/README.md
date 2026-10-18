@@ -15,7 +15,7 @@ npx wrangler d1 execute branchboard-telemetry --remote --file schema.sql
 npx wrangler deploy
 ```
 
-`wrangler d1 create` prints the database id for `database_id` in `wrangler.toml`. `wrangler deploy` prints the `*.workers.dev` address for `TELEMETRY_URL` in `packages/server/src/telemetry.ts`.
+`wrangler d1 create` prints the database id; enter it as `database_id` in `wrangler.toml`. `wrangler deploy` prints the `*.workers.dev` address for `TELEMETRY_URL` in `packages/server/src/telemetry.ts`.
 
 ## Query
 
