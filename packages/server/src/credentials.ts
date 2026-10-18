@@ -1,7 +1,8 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { hasCredential, isLocalBaseUrl, needsKey, runtimeInfo, type CredentialRuntimeId, type CredentialStatus, type RuntimeId } from "@branchboard/core";
 import { RefusedError } from "./boards";
+import { replaceFile } from "./jsonFile";
 import type { ServerAddress } from "./runtimes/opencodeServer";
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
@@ -57,7 +58,7 @@ export const createCredentialStore = (dataDirectory: string) => {
     const temporary = `${path}.tmp`;
     writeFileSync(temporary, JSON.stringify(credentials), { mode: PRIVATE_FILE_MODE });
     chmodSync(temporary, PRIVATE_FILE_MODE);
-    renameSync(temporary, path);
+    replaceFile(temporary, path);
   };
 
   const status = (runtimeId: RuntimeId): CredentialStatus => {
