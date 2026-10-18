@@ -148,9 +148,15 @@ export const ServerAddressForm = ({ runtimeId }: { runtimeId: RuntimeId }) => {
   const [password, setPassword] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [connection, setConnection] = useState<{ ok: boolean; detail: string }>();
-  const loadStatus = useCallback(() => fetchCredentialStatus(runtimeId).then(setStatus, () => undefined), [runtimeId]);
+  const loadStatus = useCallback(
+    () =>
+      fetchCredentialStatus(runtimeId).then((loaded) => {
+        setStatus(loaded);
+        setAddress(loaded.baseUrl ?? "");
+      }, () => undefined),
+    [runtimeId],
+  );
   useEffect(() => void loadStatus(), [loadStatus]);
-  useEffect(() => setAddress(status?.baseUrl ?? ""), [status?.baseUrl]);
   const check = async () => {
     setIsBusy(true);
     const catalog = await fetchRuntimeCatalog(runtimeId, true).catch((failure) => ({ health: { ok: false, detail: failure instanceof Error ? failure.message : String(failure) } }));
@@ -170,14 +176,14 @@ export const ServerAddressForm = ({ runtimeId }: { runtimeId: RuntimeId }) => {
       <div className="muted">Address of a running OpenCode 2 server, for example one started with “opencode service start”. The password is in service.json in the OpenCode configuration folder. Leave the address empty to use a server started by Branchboard.</div>
       <label>
         Server address
-        <input value={address} spellCheck={false} onChange={(event) => setAddress(event.target.value)} placeholder="http://127.0.0.1:4096" />
+        <input value={address} disabled={!status} spellCheck={false} onChange={(event) => setAddress(event.target.value)} placeholder="http://127.0.0.1:4096" />
       </label>
       <label>
         Server password
-        <input type="password" autoComplete="off" spellCheck={false} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={status?.saved ? "Saved. Type to replace it" : "Password of the server"} />
+        <input type="password" autoComplete="off" disabled={!status} spellCheck={false} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={status?.saved ? "Saved. Type to replace it" : "Password of the server"} />
       </label>
       <div className="row">
-        <button className="primary" disabled={isBusy} onClick={() => void save({ key: password.trim() || undefined, baseUrl: address.trim() })}>Save</button>
+        <button className="primary" disabled={isBusy || !status} onClick={() => void save({ key: password.trim() || undefined, baseUrl: address.trim() })}>Save</button>
         {status?.baseUrl && <button disabled={isBusy} onClick={() => void save({ key: null, baseUrl: "" })}>Disconnect</button>}
         {status?.baseUrl && <button disabled={isBusy} onClick={() => void check()}>Check connection</button>}
       </div>
