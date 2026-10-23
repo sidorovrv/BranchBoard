@@ -21,9 +21,7 @@
     "dev:web": "npm -w @branchboard/web run dev",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.kit.json",
     "test": "vitest run",
-    "test:e2e": "playwright test",
-    "kit:sync": "node ../kit/scripts/sync.mjs .",
-    "kit:check": "node ../kit/scripts/sync.mjs . --check"
+    "test:e2e": "playwright test"
   },
   "engines": {
     "node": ">=22.13"

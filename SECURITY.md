@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report security problems privately, not in a public issue.
+Please report security problems privately.
 
 Use GitHub's private vulnerability reporting: open this repository's **Security** tab, choose **Report a vulnerability**, and describe the problem. Include the version or commit, the steps to reproduce it, and what an attacker could do with it.
 
@@ -27,4 +27,4 @@ Branchboard asks once, after your 25th successful run, whether to send aggregate
 - **Receiver:** a Cloudflare Worker with a D1 database (`services/telemetry-worker`) that stores the payload and the receive date. It does not read or store the request IP or headers, and Workers Logs are off. Cloudflare processes your IP address to route the request.
 - **Consent:** stored in `telemetry.json` in the data folder, with the time and the version of the decision. Updates and browser settings do not change it.
 - **Log:** every payload is appended to `telemetry-sent.jsonl` in the data folder with the send time and the HTTP status.
-- **Offline:** `--offline` and `BRANCHBOARD_OFFLINE=1` send nothing. Counting on this computer continues.
+- **Offline:** `--offline` and `BRANCHBOARD_OFFLINE=1` turn sending off. Counting continues on this computer.

@@ -30,12 +30,16 @@ const HintGroup = ({ title, hints }: { title: string; hints: Hint[] }) => (
   </section>
 );
 
+const NONE_HELD = { shift: false, control: false, alt: false };
+
+const withHeld = (previous: typeof NONE_HELD, next: typeof NONE_HELD) => (previous.shift === next.shift && previous.control === next.control && previous.alt === next.alt ? previous : next);
+
 export const ModifierHints = () => {
-  const [held, setHeld] = useState({ shift: false, control: false, alt: false });
+  const [held, setHeld] = useState(NONE_HELD);
   const keybinds = useSettings((state) => state.settings.keybinds);
   useEffect(() => {
-    const track = (event: KeyboardEvent) => setHeld({ shift: event.shiftKey, control: isMacPlatform ? event.metaKey : event.ctrlKey, alt: event.altKey });
-    const release = () => setHeld({ shift: false, control: false, alt: false });
+    const track = (event: KeyboardEvent) => setHeld((previous) => withHeld(previous, { shift: event.shiftKey, control: isMacPlatform ? event.metaKey : event.ctrlKey, alt: event.altKey }));
+    const release = () => setHeld((previous) => withHeld(previous, NONE_HELD));
     window.addEventListener("keydown", track);
     window.addEventListener("keyup", track);
     window.addEventListener("blur", release);

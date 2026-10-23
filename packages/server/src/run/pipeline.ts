@@ -19,6 +19,7 @@ import {
   isInFlight,
   liveNodes,
   makeNode,
+  placeNode,
   namingRoleOf,
   attachmentsToSend,
   NODE_MIN_HEIGHT,
@@ -27,9 +28,9 @@ import {
   isUsageLimitMessage,
   orderedAncestorIds,
   partsOfRoll,
-  placeSatellite,
   planSession,
   recoveryOfMessage,
+  redactSecrets,
   renderRequest,
   renderTurns,
   satelliteIdsOf,
@@ -41,6 +42,7 @@ import {
   type NodeStatus,
   type RecoveryId,
   type PendingRequest,
+  type RedactionContext,
   type RunEvent,
   type RunInfo,
   type RuntimeId,
@@ -115,11 +117,26 @@ export const summaryInstruction = (source: string): string =>
     source.slice(-MAX_SUMMARY_SOURCE_CHARS),
   ].join("\n");
 
-export const createRunService = (boards: BoardService, runtimes: Runtimes, attachments: AttachmentStore, runLog: RunLog, costs?: CostStore, usage?: UsageRecorder) => {
+export const createRunService = (
+  boards: BoardService,
+  runtimes: Runtimes,
+  attachments: AttachmentStore,
+  runLog: RunLog,
+  costs?: CostStore,
+  usage?: UsageRecorder,
+  redaction: () => RedactionContext = () => ({}),
+) => {
   const activeRuns = new Map<Id, ActiveRun>();
+
+  const recordFailure = (boardId: Id, nodeId: Id, outcome: RunOutcome, rawMessage: string, recovery = recoveryOfMessage(rawMessage)) => {
+    const message = redactSecrets(rawMessage, redaction());
+    noteFailure(outcome, message, recovery);
+    boards.recordRunEvent(boardId, nodeId, { type: "error", message, recovery });
+  };
   const waiters = createAnswerWaiters();
   const catalogCache = new Map<string, { at: number; catalog: Promise<Catalog | undefined> }>();
   const resumingNodeIds = new Set<Id>();
+  const answeringRequestIds = new Set<Id>();
 
   const runtimeOf = (runtimeId: RuntimeId): RuntimeSteps => {
     const runtime = runtimes[runtimeId];
@@ -133,7 +150,11 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     if (cached && !isFresh && now() - cached.at < CATALOG_CACHE_MS) return cached.catalog;
     const catalog = runtimeOf(runtimeId).catalog(workspacePath).then(
       (result) => result,
-      (error) => (log.warn("run", `Could not read the ${runtimeId} catalog`, error), undefined),
+      (error) => {
+        log.warn("run", `Could not read the ${runtimeId} catalog`, error);
+        if (catalogCache.get(key)?.catalog === catalog) catalogCache.delete(key);
+        return undefined;
+      },
     );
     catalogCache.set(key, { at: now(), catalog });
     return catalog;
@@ -181,12 +202,12 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       status: "running",
       prompt: event.prompt ?? "",
       satelliteOf: parentId,
-      satelliteRunStartedAt: graph.nodes[parentId]?.startedAt,
       ...size,
       startedAt: now(),
-      ...placeSatellite(graph, parentId, size),
+      ...placeNode(graph, [parentId], size),
     });
     boards.commitRunPatch(boardId, { type: "addNode", node: satellite, parentIds: [] });
+    boards.recordRunEvent(boardId, parentId, { type: "tool.started", partKey: event.partKey, tool: "Subagent", description: satellite.title, subagentId: satellite.id });
     outcome.satellites.set(event.key, satellite.id);
   };
 
@@ -221,9 +242,9 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     if (event.type === "context.compacted") patchNode(boardId, nodeId, { compactedAt: now() });
     if (event.type === "usage") outcome.usage = event.usage;
     if (event.type === "done") outcome.stopped = event.stopped ?? false;
-    if (event.type === "error") noteFailure(outcome, event.message, event.recovery ?? recoveryOfMessage(event.message));
+    if (event.type === "error") return recordFailure(boardId, nodeId, outcome, event.message, event.recovery);
     if (event.type === "part.delta" && event.partType === "text") outcome.answerChars += event.text.length;
-    boards.recordRunEvent(boardId, nodeId, event.type === "error" ? { ...event, recovery: event.recovery ?? recoveryOfMessage(event.message) } : event);
+    boards.recordRunEvent(boardId, nodeId, event);
   };
 
   const resolveContext = (boardId: Id, nodeId: Id) => {
@@ -414,9 +435,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
 
   const failAfterRetries = (boardId: Id, nodeId: Id, outcome: RunOutcome) => {
     if (outcome.errors.length > 0) return;
-    const message = `Gave up after ${MAX_RETRY_ATTEMPTS} attempts: ${outcome.retryFailure}`;
-    noteFailure(outcome, message, recoveryOfMessage(message));
-    boards.recordRunEvent(boardId, nodeId, { type: "error", message, recovery: recoveryOfMessage(message) });
+    recordFailure(boardId, nodeId, outcome, `Gave up after ${MAX_RETRY_ATTEMPTS} attempts: ${outcome.retryFailure}`);
   };
 
   const tagSession = (runtime: RuntimeSteps, scope: RunScope, outcome: RunOutcome) => {
@@ -434,7 +453,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     if (!node || node.deleted || node.status !== "queued") return;
     const runtime = runtimeOf(state.board.mode);
     const controller = new AbortController();
-    const outcome: RunOutcome = { stopped: false, answerChars: 0, errors: [], satellites: new Map(), partKeyPrefix: isResuming ? `resume${now()}:` : undefined };
+    const outcome: RunOutcome = { stopped: false, answerChars: 0, errors: [], satellites: new Map(), runtimeRef: isResuming ? node.runtimeRef : undefined, partKeyPrefix: isResuming ? `resume${now()}:` : undefined };
     const roll = activeRollOf(node);
     const scope: RunScope = {
       boardId,
@@ -455,12 +474,12 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       },
       waitForAnswer: waiters.wait,
     };
-    activeRuns.set(nodeId, { boardId, isStopping: false, isWaitingForSlot: false, controller, scope, runtime, outcome });
     const started = now();
-    patchNode(boardId, nodeId, { status: "running", stopped: false, usage: undefined, startedAt: started, completedAt: undefined, workspaceSnapshot: null, fileHashes: null, reverted: null });
     let status: NodeStatus = "done";
     log.info("run", `Starting node ${nodeId} on board ${boardId} (runtime=${state.board.mode}, agent=${node.agent}, model=${node.model}, workspace=${scope.workspacePath})`);
     try {
+      activeRuns.set(nodeId, { boardId, isStopping: false, isWaitingForSlot: false, controller, scope, runtime, outcome });
+      patchNode(boardId, nodeId, { status: "running", stopped: false, usage: undefined, startedAt: started, completedAt: undefined, workspaceSnapshot: null, fileHashes: null, reverted: null });
       const prepared = isResuming ? prepareContinuation(node, scope) : await prepareRun(boardId, nodeId, scope);
       const { plan, hash, contextNodeIds, input } = prepared;
       if (!isResuming) patchNode(boardId, nodeId, { contextHash: hash, contextNodeIds, contextMode: fidelityOf(plan), compactedAt: plan.spine?.compactedAt ?? null });
@@ -500,32 +519,40 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
         status = "error";
         log.error("run", `Node ${nodeId} failed`, error);
         const message = error instanceof Error ? error.message : String(error);
-        const recovery = error instanceof RecoverableError ? error.recovery : recoveryOfMessage(message);
-        noteFailure(outcome, message, recovery);
-        boards.recordRunEvent(boardId, nodeId, { type: "error", message, recovery });
+        recordFailure(boardId, nodeId, outcome, message, error instanceof RecoverableError ? error.recovery : undefined);
       }
     } finally {
-      closeOpenRequests(boardId, nodeId, "reject");
-      finishOpenSatellites(boardId, outcome, status === "error" ? "error" : "done");
-      await recordFileHashes(boardId, nodeId, roll, scope.workspacePath, runtime, outcome.runtimeRef);
-      activeRuns.delete(nodeId);
-      runLog.append({ event: "end", boardId, nodeId, roll, status, stopped: outcome.stopped, durationMs: now() - started, answerChars: outcome.answerChars, errors: outcome.errors, usage: outcome.usage, runtimeRef: outcome.runtimeRef });
-      persistRun(boardId, nodeId, status, outcome);
-      usage?.record({
-        type: "run",
-        boardId,
-        outcome: status === "error" ? "error" : "done",
-        stopped: outcome.stopped,
-        runtime: state.board.mode,
-        contextMode: boards.stateOf(boardId).graph.nodes[nodeId]?.contextMode,
-        recovery: outcome.firstRecovery,
-        isRegeneration: roll > 1,
-      });
-      recordCost(boardId, nodeId, outcome);
-      log.info("run", `Node ${nodeId} finished as ${status}${outcome.stopped ? " (stopped)" : ""} in ${now() - started}ms`);
+      try {
+        closeOpenRequests(boardId, nodeId, "reject");
+        finishOpenSatellites(boardId, outcome, status === "error" ? "error" : "done");
+        await recordFileHashes(boardId, nodeId, roll, scope.workspacePath, runtime, outcome.runtimeRef);
+        activeRuns.delete(nodeId);
+        runLog.append({ event: "end", boardId, nodeId, roll, status, stopped: outcome.stopped, durationMs: now() - started, answerChars: outcome.answerChars, errors: outcome.errors, usage: outcome.usage, runtimeRef: outcome.runtimeRef });
+        persistRun(boardId, nodeId, status, outcome);
+        usage?.record({
+          type: "run",
+          boardId,
+          outcome: status === "error" ? "error" : "done",
+          stopped: outcome.stopped,
+          runtime: state.board.mode,
+          contextMode: boards.stateOf(boardId).graph.nodes[nodeId]?.contextMode,
+          recovery: outcome.firstRecovery,
+          isRegeneration: roll > 1,
+        });
+        recordCost(boardId, nodeId, outcome);
+        log.info("run", `Node ${nodeId} finished as ${status}${outcome.stopped ? " (stopped)" : ""} in ${now() - started}ms`);
+        flagUsageLimit(boardId, status, outcome);
+        flagUnseenResult(boardId, outcome.stopped);
+      } catch (error) {
+        activeRuns.delete(nodeId);
+        log.error("run", `Node ${nodeId} ended but its result could not be recorded`, error);
+        try {
+          patchNode(boardId, nodeId, { status: "error", completedAt: now() });
+        } catch (patchError) {
+          log.error("run", `Node ${nodeId} could not be marked as failed`, patchError);
+        }
+      }
       pump(boardId);
-      flagUsageLimit(boardId, status, outcome);
-      flagUnseenResult(boardId, outcome.stopped);
     }
   };
 
@@ -584,12 +611,13 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
   const refuseIfOverBudget = (boardId: Id) => {
     const { board, graph } = boards.stateOf(boardId);
     if (budgetStateOf(boardTokenUsage(graph), board.budgetTokens) === "exhausted")
-      throw new RefusedError(`This board used its budget of ${board.budgetTokens} tokens. Raise the budget in the board settings to keep running`);
+      throw new RefusedError(`This board used its budget of ${board.budgetTokens} tokens. Raise it in Settings → Boards → Token budget to keep running`);
   };
 
   const enqueue = (boardId: Id, nodeId: Id) => {
     refuseIfOverBudget(boardId);
     boards.commitRunPatch(boardId, { type: "queue", nodeId });
+    boards.dropHistoryOf(boardId, nodeId);
     resumingNodeIds.delete(nodeId);
     void nameNode(boardId, nodeId, runtimeOf(boards.stateOf(boardId).board.mode)).catch((error) => log.warn("run", `Naming failure for node ${nodeId}`, error));
     pump(boardId);
@@ -598,6 +626,7 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
   const resume = (boardId: Id, nodeId: Id) => {
     refuseIfOverBudget(boardId);
     boards.commitRunPatch(boardId, { type: "resume", nodeId });
+    boards.dropHistoryOf(boardId, nodeId);
     resumingNodeIds.add(nodeId);
     pump(boardId);
   };
@@ -610,10 +639,14 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
       closeOpenRequests(boardId, nodeId, "reject");
       return;
     }
-    if (boards.stateOf(boardId).graph.nodes[nodeId]?.status === "queued") {
+    const node = boards.stateOf(boardId).graph.nodes[nodeId];
+    if (node?.status === "queued") {
       resumingNodeIds.delete(nodeId);
       patchNode(boardId, nodeId, { status: "idle" });
       pump(boardId);
+    } else if (node && node.kind !== "subagent" && isInFlight(node)) {
+      closeOpenRequests(boardId, nodeId, "reject");
+      patchNode(boardId, nodeId, { status: "interrupted" });
     }
   };
 
@@ -627,18 +660,23 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
 
   const answerRequest = async (boardId: Id, requestId: Id, answer: string, message?: string) => {
     const request = boards.stateOf(boardId).requests[requestId];
-    if (!request || request.status !== "open") throw new RefusedError("That request is no longer open");
+    if (!request || request.status !== "open" || answeringRequestIds.has(requestId)) throw new RefusedError("That request is no longer open");
     const storedAnswer = withoutSecretAnswers(request.questions, answer);
     log.info("run", `Answering request ${requestId} with "${storedAnswer}"`);
     const ownerId = ownerOf(boardId, request.nodeId);
     const active = activeRuns.get(ownerId);
     const runtime = active?.runtime ?? runtimeOf(boards.stateOf(boardId).board.mode);
-    await runtime.answerRequest(request, answer, active?.scope, message);
-    waiters.resolve(requestId, answer);
-    boards.saveRequest({ ...request, status: "closed", answer: storedAnswer });
-    if (request.kind === "approval" && answer === "always") await closeDuplicateApprovals(boardId, ownerId, request, active?.scope, runtime);
-    if (request.kind === "approval" && answer === "reject" && runtime.rejectClosesRun) closeOtherApprovals(boardId, ownerId, request);
-    syncStatus(boardId, ownerId);
+    answeringRequestIds.add(requestId);
+    try {
+      await runtime.answerRequest(request, answer, active?.scope, message);
+      waiters.resolve(requestId, answer);
+      boards.saveRequest({ ...request, status: "closed", answer: storedAnswer });
+      if (request.kind === "approval" && answer === "always") await closeDuplicateApprovals(boardId, ownerId, request, active?.scope, runtime);
+      if (request.kind === "approval" && answer === "reject" && runtime.rejectClosesRun) closeOtherApprovals(boardId, ownerId, request);
+      syncStatus(boardId, ownerId);
+    } finally {
+      answeringRequestIds.delete(requestId);
+    }
   };
 
   const closeDuplicateApprovals = async (boardId: Id, ownerId: Id, answered: PendingRequest, scope: RunScope | undefined, runtime: RuntimeSteps) => {
@@ -650,13 +688,15 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
     }
   };
 
-  const describeRun = (boardId: Id, nodeId: Id, status: NodeStatus, isStopping: boolean, isWaitingForSlot = false): RunInfo => {
+  const projectNames = () => new Map(boards.listProjects().map((project) => [project.id, project.name]));
+
+  const describeRun = (names: Map<Id, string>, boardId: Id, nodeId: Id, status: NodeStatus, isStopping: boolean, isWaitingForSlot = false): RunInfo => {
     const { board, graph } = boards.stateOf(boardId);
     const node = graph.nodes[nodeId];
     return {
       boardId,
       boardTitle: board.title,
-      projectName: boards.listProjects().find((project) => project.id === board.projectId)?.name ?? "",
+      projectName: (board.projectId && names.get(board.projectId)) ?? "",
       nodeId,
       title: node?.title ?? "(removed node)",
       prompt: (node?.prompt ?? "").slice(0, 120),
@@ -668,26 +708,31 @@ export const createRunService = (boards: BoardService, runtimes: Runtimes, attac
   };
 
   const listRuns = (): RunInfo[] => {
+    const names = projectNames();
     const running = [...activeRuns.entries()].map(([nodeId, run]) => {
       const node = boards.stateOf(run.boardId).graph.nodes[nodeId];
-      return describeRun(run.boardId, nodeId, node && isInFlight(node) ? node.status : "running", run.isStopping, run.isWaitingForSlot);
+      return describeRun(names, run.boardId, nodeId, node && isInFlight(node) ? node.status : "running", run.isStopping, run.isWaitingForSlot);
     });
     const queued = boards
       .loadedBoardIds()
-      .flatMap((boardId) => liveNodes(boards.stateOf(boardId).graph).filter((node) => node.status === "queued" && !activeRuns.has(node.id)).map((node) => describeRun(boardId, node.id, "queued", false)));
+      .flatMap((boardId) => liveNodes(boards.stateOf(boardId).graph).filter((node) => node.status === "queued" && !activeRuns.has(node.id)).map((node) => describeRun(names, boardId, node.id, "queued", false)));
     return [...running, ...queued];
   };
 
-  const listFinishedRuns = (): RunInfo[] =>
-    boards
+  const listFinishedRuns = (): RunInfo[] => {
+    const names = projectNames();
+    const oldest = now() - FINISHED_RUNS_MAX_AGE_MS;
+    return boards
       .loadedBoardIds()
       .flatMap((boardId) =>
         liveNodes(boards.stateOf(boardId).graph)
-          .filter((node) => node.kind === "turn" && (node.status === "done" || node.status === "error") && node.completedAt !== undefined && node.completedAt > now() - FINISHED_RUNS_MAX_AGE_MS && !activeRuns.has(node.id))
-          .map((node) => ({ ...describeRun(boardId, node.id, node.status, false), completedAt: node.completedAt, isStopped: node.stopped === true })),
+          .filter((node) => node.kind === "turn" && (node.status === "done" || node.status === "error") && node.completedAt !== undefined && node.completedAt > oldest && !activeRuns.has(node.id))
+          .map((node) => ({ boardId, node })),
       )
-      .sort((first, second) => (second.completedAt ?? 0) - (first.completedAt ?? 0))
-      .slice(0, FINISHED_RUNS_LIMIT);
+      .sort((first, second) => (second.node.completedAt ?? 0) - (first.node.completedAt ?? 0))
+      .slice(0, FINISHED_RUNS_LIMIT)
+      .map(({ boardId, node }) => ({ ...describeRun(names, boardId, node.id, node.status, false), completedAt: node.completedAt, isStopped: node.stopped === true }));
+  };
 
   return { enqueue, resume, abort, listRuns, listFinishedRuns, answerRequest, summarise, compact, control, catalogOf, forgetCatalogs: () => catalogCache.clear(), isActive: (nodeId: Id) => activeRuns.has(nodeId) };
 };

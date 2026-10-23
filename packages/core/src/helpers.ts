@@ -1,4 +1,10 @@
-export const newId = (): string => crypto.randomUUID();
+export const newId = (): string => {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
 
 export const now = (): number => Date.now();
 
@@ -28,10 +34,15 @@ export const mapValues = <T, U>(record: Record<string, T>, transform: (value: T,
 export const indexBy = <T>(items: T[], key: (item: T) => string): Record<string, T> =>
   Object.fromEntries(items.map((item) => [key(item), item]));
 
+export const ownValue = <T>(record: Record<string, T>, key: string): T | undefined => (Object.hasOwn(record, key) ? record[key] : undefined);
+
 export const unique = <T>(items: T[]): T[] => [...new Set(items)];
 
 export const sameMembers = (left: string[], right: string[]): boolean =>
-  left.length === right.length && left.every((item) => right.includes(item));
+  left.length === right.length && new Set(left).size === left.length && left.every((item) => right.includes(item));
+
+export const pickKeys = <T extends object, K extends keyof T>(record: T, keys: readonly K[]): Pick<T, K> =>
+  Object.fromEntries(keys.filter((key) => Object.hasOwn(record, key)).map((key) => [key, record[key]])) as Pick<T, K>;
 
 export const deriveTitle = (text: string, fallback: string): string => {
   const firstLine = text.trim().split("\n")[0] ?? "";

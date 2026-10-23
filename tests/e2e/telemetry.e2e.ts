@@ -51,6 +51,6 @@ test("accepting stores the choice and the Settings switch changes it", async ({ 
   await toggle.click();
   await expect.poll(() => storedConsent(instance)).toBe("declined");
   await expect(toggle).toHaveAttribute("aria-checked", "false");
-  await appPage.getByRole("button", { name: "Show" }).click();
+  await appPage.getByRole("button", { name: "Show", exact: true }).click();
   await expect(appPage.locator(".telemetry-preview")).toContainText("Runs today");
 });

@@ -1,14 +1,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { isLockedFileError } from "../jsonFile";
 import { RecoverableError } from "../run/types";
-import { spawnExecutable } from "../runtimes/spawnProcess";
+import { runCommand, type CommandResult } from "../runtimes/spawnProcess";
 import { ENGINE_MARKER_FILE, ENGINE_PACKAGE, currentPlatform, engineFolder, engineRoot, locateEngine, packageBinaryPath, platformPackages, type EnginePlatform } from "./locator";
-
-export interface CommandResult {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-}
 
 export type RunCommand = (command: string, args: string[], cwd: string) => Promise<CommandResult>;
 
@@ -28,17 +23,7 @@ const VERSION_TIMEOUT_MS = 20 * 1000;
 const OUTPUT_TAIL_CHARS = 1500;
 
 export const defaultRunCommand: RunCommand = (command, args, cwd) =>
-  new Promise((resolve, reject) => {
-    const child = spawnExecutable(command, args, { cwd, env: process.env });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => child.kill(), command.includes("npm") ? INSTALL_TIMEOUT_MS : VERSION_TIMEOUT_MS);
-    child.stdout?.on("data", (chunk: Buffer) => (stdout = (stdout + chunk.toString()).slice(-OUTPUT_TAIL_CHARS)));
-    child.stderr?.on("data", (chunk: Buffer) => (stderr = (stderr + chunk.toString()).slice(-OUTPUT_TAIL_CHARS)));
-    child.on("error", (error) => (clearTimeout(timer), reject(error)));
-    child.on("close", (code) => (clearTimeout(timer), resolve({ code, stdout, stderr })));
-    child.stdin?.end();
-  });
+  runCommand(command, args, { cwd, env: process.env, timeoutMs: command.includes("npm") ? INSTALL_TIMEOUT_MS : VERSION_TIMEOUT_MS, tailChars: OUTPUT_TAIL_CHARS });
 
 const OFFLINE_PATTERN = /ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ECONNRESET|network|offline|ERR_SOCKET/i;
 const DISK_PATTERN = /ENOSPC|no space left|disk full/i;
@@ -74,14 +59,13 @@ const packageJsonOf = (folder: string, packageName: string): { name?: string; ve
 
 const RENAME_ATTEMPTS = 20;
 const RENAME_RETRY_MS = 250;
-const LOCKED_FILE_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
 
 const renameWhenReleased = async (from: string, to: string): Promise<void> => {
   for (let attempt = 1; ; attempt++) {
     try {
       return renameSync(from, to);
     } catch (error) {
-      if (attempt >= RENAME_ATTEMPTS || !LOCKED_FILE_CODES.has((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      if (attempt >= RENAME_ATTEMPTS || !isLockedFileError(error)) throw error;
       await new Promise((resolve) => setTimeout(resolve, RENAME_RETRY_MS));
     }
   }

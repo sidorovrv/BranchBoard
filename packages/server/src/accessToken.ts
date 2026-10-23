@@ -31,4 +31,4 @@ export const cookieValueOf = (header: string | undefined, name: string): string 
 
 export const accessCookieHeader = (port: number, token: string): string => `${accessCookieName(port)}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${ONE_YEAR_SECONDS}`;
 
-export const accessLinkOf = (port: number, token: string): string => `http://127.0.0.1:${port}/?${ACCESS_QUERY}=${token}`;
+export const accessLinkOf = (port: number, token: string | undefined, hostName = "127.0.0.1"): string => `http://${hostName}:${port}/${token ? `?${ACCESS_QUERY}=${token}` : ""}`;

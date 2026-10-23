@@ -35,7 +35,7 @@ describe("OpenCode todos and subagents", () => {
 
   it("starts a subagent when a child session appears and routes its text to that subagent", () => {
     const events = mapped(translate([childCreated, childPart, childText("child "), childText("answer")]));
-    expect(events[0]).toEqual({ type: "subagent.started", key: CHILD, title: "Look at the logs", agent: undefined });
+    expect(events[0]).toEqual({ type: "subagent.started", key: CHILD, partKey: `subagent:${CHILD}`, title: "Look at the logs", agent: undefined, prompt: undefined });
     const text = events.slice(1).map((event) => (event.type === "subagent.event" && event.event.type === "part.delta" ? event.event.text : ""));
     expect(text.join("")).toBe("child answer");
     expect(events.every((event) => event.type !== "part.delta")).toBe(true);

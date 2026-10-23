@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 import { cleanSelection, pickerCommands } from "../packages/server/src/folderPicker";
 import { browseFolder, insideWorkspace } from "../packages/server/src/pathBrowser";
 import { locateOpencode, type LocatorEnvironment } from "../packages/server/src/runtimes/opencodeLocator";
-import { withoutCurrentDirectorySearch } from "../packages/server/src/runtimes/spawnProcess";
+import { runCommand, withLoopbackDirect, withoutCurrentDirectorySearch } from "../packages/server/src/runtimes/spawnProcess";
+import { waitForReply } from "../packages/server/src/runtimes/approvalMemory";
+import type { RunScope } from "../packages/server/src/run/types";
+import { REJECTED_ANSWER } from "@branchboard/core";
+import { getEventListeners } from "node:events";
 
 const environment = (overrides: Partial<LocatorEnvironment>, files: string[]): LocatorEnvironment => ({
   platform: "win32",
@@ -69,6 +73,11 @@ describe("child process environment", () => {
     expect(hardened.NoDefaultCurrentDirectoryInExePath).toBe("1");
     expect(hardened.KEEP).toBe("1");
   });
+
+  it("keeps loopback addresses out of the proxy and preserves existing exclusions", () => {
+    expect(withLoopbackDirect({ HTTPS_PROXY: "http://proxy:8080" })).toMatchObject({ NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" });
+    expect(withLoopbackDirect({ NO_PROXY: "example.com, localhost", no_proxy: "corp.local" })).toMatchObject({ NO_PROXY: "example.com,localhost,corp.local,127.0.0.1", no_proxy: "example.com,localhost,corp.local,127.0.0.1" });
+  });
 });
 
 describe("path browser", () => {
@@ -85,7 +94,44 @@ describe("path browser", () => {
   });
 
   it("only accepts files inside the workspace", () => {
-    expect(insideWorkspace("/repo", "/repo/src/a.ts")).toBe("src/a.ts");
-    expect(() => insideWorkspace("/repo", "/other/a.ts")).toThrow();
+    const root = mkdtempSync(join(tmpdir(), "inside-"));
+    mkdirSync(join(root, "repo", "src"), { recursive: true });
+    mkdirSync(join(root, "other"));
+    writeFileSync(join(root, "repo", "src", "a.ts"), "");
+    writeFileSync(join(root, "other", "a.ts"), "");
+    expect(insideWorkspace(join(root, "repo"), join(root, "repo", "src", "a.ts"))).toBe("src/a.ts");
+    expect(() => insideWorkspace(join(root, "repo"), join(root, "other", "a.ts"))).toThrow();
+    expect(() => insideWorkspace(join(root, "repo"), join(root, "repo", "missing.ts"))).toThrow();
+  });
+});
+
+describe("runCommand", () => {
+  it("collects stdout, stderr and the exit code", async () => {
+    const result = await runCommand(process.execPath, ["-e", "process.stdout.write('out');process.stderr.write('err');process.exit(3)"], { cwd: tmpdir(), env: process.env, timeoutMs: 10000 });
+    expect(result).toEqual({ code: 3, stdout: "out", stderr: "err" });
+  });
+
+  it("rejects and ends the process when the timeout passes", async () => {
+    const started = Date.now();
+    await expect(runCommand(process.execPath, ["-e", "setTimeout(() => undefined, 60000)"], { cwd: tmpdir(), env: process.env, timeoutMs: 300 })).rejects.toThrow(/did not finish/);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
+
+describe("waitForReply", () => {
+  const scopeOf = (signal: AbortSignal, answer: Promise<string>) => ({ signal, waitForAnswer: () => answer }) as unknown as RunScope;
+
+  it("leaves no abort listener after the reply arrives", async () => {
+    const controller = new AbortController();
+    expect(await waitForReply(scopeOf(controller.signal, Promise.resolve("once")), "r1")).toBe("once");
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
+
+  it("rejects when the run is stopped while waiting", async () => {
+    const controller = new AbortController();
+    const waiting = waitForReply(scopeOf(controller.signal, new Promise(() => undefined)), "r2");
+    controller.abort();
+    expect(await waiting).toBe(REJECTED_ANSWER);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
   });
 });

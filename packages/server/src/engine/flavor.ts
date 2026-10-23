@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { isApiRuntime, isLocalBaseUrl, runtimeInfo, type ApiRuntimeId } from "@branchboard/core";
+import { isApiRuntime, runtimeInfo, type ApiRuntimeId } from "@branchboard/core";
 import type { ChannelContents } from "../channel";
 import { engineVersionOf } from "../channel";
 import type { CredentialStore } from "../credentials";
@@ -158,7 +158,5 @@ export const createEngine = ({ dataDirectory, installer, channelContents, creden
 
   return { pool, version };
 };
-
-export const hasLocalAddress = (baseUrl: string): boolean => isLocalBaseUrl(baseUrl);
 
 export const resetEngineHome = (dataDirectory: string) => rmSync(engineHomeDirectory(dataDirectory), { recursive: true, force: true });

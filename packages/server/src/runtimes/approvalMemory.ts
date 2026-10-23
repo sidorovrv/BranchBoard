@@ -7,8 +7,13 @@ export const ALLOWED_ANSWERS = ["once", "always"];
 export const waitForReply = (scope: RunScope, requestId: string): Promise<string> => {
   const reply = scope.waitForAnswer(requestId);
   if (scope.signal.aborted) return Promise.resolve(REJECTED_ANSWER);
-  const aborted = new Promise<string>((resolve) => scope.signal.addEventListener("abort", () => resolve(REJECTED_ANSWER), { once: true }));
-  return Promise.race([reply, aborted]);
+  let stopWaiting: () => void = () => undefined;
+  const aborted = new Promise<string>((resolve) => {
+    const onAbort = () => resolve(REJECTED_ANSWER);
+    scope.signal.addEventListener("abort", onAbort, { once: true });
+    stopWaiting = () => scope.signal.removeEventListener("abort", onAbort);
+  });
+  return Promise.race([reply, aborted]).finally(stopWaiting);
 };
 
 export const createApprovalMemory = () => {

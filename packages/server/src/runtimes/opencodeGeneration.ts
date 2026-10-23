@@ -1,10 +1,10 @@
 import { log } from "../log";
 import { locateOpencode, locateOpencode2, type Location } from "./opencodeLocator";
-import { spawnExecutable } from "./spawnProcess";
+import { runCommand } from "./spawnProcess";
 
 export type OpencodeGeneration = 1 | 2;
 
-const VERSION_TIMEOUT_MS = 10000;
+const VERSION_TIMEOUT_MS = 15000;
 const VERSION_PATTERN = /(\d+)\.\d+\.\d+/;
 
 const majorVersions = new Map<string, number>();
@@ -15,24 +15,9 @@ export const majorVersionOf = (versionOutput: string): number | undefined => {
   return major === undefined ? undefined : Number(major);
 };
 
-const readVersionOutput = (executable: string): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const child = spawnExecutable(executable, ["--version"], { cwd: process.cwd(), env: process.env });
-    let output = "";
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`no version within ${VERSION_TIMEOUT_MS}ms`));
-    }, VERSION_TIMEOUT_MS);
-    child.stdout?.on("data", (chunk) => (output += chunk));
-    child.on("error", reject);
-    child.on("close", () => {
-      clearTimeout(timer);
-      resolve(output);
-    });
-  });
-
 const generationOfExecutable = async (executable: string): Promise<OpencodeGeneration> => {
-  const major = majorVersionOf(await readVersionOutput(executable));
+  const { stdout } = await runCommand(executable, ["--version"], { cwd: process.cwd(), env: process.env, timeoutMs: VERSION_TIMEOUT_MS });
+  const major = majorVersionOf(stdout);
   if (major === undefined) throw new Error("the version output has no number");
   majorVersions.set(executable, major);
   return major >= 2 ? 2 : 1;

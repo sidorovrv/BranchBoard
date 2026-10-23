@@ -32,7 +32,6 @@ export interface Action {
   icons: (context: ActionContext) => IconName[];
   hint?: (context: ActionContext) => string;
   isActive?: (context: ActionContext) => boolean;
-  shortcut?: string;
   scope: "node" | "global";
   isAvailable: (context: ActionContext) => boolean;
   run: (context: ActionContext) => void | Promise<unknown>;
@@ -53,7 +52,13 @@ export const createAndFocus = async (command: Record<string, unknown>) => {
   }
 };
 
-const republishHint = (tokens: number): string => (tokens === 0 ? "" : `republishes ~${formatTokens(tokens)} tokens of context`);
+export const openNewBoard = async (boardId: string) => {
+  await useBoard.getState().loadBoards();
+  await useBoard.getState().openBoard(boardId);
+  await createAndFocus({ type: "reply", parentIds: [] });
+};
+
+const republishHint =(tokens: number): string => (tokens === 0 ? "" : `republishes ~${formatTokens(tokens)} tokens of context`);
 
 const childHint = (_context: ActionContext, parentIds: string[]): string => republishHint(estimateChildRepublication(graph(), useBoard.getState().view.parts, parentIds));
 
@@ -63,7 +68,7 @@ const describeRepublication = (edit: GraphEdit): string | undefined => {
   const lines = estimateRepublication(graph(), useBoard.getState().view.parts, edit)
     .filter((entry) => entry.tokens > 0 || entry.staleCount > 0)
     .map((entry) => {
-      const stale = entry.staleCount > 0 ? `, ${entry.staleCount} answer${entry.staleCount === 1 ? "" : "s"} go stale` : "";
+      const stale = entry.staleCount > 0 ? `, ${entry.staleCount} ${entry.staleCount === 1 ? "answer goes" : "answers go"} stale` : "";
       return `“${graph().nodes[entry.nodeId].title}” will re-send ~${formatTokens(entry.tokens)} tokens of context${stale}`;
     });
   return lines.length > 0 ? lines.join("; ") : undefined;
@@ -135,7 +140,6 @@ export const actions: Action[] = [
     id: "stop",
     label: () => "Stop",
     icons: () => ["stop"],
-    shortcut: "Escape",
     scope: "node",
     isAvailable: ({ node }) => node !== undefined && ["queued", "running", "awaiting_approval"].includes(node.status),
     run: ({ node }) => sendBoardCommand({ type: "abort", nodeId: node!.id }),
@@ -195,7 +199,6 @@ export const actions: Action[] = [
     id: "delete",
     label: () => "Delete",
     icons: () => ["delete"],
-    shortcut: "Delete",
     scope: "node",
     isAvailable: ({ node }) => node !== undefined,
     run: ({ node }) => sendBoardCommand({ type: "deleteNodes", ids: [node!.id] }),
@@ -271,9 +274,10 @@ export const actions: Action[] = [
     scope: "global",
     isAvailable: () => true,
     run: () => {
-      const input = document.querySelector<HTMLInputElement>(".search-box input");
+      const input = document.querySelector<HTMLInputElement>(".search-panel input");
       if (input) return input.select();
-      useBoard.getState().setSearchOpen(true);
+      useSettings.getState().update("isContextPanelOpen", true);
+      useBoard.getState().setSidePanelTab("search");
     },
   },
   {
@@ -312,10 +316,20 @@ const runGlobalAction = (actionId: string | undefined): boolean => {
   return true;
 };
 
+const stopSelectedRun = (target: HTMLElement | null): boolean => {
+  const { selectedIds, view } = useBoard.getState();
+  const node = selectedIds.length === 1 ? view.graph.nodes[selectedIds[0]] : undefined;
+  const stop = actions.find((candidate) => candidate.id === "stop")!;
+  if (!target?.closest(".react-flow") || !stop.isAvailable({ node })) return false;
+  void stop.run({ node });
+  return true;
+};
+
 export const handleShortcut = (event: KeyboardEvent): boolean => {
-  if (useBoard.getState().isTourOpen) return false;
+  if (useBoard.getState().isTourOpen || event.defaultPrevented) return false;
   const target = event.target as HTMLElement | null;
   const isTyping = Boolean(target && (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable));
+  if (event.key === "Escape" && !isTyping && stopSelectedRun(target)) return true;
   const pressed = keyBindingOf(event);
   const actionId = pressed ? boundActionId(currentKeybinds(), pressed) : undefined;
   if (isTyping && !(actionId === "search" && pressed?.startsWith("Ctrl+"))) return false;

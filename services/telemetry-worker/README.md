@@ -17,9 +17,17 @@ npx wrangler deploy
 
 `wrangler d1 create` prints the database id; enter it as `database_id` in `wrangler.toml`. `wrangler deploy` prints the `*.workers.dev` address for `TELEMETRY_URL` in `packages/server/src/telemetry.ts`.
 
+`GET /v1/channel?v=&os=&arch=&node=&install=&auto=&first=` returns `channel.json` from the public repository and adds 1 to the `update_checks` row of the receive date and these values. Values outside the lists in `packages/core/src/updateCheck.ts` are not counted. GitHub errors answer 502.
+
 ## Query
 
-Daily active installs by version:
+Daily active installs by version from the update checks:
+
+```powershell
+npx wrangler d1 execute branchboard-telemetry --remote --command "SELECT day, version, SUM(total) AS checks, SUM(total * first) AS new_installs FROM update_checks GROUP BY day, version ORDER BY day"
+```
+
+Daily active installs by version from the usage payloads:
 
 ```powershell
 npx wrangler d1 execute branchboard-telemetry --remote --command "SELECT json_extract(payload_json,'$.day') AS day, json_extract(payload_json,'$.app.version') AS version, COUNT(*) FROM daily GROUP BY day, version ORDER BY day"

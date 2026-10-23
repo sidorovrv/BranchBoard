@@ -1,26 +1,28 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { type Server } from "node:http";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join } from "node:path";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { WebSocketServer, type WebSocket } from "ws";
 import { homedir } from "node:os";
-import { describeContext, embedFiles, encoders, hasCredential, isRuntimeId, isSensitivePath, redactSecrets, SENSITIVE_COMMANDS, summariseCommand, updateFor, isNewerVersion, type AboutInfo, type Id } from "@branchboard/core";
+import { describeContext, embedFiles, encoders, hasCredential, isRuntimeId, redactSecrets, SENSITIVE_COMMANDS, summariseCommand, updateFor, isNewerVersion, type AboutInfo, type Id } from "@branchboard/core";
 import { createAttachmentStore, MAX_ATTACHMENT_BYTES } from "./attachments";
 import { BODY_CAPS, commandCapOf, readCappedBody } from "./bodies";
 import { createCodeFileSync } from "./codeFileSync";
+import { readJsonFile, writeJsonFile } from "./jsonFile";
 import { createBoardService, RefusedError, SensitiveFilesError } from "./boards";
 import { createTelemetry, type PostPayload } from "./telemetry";
 import { createUsage } from "./usage";
 import { dispatchCommand, type CommandContext } from "./commands";
 import { openRepository } from "./db";
 import { pickPath } from "./folderPicker";
-import { browseFolder, insideWorkspace } from "./pathBrowser";
+import { browseFolder, insideWorkspace, requireLocalFolder } from "./pathBrowser";
 import { createHub } from "./hub";
 import { currentLogFile, log, readLogTail } from "./log";
-import { downloadNameOf, existingWorkspaceFile, PREVIEW_POLICY, previewContentTypeOf, searchWorkspaceFiles, servedFileOf } from "./workspaceFiles";
+import { downloadNameOf, existingWorkspaceFile, isSensitiveWorkspaceFile, PREVIEW_POLICY, previewContentTypeOf, searchWorkspaceFiles, servedFileOf } from "./workspaceFiles";
 import { buildReport } from "./report";
+import { createDiagnostics, DIAGNOSTIC_SECTIONS, isDiagnosticSection } from "./diagnostics";
 import { createRunLog } from "./runLog";
 import { createPerfLog } from "./perfLog";
 import { createRunService, type Runtimes } from "./run/pipeline";
@@ -33,12 +35,12 @@ import { createCodexRuntime } from "./runtimes/codex";
 import { opencodeRuntime } from "./runtimes/opencodeAuto";
 import { opencode2Runtime } from "./runtimes/opencode2";
 import { provideServerAddress } from "./runtimes/opencodeServer";
-import { createCapabilityStore } from "./capabilities";
+import { createCapabilityStore, loggedPathOf } from "./capabilities";
 import { createCredentialStore } from "./credentials";
 import { createEngine } from "./engine/flavor";
 import { createEngineInstaller } from "./engine/install";
 import { engineRuntime } from "./engine/runtime";
-import { createRemoteChannel } from "./channel";
+import { createRemoteChannel, currentUpdateCheckFacts } from "./channel";
 import { dataDirectoryId } from "./dataDirectory";
 import { VERSION, installedVersionOf } from "./version";
 import { INSTANCE_PATH, isUpgradeAllowed, noFramingMiddleware, securityMiddleware, type SecurityConfig } from "./security";
@@ -66,13 +68,24 @@ export const createApp = (options: AppOptions) => {
   const boards = createBoardService(repository, hub, usage);
   const approvals = options.approvals ?? createApprovalBroker();
   const limits = options.runtimes ? createLimitsStore() : createLimitsStore(join(limitsDirectory, "limits.json"), join(limitsDirectory, "limits-history.jsonl"));
-  const channel = createRemoteChannel({ dataDirectory: limitsDirectory });
+  const channel = createRemoteChannel({ dataDirectory: limitsDirectory, updateCheckFacts: () => currentUpdateCheckFacts(currentVersion) });
+  const settingsFile = process.env.BRANCHBOARD_SETTINGS_FILE || join(limitsDirectory, "settings.json");
+  const diagnostics = createDiagnostics({
+    dataDirectory: limitsDirectory,
+    version: currentVersion,
+    settingsFile,
+    channelStatus: channel.status,
+    runtimes: async () => (await collectHealth()).runtimes,
+    models: async () => Promise.all(projectTargets().map(async ({ mode, workspacePath }) => ({ runtime: mode, models: (await runs.catalogOf(mode, workspacePath))?.models ?? [] }))),
+    redaction: () => redactionContext(),
+  });
   const claudeRuntime = createClaudeRuntime({
     approvals,
     limits: limits.of("claude"),
     serverUrl: `http://127.0.0.1:${options.security.port}`,
-    extraModels: () => [...channel.contents().claudeModels, ...channel.seenModels()],
+    extraModels: () => [...channel.contents().claudeModels.map((model) => ({ ...model, source: "channel" as const })), ...channel.seenModels().map((model) => ({ ...model, source: "seen" as const }))],
     noteModelSeen: channel.recordSeenModel,
+    diagnostics,
   });
   const credentials = createCredentialStore(limitsDirectory);
   provideServerAddress(credentials.serverAddress);
@@ -91,7 +104,7 @@ export const createApp = (options: AppOptions) => {
   const runLog = createRunLog(join(dirname(options.databasePath), "run-logs"));
   const perfLog = createPerfLog(join(dirname(options.databasePath), "perf"));
   const costs = createCostStore(options.runtimes ? undefined : join(limitsDirectory, "costs-history.jsonl"));
-  const runs = createRunService(boards, runtimes, attachments, runLog, costs, usage);
+  const runs = createRunService(boards, runtimes, attachments, runLog, costs, usage, () => redactionContext());
   boards.recoverInterruptedRuns();
   const telemetry = createTelemetry({ dataDirectory: limitsDirectory, usage, boards, version: currentVersion, isOffline: () => channel.status().isOffline, post: options.telemetryPost, clock: options.clock });
   const codeFileSync = createCodeFileSync(boards);
@@ -113,7 +126,7 @@ export const createApp = (options: AppOptions) => {
   });
   app.onError((error, honoContext) => {
     const status = errorStatus(error);
-    const where = `${honoContext.req.method} ${honoContext.req.path}`;
+    const where = `${honoContext.req.method} ${loggedPathOf(honoContext.req.path)}`;
     if (status === 409) log.warn("http", `Refused ${where}: ${error.message}`);
     else log.error("http", `Failed ${where}: ${error.message}`, error);
     return honoContext.json({ error: error.message, ...(error instanceof SensitiveFilesError ? { sensitiveFiles: error.files } : {}) }, status);
@@ -121,6 +134,7 @@ export const createApp = (options: AppOptions) => {
 
   app.post("/api/commands", async (honoContext) => {
     const command = (await readCappedBody(honoContext.req.raw, commandCapOf(honoContext.req.raw), "json")) as Record<string, unknown> & { type: string };
+    if (typeof command !== "object" || command === null || typeof command.type !== "string") throw new RefusedError("A command is a JSON object with a type");
     log.info("command", `${command.type}${command.boardId ? ` board=${command.boardId}` : ""}`, summariseCommand(command));
     if (!SENSITIVE_COMMANDS.has(command.type)) log.debug("command", `${command.type} (full)`, command.type === "importBoard" ? undefined : command);
     return honoContext.json(await dispatchCommand(context, command));
@@ -131,7 +145,9 @@ export const createApp = (options: AppOptions) => {
     return honoContext.body(null, 204);
   });
   app.post("/mcp/:secret", async (honoContext) => {
-    const reply = await approvals.handle(honoContext.req.param("secret"), await readCappedBody(honoContext.req.raw, BODY_CAPS.mcp, "json"));
+    const secret = honoContext.req.param("secret");
+    if (!approvals.isRegistered(secret)) return honoContext.body(null, 404);
+    const reply = await approvals.handle(secret, await readCappedBody(honoContext.req.raw, BODY_CAPS.mcp, "json"));
     return reply.body === undefined ? honoContext.body(null, reply.status) : honoContext.json(reply.body, reply.status);
   });
   app.on(["GET", "DELETE"], "/mcp/:secret", (honoContext) => honoContext.body(null, 405));
@@ -183,6 +199,13 @@ export const createApp = (options: AppOptions) => {
     };
     return honoContext.json(about);
   });
+  app.get("/api/settings", (honoContext) => honoContext.json(readJsonFile<Record<string, unknown> | null>(settingsFile, null)));
+  app.put("/api/settings", async (honoContext) => {
+    const settings = await readCappedBody(honoContext.req.raw, BODY_CAPS.settings, "json");
+    if (typeof settings !== "object" || settings === null || Array.isArray(settings)) throw new RefusedError("Settings must be a JSON object");
+    writeJsonFile(settingsFile, settings);
+    return honoContext.body(null, 204);
+  });
   app.get("/api/telemetry", async (honoContext) => honoContext.json(await telemetry.overview()));
   app.get(INSTANCE_PATH,(honoContext) => honoContext.json({ app: "branchboard", dataDirId: dataDirectoryId(dirname(options.databasePath)) }));
   app.get("/api/boards", (honoContext) => honoContext.json(boards.listBoards()));
@@ -205,9 +228,10 @@ export const createApp = (options: AppOptions) => {
         return "";
       }
     })();
-    const path = boardId && !isSensitivePath(requested) ? existingWorkspaceFile(boards.stateOf(boardId).board.workspacePath, requested) : undefined;
+    const workspacePath = boardId ? boards.stateOf(boardId).board.workspacePath : undefined;
+    const path = workspacePath ? existingWorkspaceFile(workspacePath, requested) : undefined;
     const contentType = path ? previewContentTypeOf(path) : undefined;
-    if (!path || !contentType || statSync(path).size > MAX_ATTACHMENT_BYTES) return honoContext.body(null, 404);
+    if (!path || !contentType || isSensitiveWorkspaceFile(workspacePath!, requested, path) || statSync(path).size > MAX_ATTACHMENT_BYTES) return honoContext.body(null, 404);
     return honoContext.body(readFileSync(path), 200, {
       "content-type": contentType,
       "x-content-type-options": "nosniff",
@@ -237,14 +261,11 @@ export const createApp = (options: AppOptions) => {
       if (!project) throw new RefusedError("That project no longer exists");
       return project.workspacePath;
     }
-    if (folder === undefined) return process.cwd();
-    if (!isAbsolute(folder) || /^[\\/]{2}/.test(folder) || !existsSync(folder) || !statSync(folder).isDirectory()) throw new RefusedError("That is not an existing local folder");
-    return folder;
+    return folder === undefined ? process.cwd() : requireLocalFolder(folder);
   };
+  const projectTargets = () => [...new Map(boards.listProjects().filter((project) => project.mode !== "fake").map((project) => [project.mode, { mode: project.mode, workspacePath: project.workspacePath }])).values()];
   const collectHealth = async (requested?: string, workspacePath?: string, isFresh = false) => {
-    const targets = requested
-      ? [{ mode: requested as keyof Runtimes, workspacePath: workspacePath ?? process.cwd() }]
-      : [...new Map(boards.listProjects().filter((project) => project.mode !== "fake").map((project) => [project.mode, { mode: project.mode, workspacePath: project.workspacePath }])).values()];
+    const targets = requested ? [{ mode: requested as keyof Runtimes, workspacePath: workspacePath ?? process.cwd() }] : projectTargets();
     const entries = await Promise.all(
       targets.map(async ({ mode, workspacePath }) => {
         const runtime = runtimes[mode];
@@ -269,13 +290,20 @@ export const createApp = (options: AppOptions) => {
     honoContext.header("content-disposition", `attachment; filename="branchboard-report-${new Date().toISOString().slice(0, 10)}.json"`);
     return honoContext.body(JSON.stringify(report, null, 2), 200, { "content-type": "application/json" });
   });
+  app.get("/api/diagnostics", async (honoContext) => {
+    const section = honoContext.req.query("section");
+    if (!isDiagnosticSection(section)) throw new RefusedError(`section must be one of: ${DIAGNOSTIC_SECTIONS.join(", ")}`);
+    return honoContext.json(await diagnostics.collect(section, { filter: honoContext.req.query("filter") || undefined }));
+  });
   app.get("/api/logs", (honoContext) => {
-    const lines = readLogTail(Math.min(1000, Number(honoContext.req.query("tail") ?? 300) || 300), honoContext.req.query("filter") || undefined);
+    const lines = readLogTail(Math.min(1000, Math.max(1, Math.floor(Number(honoContext.req.query("tail") ?? 300) || 300))), honoContext.req.query("filter") || undefined);
     return honoContext.json({ lines: lines.map((line) => redactSecrets(line, redactionContext())) });
   });
-  app.get("/api/boards/:id/graph", (honoContext) => {
-    const state = boards.stateOf(honoContext.req.param("id"));
-    return honoContext.json({ board: state.board, graph: state.graph, parts: state.parts, requests: state.requests, savedAt: state.board.updatedAt });
+  app.get("/api/boards/:id/graph", (honoContext) => honoContext.body(boards.viewJsonOf(honoContext.req.param("id")), 200, { "content-type": "application/json" }));
+  app.get("/api/boards/:id/tool-output", (honoContext) => {
+    const output = boards.toolOutputOf(honoContext.req.param("id"), honoContext.req.query("node") ?? "", honoContext.req.query("part") ?? "");
+    if (output === undefined) throw new RefusedError("Tool output not found");
+    return honoContext.json({ output: String(output) });
   });
   app.get("/api/nodes/:id/context", (honoContext) => {
     const state = boards.stateOf(honoContext.req.query("board") ?? "");
@@ -332,7 +360,7 @@ export const createApp = (options: AppOptions) => {
   const { webRoot } = options;
   if (webRoot && existsSync(webRoot)) {
     app.use("/*", serveStatic({ root: webRoot }));
-    app.get("*", (honoContext) => honoContext.html(readFileSync(join(webRoot, "index.html"), "utf8")));
+    app.get("*", (honoContext) => (honoContext.req.path.startsWith("/api/") ? honoContext.json({ error: "Not found" }, 404) : honoContext.html(readFileSync(join(webRoot, "index.html"), "utf8"))));
   }
 
   const openClients = new Set<WebSocket>();

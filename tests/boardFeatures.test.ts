@@ -17,6 +17,7 @@ import {
   planSession,
   renderInput,
   satelliteIdsOf,
+  subagentIdsOf,
   type BoardView,
   type GraphNode,
   type TrashListing,
@@ -94,7 +95,7 @@ afterAll(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-describe("AL-1 provider errors", () => {
+describe("provider errors", () => {
   it("a run that only fails ends as an error with the message kept", async () => {
     const boardId = await newBoard("errors");
     const nodeId = (await command({ type: "reply", boardId, prompt: "/fail now" })).json.nodeId;
@@ -120,7 +121,7 @@ describe("AL-1 provider errors", () => {
   });
 });
 
-describe("AL-2 attachments", () => {
+describe("attachments", () => {
   const attachment = (mime: string, size: number) => ({ id: "a", name: "f", mime, size });
 
   it("estimates images with a fixed cost and other files by size", () => {
@@ -182,7 +183,7 @@ describe("AL-2 attachments", () => {
   });
 });
 
-describe("AL-3 and AL-4 subagents and todos", () => {
+describe("subagents and todos", () => {
   it("shows the todo list as a part that updates in place and keeps it out of the context", async () => {
     const boardId = await newBoard("todos");
     const nodeId = (await command({ type: "reply", boardId, prompt: "/todo plan" })).json.nodeId;
@@ -208,6 +209,7 @@ describe("AL-3 and AL-4 subagents and todos", () => {
     expect(satellite.x).toBeGreaterThanOrEqual(parent.x + parent.w);
     expect(satellite.y).toBe(parent.y);
     expect(await textOf(boardId, satellite.id)).toBe("helper says hi");
+    expect(current.parts[parentId].filter((part) => part.type === "tool").map((part) => ({ tool: part.meta?.tool, text: part.text, subagentIds: subagentIdsOf(part) }))).toEqual([{ tool: "Subagent", text: "Helper", subagentIds: [satellite.id] }]);
     expect(liveEdges(current.graph).filter((edge) => edge.fromId === satellite.id || edge.toId === satellite.id)).toHaveLength(0);
     const refused = await command({ type: "connect", boardId, fromId: satellite.id, toId: parentId });
     expect(refused.status).toBe(409);
@@ -242,7 +244,7 @@ describe("AL-3 and AL-4 subagents and todos", () => {
   });
 });
 
-describe("AL-5 slash commands and mentions", () => {
+describe("slash commands and mentions", () => {
   it("expands a catalog command with its arguments", () => {
     const commands = [{ name: "review", template: "Please review: $ARGUMENTS" }, { name: "pair", template: "First $1 then $2" }, { name: "plain", template: "Do the thing." }];
     expect(expandSlashCommand("/review the parser", commands).text).toBe("Please review: the parser");
@@ -301,7 +303,7 @@ describe("AL-5 slash commands and mentions", () => {
   });
 });
 
-describe("AL-6 pinning", () => {
+describe("pinning", () => {
   it("a pinned node ignores moves and resizes but unpinning frees it", async () => {
     const boardId = await newBoard("pins");
     const nodeId = (await command({ type: "reply", boardId, prompt: "", run: false, position: { x: 10, y: 20 } })).json.nodeId;
@@ -322,7 +324,7 @@ describe("AL-6 pinning", () => {
   });
 });
 
-describe("AL-7 trash", () => {
+describe("trash", () => {
   it("restores a deleted node with the edges that went with it", async () => {
     const boardId = await newBoard("restore nodes");
     const parentId = (await command({ type: "reply", boardId, prompt: "parent" })).json.nodeId;
@@ -414,7 +416,7 @@ describe("AL-7 trash", () => {
   });
 });
 
-describe("AL-9 summaries", () => {
+describe("summaries", () => {
   const summarisedGraph = () => {
     let graph = buildGraph(["a", "b", "c"], [["a", "b"], ["b", "c"]]);
     const done = (id: string) => ({ id, status: "done" as const, contextHash: undefined, runtimeRef: undefined });
@@ -508,7 +510,7 @@ describe("AL-9 summaries", () => {
   });
 });
 
-describe("AL-10 budgets", () => {
+describe("budgets", () => {
   it("measures usage per board and classifies it against the budget", async () => {
     expect(budgetStateOf(10, undefined)).toBe("none");
     expect(budgetStateOf(10, 100)).toBe("ok");
@@ -539,7 +541,7 @@ describe("AL-10 budgets", () => {
   });
 });
 
-describe("AL-11 health and logs", () => {
+describe("health and logs", () => {
   it("reports the health of a runtime and its diagnostics", async () => {
     const health = (await request(`/api/health?runtime=fake&workspace=${encodeURIComponent(workspace)}`)).json;
     expect(health.runtimes).toHaveLength(1);

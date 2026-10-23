@@ -128,7 +128,6 @@ export interface GraphNode {
   comments?: NodeComment[];
   pinned?: boolean;
   satelliteOf?: Id;
-  satelliteRunStartedAt?: number;
   summary?: NodeSummary;
   deleted: boolean;
   deletedAt?: number;
@@ -245,11 +244,11 @@ export interface PendingRequest {
 
 export type RunEvent =
   | { type: "part.delta"; partKey: string; partType: "text" | "reasoning"; text: string }
-  | { type: "tool.started"; partKey: string; tool: string; description: string; input?: unknown }
+  | { type: "tool.started"; partKey: string; tool: string; description: string; input?: unknown; subagentId?: Id }
   | { type: "tool.done"; partKey: string; output: string; isError?: boolean }
   | { type: "request.opened"; request: Omit<PendingRequest, "boardId" | "nodeId" | "status" | "createdAt"> }
   | { type: "todos"; items: TodoItem[] }
-  | { type: "subagent.started"; key: string; title: string; agent?: string; prompt?: string }
+  | { type: "subagent.started"; key: string; partKey: string; title: string; agent?: string; prompt?: string }
   | { type: "prompt"; text: string }
   | { type: "subagent.event"; key: string; event: RunEvent }
   | { type: "usage"; usage: Usage }
@@ -290,10 +289,13 @@ export interface BoardView {
   savedAt: number;
 }
 
+export type ModelSource = "builtin" | "alias" | "cli" | "channel" | "seen";
+
 export interface CatalogModel {
   id: string;
   name: string;
   provider: string;
+  source?: ModelSource;
   contextWindow?: number;
   efforts?: string[];
 }

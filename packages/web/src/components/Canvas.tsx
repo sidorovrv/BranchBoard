@@ -25,6 +25,7 @@ import { createFileNode, droppedFiles, hasFiles, pastedFiles, pasteFiles } from 
 import { AlignmentGuides, useDragSnap } from "../dragSnap";
 import { useGraphWithLiveMoves, useLiveMoves } from "../liveMoves";
 import { isMacPlatform } from "../platform";
+import { useDetachedSubagentIds } from "../detachedSubagents";
 import { useSettings } from "../settings";
 import { useKeyboardPan } from "../keyboardPan";
 import { loadViewport, saveViewport } from "../savedViewport";
@@ -39,6 +40,7 @@ const edgeTypes = { wire: WireEdge };
 
 const FOCUS_DURATION_MS = 400;
 const FOCUS_MAX_ZOOM = 1;
+const FOCUS_WAIT_FRAMES = 30;
 const MAX_ZOOM = 12;
 
 const ZoomReadout = () => {
@@ -122,6 +124,7 @@ const useWheelOverNodes = () => {
 const useDerivedNodes = (): Node[] => {
   const graph = useGraphWithLiveMoves();
   const isInline = useSettings((state) => state.settings.subagentDisplay) === "inline";
+  const detachedIds = useDetachedSubagentIds();
   return useMemo(() => {
     const hidden = hiddenByCollapse(graph);
     return liveNodes(graph).map((node) => ({
@@ -129,10 +132,10 @@ const useDerivedNodes = (): Node[] => {
       type: "bb",
       position: { x: node.x, y: node.y },
       data: { nodeId: node.id },
-      hidden: hidden.has(node.id) || (node.satelliteOf !== undefined && (isInline || hidden.has(node.satelliteOf))),
+      hidden: hidden.has(node.id) || (node.satelliteOf !== undefined && ((isInline && !detachedIds.includes(node.id)) || hidden.has(node.satelliteOf))),
       draggable: !node.pinned,
     }));
-  }, [graph, isInline]);
+  }, [graph, isInline, detachedIds]);
 };
 
 const LIVE_MOVE_SETTLE_MS = 400;
@@ -142,6 +145,7 @@ const useDerivedEdges = (): Edge[] => {
   const selectedIds = useBoard((state) => state.selectedIds);
   const direction = useSettings((state) => state.settings.flowDirection);
   const isInline = useSettings((state) => state.settings.subagentDisplay) === "inline";
+  const detachedIds = useDetachedSubagentIds();
   return useMemo(() => {
     const hidden = hiddenByCollapse(graph);
     const highlighted = selectedIds.length === 1 ? ancestorEdgeIds(graph, selectedIds[0]) : undefined;
@@ -174,10 +178,10 @@ const useDerivedEdges = (): Edge[] => {
       deletable: false,
       focusable: false,
       reconnectable: false,
-      hidden: isInline || hidden.has(link.parentId),
+      hidden: (isInline && !detachedIds.includes(link.satelliteId)) || hidden.has(link.parentId),
     }));
     return [...wires, ...satelliteLinks];
-  }, [graph, selectedIds, direction, isInline]);
+  }, [graph, selectedIds, direction, isInline, detachedIds]);
 };
 
 export const Canvas = () => {
@@ -222,9 +226,14 @@ export const Canvas = () => {
     (id: string) => {
       useBoard.getState().select([id]);
       setNodes((current) => current.map((node) => ({ ...node, selected: node.id === id })));
-      void fitView({ nodes: [{ id }], duration: FOCUS_DURATION_MS, maxZoom: FOCUS_MAX_ZOOM });
+      const fitOnceDrawn = (framesLeft: number) => {
+        const target = getNode(id);
+        if ((target?.hidden || !target?.measured?.width) && framesLeft > 0) return void requestAnimationFrame(() => fitOnceDrawn(framesLeft - 1));
+        void fitView({ nodes: [{ id }], duration: FOCUS_DURATION_MS, maxZoom: FOCUS_MAX_ZOOM });
+      };
+      fitOnceDrawn(FOCUS_WAIT_FRAMES);
     },
-    [fitView],
+    [fitView, getNode],
   );
 
   const zoomOntoNode = useCallback(
@@ -238,7 +247,9 @@ export const Canvas = () => {
     [getNode, setCenter, viewWidth, viewHeight],
   );
 
-  useEffect(() => useBoard.getState().registerFocus(focus), [focus]);
+  useEffect(() => {
+    useBoard.getState().registerFocus(focus);
+  }, [focus]);
 
   useEffect(() => {
     const onMouseDown = (event: MouseEvent) => void handleSidePointer(event, zoomOntoNode);

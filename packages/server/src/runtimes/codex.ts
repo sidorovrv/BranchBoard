@@ -390,6 +390,7 @@ export const createCodexRuntime = (overrides: Partial<CodexDependencies> = {}): 
 
   const runOneShotTurn = async (rpc: JsonRpcProcess, threadId: string, begin: () => Promise<unknown>, signal?: AbortSignal): Promise<TurnOutcome> => {
     let finish: (outcome: TurnOutcome | Error) => void = () => undefined;
+    let isCancelled = false;
     const ended = new Promise<TurnOutcome>((resolve, reject) => {
       let text = "";
       finish = (outcome) => {
@@ -405,15 +406,17 @@ export const createCodexRuntime = (overrides: Partial<CodexDependencies> = {}): 
         if (message.method === "item/completed" && message.params.item?.type === "agentMessage") text = String(message.params.item.text ?? "");
         if (message.method === "turn/completed") finish({ text, status: message.params.turn?.status, error: message.params.turn?.error });
       });
-      const aborted = () => finish(new Error("Text generation was stopped"));
-      const timer = setTimeout(() => finish(new Error("codex did not finish in time")), ONE_SHOT_TIMEOUT_MS);
+      const aborted = () => (isCancelled = true, finish(new Error("Text generation was stopped")));
+      const timer = setTimeout(() => (isCancelled = true, finish(new Error("codex did not finish in time"))), ONE_SHOT_TIMEOUT_MS);
       signal?.addEventListener("abort", aborted, { once: true });
     });
     oneShotTurns++;
+    let turnId: unknown;
     try {
-      await begin();
+      turnId = ((await begin()) as { turn?: { id?: unknown } } | undefined)?.turn?.id;
       return await ended;
     } catch (error) {
+      if (isCancelled && typeof turnId === "string") void rpc.request("turn/interrupt", { threadId, turnId }).catch(() => undefined);
       finish(error instanceof Error ? error : new Error(String(error)));
       ended.catch(() => undefined);
       throw error;

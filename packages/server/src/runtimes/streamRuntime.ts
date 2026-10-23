@@ -66,6 +66,7 @@ export const createStreamRuntime = <Handle, State extends { isFinished: boolean 
       };
       const state = spec.createState(handle);
       source = await spec.open(handle, input, scope, { session: session as Session, state, writeRunFile });
+      if (scope.signal.aborted) return stop();
       void pump(source, state, spec, channel.push, scope.signal)
         .catch((error) => channel.push({ type: "failure", message: error instanceof Error ? error.message : String(error) }))
         .finally(channel.close);

@@ -18,7 +18,7 @@ import { sanitizeSchema } from "../packages/web/src/kit/markdownSchema";
 const PORT = 47311;
 const ACCESS = "b".repeat(64);
 const trusted = { host: `127.0.0.1:${PORT}`, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/json" };
-const directory = mkdtempSync(join(tmpdir(), "branchboard-phase3-"));
+const directory = mkdtempSync(join(tmpdir(), "branchboard-export-recovery-"));
 const workspace = join(directory, "workspace");
 let server: ReturnType<typeof createApp>;
 let boardId = "";
@@ -62,7 +62,7 @@ afterAll(() => {
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
 
-describe("R-3 export with files", () => {
+describe("export with files", () => {
   it("round-trips an image and a text file with their bytes", async () => {
     const image = await upload("pic.png", PNG, "image/png");
     const text = await upload("notes.txt", "hello world", "text/plain");
@@ -120,7 +120,7 @@ describe("R-3 export with files", () => {
   });
 });
 
-describe("R-1a bug report", () => {
+describe("bug report", () => {
   it("keeps secrets, prompts and home folders out of the bundle", async () => {
     const secret = `sk-ant-${"a1b2c3d4".repeat(4)}`;
     mkdirSync(join(directory, "run-logs"), { recursive: true });
@@ -143,7 +143,7 @@ describe("R-1a bug report", () => {
   });
 });
 
-describe("R-1b recovery actions", () => {
+describe("recovery actions", () => {
   it("marks a lost session and offers to resend the context as text", async () => {
     const root = (await command({ type: "reply", boardId, prompt: "start", run: false })).json.nodeId;
     const child = (await command({ type: "reply", boardId, parentIds: [root], prompt: "/gone" })).json.nodeId;
@@ -176,7 +176,7 @@ describe("R-1b recovery actions", () => {
   });
 });
 
-describe("S-5 workspace queries", () => {
+describe("workspace queries", () => {
   it("accepts a board, a project or an existing local folder, nothing else", async () => {
     expect((await request(`/api/runtime/catalog?board=${boardId}`)).status).toBe(200);
     expect((await request(`/api/runtime/catalog?mode=fake&project=${projectId}`)).status).toBe(200);
@@ -189,7 +189,7 @@ describe("S-5 workspace queries", () => {
   });
 });
 
-describe("S-6 Windows command shell quoting", () => {
+describe("Windows command shell quoting", () => {
   it("doubles a trailing backslash run and refuses metacharacters", () => {
     expect(quoteForCmdShell("C:\\a b\\")).toBe('"C:\\a b\\\\"');
     expect(quoteForCmdShell("C:\\a\\\\")).toBe('"C:\\a\\\\\\\\"');
@@ -198,7 +198,7 @@ describe("S-6 Windows command shell quoting", () => {
   });
 });
 
-describe("S-7 executable lookup", () => {
+describe("executable lookup", () => {
   it("never searches relative or empty PATH entries", () => {
     const seen: string[] = [];
     const result = locateExecutable(
@@ -210,7 +210,7 @@ describe("S-7 executable lookup", () => {
   });
 });
 
-describe("S-9 rendering", () => {
+describe("rendering", () => {
   it("escapes code before it reaches innerHTML", () => {
     const hostile = '<img src=x onerror=alert(1)><script>alert(2)</script>';
     for (const language of ["html", "xml", "javascript", "typescript", "python"]) {

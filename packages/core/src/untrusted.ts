@@ -1,3 +1,4 @@
+import { isSafeChoice } from "./choices";
 import { MAX_COMMENT_CHARS, MAX_COMMENTS_PER_NODE, NODE_MAX_HEIGHT, NODE_MAX_WIDTH } from "./graph";
 import type { PartType } from "./kit/types";
 import type { Attachment, ContextMode, DocumentFile, GraphEdge, GraphNode, Id, NodeComment, NodeKind, NodeStatus, NodeSummary, Part, RollSnapshot, Usage } from "./types";
@@ -10,7 +11,6 @@ const MAX_TEXT_CHARS = 2_000_000;
 const MAX_SHORT_CHARS = 2000;
 const MAX_COORDINATE = 10_000_000;
 const MIN_NODE_SIDE = 40;
-const CHOICE_PATTERN = /^[\w.:/@+-]{1,120}$/;
 
 const NODE_KINDS: NodeKind[] = ["turn", "context", "file", "subagent", "code"];
 const NODE_STATUSES: NodeStatus[] = ["idle", "queued", "running", "awaiting_approval", "done", "error", "interrupted"];
@@ -33,9 +33,7 @@ const countOf = (value: unknown): number | undefined => {
 
 const clampedOf = (value: unknown, min: number, max: number, fallback: number): number => Math.min(max, Math.max(min, numberOf(value) ?? fallback));
 
-const choiceOf = (value: unknown): string | undefined => (typeof value === "string" && CHOICE_PATTERN.test(value) ? value : undefined);
-
-export const isSafeChoice = (value: unknown): value is string => choiceOf(value) !== undefined;
+const choiceOf = (value: unknown): string | undefined => (isSafeChoice(value) ? value : undefined);
 
 const oneOf = <T extends string>(value: unknown, allowed: T[]): T | undefined => allowed.find((candidate) => candidate === value);
 
@@ -83,7 +81,7 @@ const snapshotOf = (value: unknown): RollSnapshot | undefined => {
 
 const rollsOf = (value: unknown): Record<number, RollSnapshot> | undefined => {
   if (!isRecord(value)) return undefined;
-  const entries = Object.entries(value).flatMap(([key, snapshot]) => (countOf(Number(key)) === undefined || snapshotOf(snapshot) === undefined ? [] : [[key, snapshotOf(snapshot)]]));
+  const entries = Object.entries(value).flatMap(([key, snapshot]) => (countOf(Number(key)) === undefined || key !== String(Number(key)) || snapshotOf(snapshot) === undefined ? [] : [[key, snapshotOf(snapshot)]]));
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 };
 
@@ -138,7 +136,6 @@ export const sanitiseNode = (raw: unknown): GraphNode | undefined => {
     comments: commentsOf(raw.comments),
     pinned: raw.pinned === true ? true : undefined,
     satelliteOf: textOf(raw.satelliteOf),
-    satelliteRunStartedAt: numberOf(raw.satelliteRunStartedAt),
     summary: summaryOf(raw.summary),
     deleted: false,
   };

@@ -30,7 +30,7 @@ export const TelemetryDialog = () => {
     void setConsent(isGranted);
   };
   return (
-    <div className="dialog-backdrop">
+    <div className="dialog-backdrop telemetry-backdrop">
       <div className="dialog telemetry-dialog" role="dialog" aria-modal="true" aria-labelledby="telemetry-title">
         <div className="telemetry-header">
           <h3 id="telemetry-title">Telemetry</h3>

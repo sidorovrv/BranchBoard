@@ -3,14 +3,14 @@ import { pathToFileURL } from "node:url";
 import { ancestorFolders, readCommandSources } from "../commandFiles";
 import { activeQuestionFlags, answerValueOf, decodeAnswers, DEFAULT_PERMISSION_PRESET, isChosen, LINK_DONE_LABEL, NO_LABEL, PERMISSION_MODES, presetRules, parseQuestionSpec, REJECTED_ANSWER, SESSION_GONE_MESSAGE, UNSET_CHOICE, YES_LABEL, type Catalog, type CatalogCommand, type CatalogModel, type CredentialStatus, type PendingRequest, type QuestionKind, type QuestionSpec } from "@branchboard/core";
 import { log } from "../log";
-import { usageNative } from "./commonEvents";
-import { CUT_OFF_NOTE, failureOf, STEPS_LIMIT_MESSAGE, STEPS_LIMIT_NOTE, STREAM_ENDED_EARLY } from "./failures";
+import { numberOf, usageNative } from "./commonEvents";
+import { CUT_OFF_NOTE, failureOf, STEPS_LIMIT_MESSAGE, STEPS_LIMIT_NOTE } from "./failures";
 import { opencodeEventMap } from "./opencode";
 import { locateOpencodeGeneration2 } from "./opencodeGeneration";
 import { ONE_SHOT_SYSTEM_PROMPTS } from "../run/askOnce";
 import { unsentFileNotes } from "../run/fileChecks";
 import { loadPanels, panelSpecsOf, runPanelAction } from "./opencodePanels";
-import { configuredServerAddress, createServerPool, isNotFound, opencodeSlots, serverSentEvents, splitModel, type OpencodeServer, type ServerPool } from "./opencodeServer";
+import { closeStream, configuredServerAddress, createServerPool, interruptOnAbort, isNotFound, opencodeSlots, serverSentEvents, splitModel, type OpencodeServer, type ServerPool } from "./opencodeServer";
 import { pickSmallModel } from "./smallModel";
 import { RecoverableError, type NativeEvent, type RunScope, type RuntimeSteps } from "../run/types";
 
@@ -79,8 +79,6 @@ const post = (server: OpencodeServer, directory: string, path: string, body?: un
 const noSecrets = (): string[] => [];
 
 export const createSeen2 = (rootId: string, contextWindow?: number, secrets: () => string[] = noSecrets): Seen2 => ({ rootId, childIds: new Set(), toolNames: new Map(), textLengths: new Map(), usage: new Map(), contextWindow, secrets });
-
-const numberOf = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
 
 const textOfContent = (content: unknown): string =>
   (Array.isArray(content) ? content : []).map((entry: any) => (typeof entry?.text === "string" ? entry.text : "")).filter(Boolean).join("\n");
@@ -315,13 +313,14 @@ async function* execute(handle: Opencode2Handle, input: string, scope: RunScope)
   let stream = await call(server, directory, "/api/event", { signal: scope.signal });
   const seen = createSeen2(sessionId, handle.contextWindow, server.pool.secrets);
   seen.isShellRun = isShellInput(input);
-  scope.signal.addEventListener("abort", () => void post(server, directory, sessionPath(handle, "/interrupt")).catch(() => undefined), { once: true });
-  await applyRunChoices(handle, scope);
-  const unsent = scope.files.length > 0 ? unsentFileNotes(scope.files, await acceptedMediaOf(handle, scope)) : [];
-  if (unsent.length > 0) yield { type: "text", partId: UNSENT_FILES_PART, delta: unsent.map((note) => `${note}\n\n`).join("") };
-  await sendInput(handle, input, scope);
+  const interrupts = interruptOnAbort(scope.signal, () => post(server, directory, sessionPath(handle, "/interrupt")));
   const isEnding = (native: Opencode2Native) => native.type === "idle" || native.type === "failure";
   try {
+    await applyRunChoices(handle, scope);
+    const unsent = scope.files.length > 0 ? unsentFileNotes(scope.files, await acceptedMediaOf(handle, scope)) : [];
+    if (unsent.length > 0) yield { type: "text", partId: UNSENT_FILES_PART, delta: unsent.map((note) => `${note}\n\n`).join("") };
+    await sendInput(handle, input, scope);
+    interrupts.resendIfAborted();
     for (let resumes = 0; ; resumes++) {
       try {
         for await (const raw of serverSentEvents<Opencode2Native>(stream, scope.signal)) {
@@ -348,6 +347,8 @@ async function* execute(handle: Opencode2Handle, input: string, scope: RunScope)
       stream = await call(server, directory, "/api/event", { signal: scope.signal });
     }
   } finally {
+    interrupts.stop();
+    closeStream(stream);
     scope.setRuntimeRef({ sessionId, lastMessageId: seen.lastAssistantMessage });
   }
 }

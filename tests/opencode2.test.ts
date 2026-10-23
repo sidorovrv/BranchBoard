@@ -181,7 +181,7 @@ describe("OpenCode 2 events", () => {
     ];
     const out = events.flatMap((raw) => translateEvent2(raw, seen)).flatMap((native) => opencodeEventMap[native.type]?.(native, scope) ?? []);
     expect(out).toEqual([
-      { type: "subagent.started", key: CHILD, title: "List files", agent: "explore", prompt: undefined },
+      { type: "subagent.started", key: CHILD, partKey: `subagent:${CHILD}`, title: "List files", agent: "explore", prompt: undefined },
       { type: "subagent.event", key: CHILD, event: { type: "prompt", text: "Thoroughness: quick." } },
       { type: "subagent.event", key: CHILD, event: { type: "part.delta", partKey: "msg_child:text:0", partType: "text", text: "Found 3" } },
       { type: "subagent.event", key: CHILD, event: { type: "done" } },

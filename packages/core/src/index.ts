@@ -13,6 +13,7 @@ export * from "./migrations";
 export * from "./commandSummary";
 export * from "./untrusted";
 export * from "./updates";
+export * from "./updateCheck";
 export * from "./usage";
 export * from "./promptFormat";
 export * from "./ordering";

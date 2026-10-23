@@ -52,7 +52,7 @@ export const askOnce = async ({ runtime, scope, input, purpose, timeoutMs }: Ask
     const scopeForAsk = cheapModel ? { ...throwawayScope, model: cheapModel } : throwawayScope;
     const generate = runtime.generateText;
     const text = await withSlot(runtime.slots, controller.signal, undefined, () => generate(input, purpose, scopeForAsk, controller.signal));
-    if (text === undefined) throw new Error("Text generation was stopped");
+    if (text === undefined || controller.signal.aborted) throw new Error("Text generation was stopped");
     return text;
   } finally {
     clearTimeout(timer);

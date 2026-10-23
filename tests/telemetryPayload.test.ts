@@ -98,6 +98,7 @@ describe("payload schema", () => {
 
   it("rejects an unknown field, a wrong type and a malformed identifier", () => {
     expect(isDailyPayload({ ...valid(), prompt: "secret" })).toBe(false);
+    expect(isDailyPayload({ ...valid(), constructor: "secret" })).toBe(false);
     expect(isDailyPayload({ ...valid(), undo: "3" })).toBe(false);
     expect(isDailyPayload({ ...valid(), payloadId: "not-a-uuid" })).toBe(false);
     expect(isDailyPayload({ ...valid(), runs: { ...valid().runs, byModel: { "claude-opus-5-5": 1 } } })).toBe(false);

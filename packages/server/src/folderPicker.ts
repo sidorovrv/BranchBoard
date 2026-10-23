@@ -113,7 +113,7 @@ export const pickerCommands = (platform: NodeJS.Platform, kind: PickKind = "fold
     return [{ command: "osascript", args: ["-e", `POSIX path of (choose ${isFolder ? "folder" : "file"} with prompt ${appleScriptQuoted(title)} default location (POSIX file ${appleScriptQuoted(start)}))`] }];
   }
   return [
-    { command: "zenity", args: ["--file-selection", ...(isFolder ? ["--directory"] : []), `--title=${title}`, `--filename=${startWithSlash}`] },
+    { command: "zenity", args: ["--file-selection", "--modal", ...(isFolder ? ["--directory"] : []), `--title=${title}`, `--filename=${startWithSlash}`] },
     { command: "kdialog", args: [isFolder ? "--getexistingdirectory" : "--getopenfilename", start, "--title", title] },
   ];
 };
@@ -126,7 +126,21 @@ export const cleanSelection = (output: string): string | undefined => {
 
 type RunOutcome = { kind: "selected"; path: string | undefined } | { kind: "missing" } | { kind: "failed"; message: string };
 
-const run = ({ command, args }: PickerCommand): Promise<RunOutcome> =>
+const RAISE_DELAY_MS = 300;
+const RAISE_TIMEOUT_MS = 5000;
+
+const raiseCommands = (title: string, pid: number): PickerCommand[] => [
+  { command: "xdotool", args: ["search", "--sync", "--onlyvisible", "--pid", String(pid), "windowactivate"] },
+  { command: "wmctrl", args: ["-a", title] },
+];
+
+const raiseWith = ([first, ...rest]: PickerCommand[]) => {
+  if (first) execFile(first.command, first.args, { timeout: RAISE_TIMEOUT_MS }, (error) => error && raiseWith(rest));
+};
+
+const raiseWindow = (title: string, pid: number) => setTimeout(() => raiseWith(raiseCommands(title, pid)), RAISE_DELAY_MS);
+
+const run = ({ command, args }: PickerCommand, title: string): Promise<RunOutcome> =>
   new Promise((resolve) => {
     const child = execFile(command, args, { timeout: PICKER_TIMEOUT_MS, windowsHide: false }, (error, stdout, stderr) => {
       if (stderr.trim()) log.warn("folder-picker", `${command} wrote to stderr`, stderr.trim());
@@ -138,13 +152,14 @@ const run = ({ command, args }: PickerCommand): Promise<RunOutcome> =>
       resolve({ kind: "failed", message: stderr.trim() || error.message });
     });
     log.debug("folder-picker", `Spawned ${command} pid ${child.pid}`);
+    if (process.platform === "linux" && child.pid) raiseWindow(title, child.pid);
     child.stdin?.end();
   });
 
 export const pickPath = async (kind: PickKind, start?: string, platform: NodeJS.Platform = process.platform): Promise<string | undefined> => {
   const candidates = pickerCommands(platform, kind, start && existsSync(start) ? start : homedir());
   for (const candidate of candidates) {
-    const outcome = await run(candidate);
+    const outcome = await run(candidate, TITLES[kind]);
     if (outcome.kind === "selected") return outcome.path;
     if (outcome.kind === "failed") throw new RefusedError(`File dialog failed: ${outcome.message}`);
     log.warn("folder-picker", `${candidate.command} is not installed`);

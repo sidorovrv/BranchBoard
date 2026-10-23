@@ -1,13 +1,11 @@
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { PACKAGE_NAME, isNewerVersion, updateCommand } from "@branchboard/core";
 import { TAGS_URL, defaultFetchText, parseTags, type FetchText } from "../../server/src/channel";
+import { currentInstallKind, installKindOf, type InstallKind } from "../../server/src/installKind";
 import { VERSION } from "../../server/src/version";
 import type { UpdateArguments } from "./args";
 
-export type InstallKind = "npm" | "npx" | "source";
-
-export const installKindOf = (modulePath: string): InstallKind => (/[\\/]_npx[\\/]/.test(modulePath) ? "npx" : /[\\/]node_modules[\\/]/.test(modulePath) ? "npm" : "source");
+export { installKindOf };
 
 export interface UpdateDependencies {
   fetchText: FetchText;
@@ -26,7 +24,7 @@ const installWithNpm = (stdio: "inherit" | "ignore") => (version: string): Promi
 export const defaultUpdateDependencies = (stdio: "inherit" | "ignore" = "inherit"): UpdateDependencies => ({
   fetchText: defaultFetchText(),
   install: installWithNpm(stdio),
-  installKind: installKindOf(fileURLToPath(import.meta.url)),
+  installKind: currentInstallKind(),
   print: (line) => console.log(line),
 });
 

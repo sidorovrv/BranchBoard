@@ -151,8 +151,9 @@ const relinkTargets: Partial<Record<GraphEdit["type"], (graph: BoardGraph, edit:
 
 export const estimateRepublication = (graph: BoardGraph, parts: PartsByNode, edit: GraphEdit): Republication[] => {
   const result = runEdit(graph, edit);
+  if (isRefusal(result)) return [];
   const targets = relinkTargets[edit.type]?.(graph, edit);
-  if (isRefusal(result) || !targets) return [];
+  if (!targets) return [];
   return targets.map((nodeId) => {
     const plan = planSession(result.graph, parts, nodeId);
     const affected = [nodeId, ...descendantIds(result.graph, nodeId)].filter((id) => result.graph.nodes[id].status === "done");

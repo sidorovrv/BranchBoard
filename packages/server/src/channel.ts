@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isNewerVersion, PACKAGE_NAME, VERSION_PATTERN, type UpdateTags } from "@branchboard/core";
+import { CHANNEL_SOURCE_URL, isNewerVersion, localDayOf, PACKAGE_NAME, sendableUpdateCheckQuery, UPDATE_CHECK_PATH, VERSION_PATTERN, type UpdateCheck, type UpdateTags } from "@branchboard/core";
 import { fetchRemote } from "./fetchRemote";
+import { currentInstallKind } from "./installKind";
 import { readJsonFile, writeJsonFile } from "./jsonFile";
 import { log } from "./log";
 
-export const CHANNEL_URL = "https://raw.githubusercontent.com/sidorovrv/BranchBoard/main/channel.json";
+export const CHANNEL_URL = CHANNEL_SOURCE_URL;
+export const UPDATE_CHECK_URL = `https://branchboard-telemetry.branchboard.workers.dev${UPDATE_CHECK_PATH}`;
 export const TAGS_URL = `https://registry.npmjs.org/-/package/${PACKAGE_NAME}/dist-tags`;
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -33,11 +35,14 @@ export interface ChannelContents {
 interface CachedChannel {
   fetchedAt: number;
   checkedAt?: number;
+  pingedOn?: string;
+  firstPending?: boolean;
   error?: string;
   contents: ChannelContents;
 }
 
 export interface ChannelStatus {
+  fetchedAt: number | null;
   checkedAt: number | null;
   error: string | null;
   isOffline: boolean;
@@ -107,8 +112,17 @@ const settle = async <T>(task: () => Promise<T>): Promise<{ value?: T; error?: s
   }
 };
 
+export type UpdateCheckFacts = Omit<UpdateCheck, "first">;
+
+export const currentUpdateCheckFacts = (version: string): UpdateCheckFacts | undefined => {
+  const install = currentInstallKind();
+  if (install === "source") return undefined;
+  return { version, os: process.platform, arch: process.arch, nodeMajor: Number(process.versions.node.split(".")[0]), install, autoUpdate: install === "npm" && process.env.BRANCHBOARD_AUTOUPDATE !== "0" };
+};
+
 export interface ChannelOptions {
   dataDirectory: string;
+  updateCheckFacts?: () => UpdateCheckFacts | undefined;
   isOffline?: () => boolean;
   fetchText?: FetchText;
   clock?: () => number;
@@ -126,7 +140,7 @@ export interface RemoteChannel {
   refresh: (options?: RefreshOptions) => Promise<void>;
 }
 
-export const createRemoteChannel = ({ dataDirectory, isOffline = () => process.env.BRANCHBOARD_OFFLINE === "1", fetchText, clock = Date.now }: ChannelOptions): RemoteChannel => {
+export const createRemoteChannel = ({ dataDirectory, updateCheckFacts = () => undefined, isOffline = () => process.env.BRANCHBOARD_OFFLINE === "1", fetchText, clock = Date.now }: ChannelOptions): RemoteChannel => {
   const channelPath = join(dataDirectory, "channel.json");
   const seenPath = join(dataDirectory, "models-seen.json");
   const cached = (): CachedChannel | undefined => readJsonFile<CachedChannel | undefined>(channelPath, undefined);
@@ -134,7 +148,7 @@ export const createRemoteChannel = ({ dataDirectory, isOffline = () => process.e
   const contents = () => parseChannel(cached()?.contents);
   return {
     contents,
-    status: () => ({ checkedAt: cached()?.checkedAt ?? null, error: cached()?.error ?? null, isOffline: isOffline() }),
+    status: () => ({ fetchedAt: cached()?.fetchedAt ?? null, checkedAt: cached()?.checkedAt ?? null, error: cached()?.error ?? null, isOffline: isOffline() }),
     seenModels: () => seen().map((id) => ({ id, name: id })),
     recordSeenModel: (id) => {
       if (MODEL_ID_PATTERN.test(id) && !seen().includes(id)) writeJsonFile(seenPath, [...seen(), id].slice(-30));
@@ -145,7 +159,24 @@ export const createRemoteChannel = ({ dataDirectory, isOffline = () => process.e
       const isFileSource = channelFileOverride() !== undefined && fetchText === undefined;
       if (!force && !isFileSource && previous && clock() - previous.fetchedAt < ONE_DAY_MS) return;
       const source = fetchText ?? defaultFetchText();
-      const [tags, channel] = await Promise.all([settle(async () => parseTags(JSON.parse(await source(TAGS_URL)))), settle(async () => parseChannel(JSON.parse(await source(CHANNEL_URL))))]);
+      const today = localDayOf(clock());
+      const facts = isFileSource ? undefined : updateCheckFacts();
+      const isFirst = previous === undefined || previous.firstPending === true;
+      const query = facts && previous?.pingedOn !== today ? sendableUpdateCheckQuery({ ...facts, first: isFirst }) : undefined;
+      let hasPinged = false;
+      const fetchChannelText = async (): Promise<string> => {
+        if (query) {
+          try {
+            const text = await source(`${UPDATE_CHECK_URL}?${query}`);
+            hasPinged = true;
+            return text;
+          } catch (error) {
+            log.debug("channel", `Could not reach the update check service: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        return source(CHANNEL_URL);
+      };
+      const [tags, channel] = await Promise.all([settle(async () => parseTags(JSON.parse(await source(TAGS_URL)))), settle(async () => parseChannel(JSON.parse(await fetchChannelText())))]);
       if (tags.error) log.warn("channel", `Could not check npm for a newer version: ${tags.error}`);
       if (channel.error) log.debug("channel", `Could not fetch channel.json: ${channel.error}`);
       const known = contents();
@@ -156,6 +187,8 @@ export const createRemoteChannel = ({ dataDirectory, isOffline = () => process.e
           fetchedAt: hasChecked ? clock() : clock() - (ONE_DAY_MS - RETRY_AFTER_FAILURE_MS),
           checkedAt: hasChecked ? clock() : previous?.checkedAt,
           error: tags.error,
+          pingedOn: hasPinged ? today : previous?.pingedOn,
+          firstPending: hasPinged ? undefined : query ? isFirst || undefined : previous?.firstPending,
           contents: { ...(channel.value ?? known), tags: tags.value ?? known.tags },
         } satisfies CachedChannel,
       );

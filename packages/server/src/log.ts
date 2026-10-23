@@ -28,10 +28,10 @@ let logFilePath: string | undefined;
 
 const rotatedName = (path: string, index: number): string => (index === 0 ? path : `${path}.${index}`);
 
-const rotateIfLarge = (path: string) => {
-  if (!existsSync(path) || statSync(path).size < MAX_LOG_FILE_BYTES) return;
-  rmSync(rotatedName(path, KEPT_LOG_FILES - 1), { force: true });
-  for (let index = KEPT_LOG_FILES - 2; index >= 0; index--) if (existsSync(rotatedName(path, index))) renameSync(rotatedName(path, index), rotatedName(path, index + 1));
+export const rotateIfLarge = (path: string, maxBytes = MAX_LOG_FILE_BYTES, keptFiles = KEPT_LOG_FILES) => {
+  if (!existsSync(path) || statSync(path).size < maxBytes) return;
+  rmSync(rotatedName(path, keptFiles - 1), { force: true });
+  for (let index = keptFiles - 2; index >= 0; index--) if (existsSync(rotatedName(path, index))) renameSync(rotatedName(path, index), rotatedName(path, index + 1));
 };
 
 export const configureLogFile = (path: string | undefined) => {
@@ -41,12 +41,17 @@ export const configureLogFile = (path: string | undefined) => {
 
 export const currentLogFile = (): string | undefined => logFilePath;
 
+const LOG_ENTRY_START = /\r?\n(?=\d{4}-\d\d-\d\dT)/;
+const FULL_COMMAND_ENTRY = /^\S+\s+\w+\s+\[command\] .*\(full\)/;
+
+export const shareableLogEntriesOf = (text: string): string[] => text.split(LOG_ENTRY_START).filter((entry) => entry && !FULL_COMMAND_ENTRY.test(entry));
+
 export const readLogTail = (maxLines: number, filter?: string): string[] => {
   if (!logFilePath) return [];
   const files = Array.from({ length: KEPT_LOG_FILES }, (_unused, index) => rotatedName(logFilePath!, index)).filter((path) => existsSync(path));
   const lines: string[] = [];
   for (const path of files) {
-    const fileLines = readFileSync(path, "utf8").split(/\r?\n(?=\d{4}-\d\d-\d\dT)/).filter(Boolean);
+    const fileLines = shareableLogEntriesOf(readFileSync(path, "utf8"));
     lines.unshift(...fileLines.filter((entry) => !filter || entry.includes(filter)));
     if (lines.length >= maxLines) break;
   }

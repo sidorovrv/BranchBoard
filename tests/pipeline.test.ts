@@ -42,6 +42,10 @@ const scripted: RuntimeSteps<any, any> = {
       }
       return;
     }
+    if (prompt.startsWith("/leak")) {
+      yield { type: "failure", message: `Request refused for key ${["sk-ant-", "api03-abcdefghijklmnop"].join("")}` };
+      return;
+    }
     if (prompt.startsWith("/two")) {
       scope.setRuntimeRef({ sessionId: session.sessionId });
       yield { type: "approval", id: "first", title: "First approval" };
@@ -122,6 +126,16 @@ describe("pass-through commands", () => {
   });
 });
 
+describe("run failures", () => {
+  it("redact secrets before the error part is stored", async () => {
+    const nodeId = (await command({ type: "reply", boardId, prompt: "/leak" })).json.nodeId;
+    await waitForStatus(nodeId, "error");
+    const errorText = (await view()).parts[nodeId].filter((part) => part.type === "error").map((part) => part.text).join("\n");
+    expect(errorText).toContain("[redacted]");
+    expect(errorText).not.toContain("abcdefghijklmnop");
+  });
+});
+
 describe("rejecting an approval", () => {
   it("closes the other open approvals of the run when the runtime asks for it", async () => {
     const nodeId = (await command({ type: "reply", boardId, prompt: "/two approvals" })).json.nodeId;
@@ -165,5 +179,19 @@ describe("discarded rolls", () => {
     await command({ type: "emptyTrash" });
     expect(dropped).toContain(firstSession);
     expect(dropped).not.toContain(secondSession);
+  });
+});
+
+describe("undo history of a run node", () => {
+  it("drops edits of a node once it runs again", async () => {
+    const nodeId = (await command({ type: "reply", boardId, prompt: "history answer" })).json.nodeId;
+    await waitForStatus(nodeId, "done");
+    await command({ type: "editNode", boardId, nodeId, fields: { title: "renamed before regenerating" } });
+    await command({ type: "regenerate", boardId, nodeId });
+    await waitFor(async () => (await nodeOf(nodeId)).rollCount === 2 && (await nodeOf(nodeId)).status === "done");
+    await command({ type: "undo", boardId });
+    const node = await nodeOf(nodeId);
+    expect(node.title).toBe("renamed before regenerating");
+    expect(node.rollCount).toBe(2);
   });
 });

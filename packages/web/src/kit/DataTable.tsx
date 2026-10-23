@@ -47,10 +47,16 @@ export const DataTable = ({ table, cellNodes }: DataTableProps) => {
             <tr>
               {table.columns.map((column, index) => (
                 <th key={index} className={isNumeric(index) ? "is-numeric" : undefined} aria-sort={sort?.column === index ? (sort.direction === "asc" ? "ascending" : "descending") : undefined}>
-                  <button className="sort-header nodrag" onClick={() => setSort(nextSort(sort, index))}>
+                  <div
+                    className="sort-header copyable nodrag"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => !window.getSelection()?.toString() && setSort(nextSort(sort, index))}
+                    onKeyDown={(event) => (event.key === "Enter" || event.key === " ") && setSort(nextSort(sort, index))}
+                  >
                     {column.label}
                     <span className="sort-arrow">{sort?.column === index ? arrowOf(sort.direction) : ""}</span>
-                  </button>
+                  </div>
                 </th>
               ))}
             </tr>

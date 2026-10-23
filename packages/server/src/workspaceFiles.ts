@@ -24,19 +24,28 @@ export const mimeOfPath = (path: string): string => {
   return TEXT_EXTENSIONS.includes(extension) ? "text/plain" : "application/octet-stream";
 };
 
-const insideWorkspace = (workspacePath: string, candidate: string): boolean => {
-  const path = relative(realpathSync(workspacePath), realpathSync(candidate));
-  return path !== "" && !escapesFolder(path);
+export const workspaceRelativePathOf = (workspacePath: string, path: string): string => relative(realpathSync(workspacePath), realpathSync(path)).replace(/\\/g, "/");
+
+export const pathInsideWorkspace = (workspacePath: string, candidate: string): string | undefined => {
+  try {
+    const path = workspaceRelativePathOf(workspacePath, candidate);
+    return path !== "" && !escapesFolder(path) ? path : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
 export const existingWorkspaceFile = (workspacePath: string, requested: string): string | undefined => {
   const path = resolve(workspacePath, requested);
   try {
-    return existsSync(path) && statSync(path).isFile() && insideWorkspace(workspacePath, path) ? path : undefined;
+    return existsSync(path) && statSync(path).isFile() && pathInsideWorkspace(workspacePath, path) ? path : undefined;
   } catch {
     return undefined;
   }
 };
+
+export const isSensitiveWorkspaceFile = (workspacePath: string, requested: string, path: string): boolean =>
+  isSensitivePath(requested) || isSensitivePath(workspaceRelativePathOf(workspacePath, path));
 
 export interface ServedFile {
   contentType: string;

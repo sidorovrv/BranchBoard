@@ -95,6 +95,17 @@ export async function* serverSentEvents<Event>(response: Response, signal: Abort
   }
 }
 
+export const closeStream = (response: Response) => void response.body?.cancel().catch(() => undefined);
+
+export const interruptOnAbort = (signal: AbortSignal, interrupt: () => Promise<unknown>) => {
+  const send = () => void interrupt().catch(() => undefined);
+  signal.addEventListener("abort", send, { once: true });
+  return {
+    resendIfAborted: () => signal.aborted && send(),
+    stop: () => signal.removeEventListener("abort", send),
+  };
+};
+
 export const createServerPool = (flavor: ServerFlavor) => {
   const servers = new Map<string, Promise<OpencodeServer>>();
 
@@ -218,6 +229,7 @@ export const createServerPool = (flavor: ServerFlavor) => {
       stdio: ["ignore", "pipe", "pipe"],
     });
     log.debug(flavor.logName, `Spawned pid ${child.pid}`);
+    const killOnExit = () => killTree(child);
     let output = "";
     const remember = (chunk: Buffer) => {
       output = (output + chunk.toString()).slice(-OUTPUT_TAIL_CHARS);
@@ -232,13 +244,13 @@ export const createServerPool = (flavor: ServerFlavor) => {
       });
       child.on("exit", (code, signal) => {
         log.error(flavor.logName, `${flavor.label} serve (pid ${child.pid}) exited with code ${code} signal ${signal}`, output.trim() || undefined);
-        servers.delete(keyOf(directory));
+        process.off("exit", killOnExit);
         reject(new Error(`${flavor.label} serve exited with code ${code} in ${directory}. ${output.trim()}`));
       });
     });
     failure.catch(() => undefined);
     const server: OpencodeServer = { baseUrl: `http://127.0.0.1:${port}`, authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`, startedAt: Date.now(), pool, child };
-    process.on("exit", () => killTree(child));
+    process.on("exit", killOnExit);
     try {
       await Promise.race([waitUntilHealthy(server), failure]);
       await flavor.onReady?.(server, directory);
@@ -270,8 +282,9 @@ export const createServerPool = (flavor: ServerFlavor) => {
     const existing = servers.get(key);
     if (existing) return existing;
     const started = address ? connectRemote(address) : startServer(directory);
+    const forget = () => servers.get(key) === started && servers.delete(key);
     servers.set(key, started);
-    started.catch(() => servers.delete(key));
+    started.then((server) => server.child?.once("exit", forget), forget);
     return started;
   };
 

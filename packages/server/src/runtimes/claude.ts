@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newId, decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type Catalog, type CatalogCommand } from "@branchboard/core";
+import { newId, decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type Catalog, type CatalogCommand, type CatalogModel, type ModelSource } from "@branchboard/core";
+import { createDiagnosticsTool, diagnosticsNote, DIAGNOSTICS_TOOL_NAME, type Diagnostics } from "../diagnostics";
 import { listWorkspaceCommands, withBundledCommands } from "./claudeCommands";
 import { CLAUDE_ALIAS_MODELS, KNOWN_CLAUDE_MODELS, TITLE_MODEL } from "./claudeModels";
 import { createLimitsStore, type LimitsStore } from "../limits";
@@ -16,6 +17,7 @@ import { locateClaude, CLAUDE_PATH_VARIABLE } from "./claudeLocator";
 import {
   approvalDetail,
   supportsSubagentText,
+  APPROVAL_SERVER_NAME,
   ASK_USER_QUESTION_TOOL,
   attachmentDirectories,
   buildClaudeArguments,
@@ -32,6 +34,7 @@ import {
 } from "./claudeStream";
 import { approvalOpened, doneEvents, questionOpened, streamEventMap, subagentEventMap, usageEvents, type LooseNative } from "./commonEvents";
 import type { Location } from "./executableLocator";
+import { probeSupportedModels, type SupportedModel } from "./claudeSupportedModels";
 import { launchProcess, readOutput, type LaunchProcess, type ProcessExit } from "./spawnProcess";
 import { createStreamRuntime } from "./streamRuntime";
 
@@ -39,7 +42,12 @@ export const MAX_CONCURRENT_PROCESSES = 2;
 export const TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 const SESSION_GONE_PATTERN = /no conversation found/i;
-const MODELS = [{ id: DEFAULT_CHOICE, name: "CLI default" }, ...CLAUDE_ALIAS_MODELS, ...KNOWN_CLAUDE_MODELS];
+const DIAGNOSTICS_PERMISSION_TOOL = `mcp__${APPROVAL_SERVER_NAME}__${DIAGNOSTICS_TOOL_NAME}`;
+type TaggedModel = SupportedModel & { source: ModelSource };
+const tagged = (models: SupportedModel[], source: ModelSource): TaggedModel[] => models.map((model) => ({ ...model, source }));
+const DEFAULT_MODEL = tagged([{ id: DEFAULT_CHOICE, name: "CLI default" }], "builtin");
+const ALIAS_MODELS = tagged(CLAUDE_ALIAS_MODELS, "alias");
+const MODELS = [...DEFAULT_MODEL, ...ALIAS_MODELS, ...tagged(KNOWN_CLAUDE_MODELS, "builtin")];
 const EFFORTS = [DEFAULT_CHOICE, "low", "medium", "high", "xhigh", "max"];
 const DEFAULT_PERMISSION_MODE = "acceptEdits";
 const PERMISSION_MODES = [
@@ -77,8 +85,10 @@ export interface ClaudeDependencies {
   probeAuth: (executable: string, workspacePath: string) => Promise<string>;
   environment: () => NodeJS.ProcessEnv;
   suggestsTitles: boolean;
-  extraModels: () => { id: string; name: string }[];
+  probeModels: (executable: string, workspacePath: string) => Promise<SupportedModel[]>;
+  extraModels: () => (SupportedModel & { source?: ModelSource })[];
   noteModelSeen: (modelId: string) => void;
+  diagnostics?: Diagnostics;
 }
 
 const listWorkspaceAgents = (workspacePath: string): string[] => {
@@ -106,8 +116,9 @@ const askQuestions = async (scope: RunScope, push: (native: LooseNative) => void
   return allow(call, { answers });
 };
 
-const createApprovalHandler = (scope: RunScope, push: (native: LooseNative) => void, memory: ApprovalMemory): ApprovalHandler => async (call) => {
+const createApprovalHandler = (scope: RunScope, push: (native: LooseNative) => void, memory: ApprovalMemory, diagnostics?: Diagnostics): ApprovalHandler => async (call) => {
   if (call.toolName === ASK_USER_QUESTION_TOOL) return askQuestions(scope, push, call);
+  if (call.toolName === DIAGNOSTICS_PERMISSION_TOOL && diagnostics?.isAgentAccessOn()) return allow(call);
   const detail = approvalDetail(call.toolName, call.input);
   const answer = await askApproval(scope, push, memory, { tool: call.toolName, memoryDetail: call.toolName === "Bash" ? detail : "", title: `Allow ${displayToolName(call.toolName)}?`, detail });
   return ALLOWED_ANSWERS.includes(answer) ? allow(call) : deny("The user rejected this tool call");
@@ -149,21 +160,40 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     probeAuth: (executable, workspacePath) => readOutput(executable, ["auth", "status"], { cwd: workspacePath, env: process.env }),
     environment: () => ({ ...process.env, MCP_TOOL_TIMEOUT: String(TOOL_TIMEOUT_MS), CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: String(TOOL_TIMEOUT_MS) }),
     suggestsTitles: true,
+    probeModels: (executable, workspacePath) => probeSupportedModels(dependencies.launch, executable, workspacePath, dependencies.environment()),
     extraModels: () => [],
     noteModelSeen: () => undefined,
     ...overrides,
   };
   const approvalMemory = createApprovalMemory();
+  const supportedModels = new Map<string, SupportedModel[]>();
+
+  const supportedModelsOf = async (executable: string, workspacePath: string): Promise<SupportedModel[]> => {
+    const cached = supportedModels.get(executable);
+    if (cached) return cached;
+    const probed = await dependencies.probeModels(executable, workspacePath).catch((error) => {
+      log.debug("claude", `Could not read the model list from claude: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    });
+    if (probed.length > 0) supportedModels.set(executable, probed);
+    return probed;
+  };
+
+  const modelsOf = (supported: SupportedModel[]): CatalogModel[] => {
+    const base = supported.length > 0 ? [...DEFAULT_MODEL, ...tagged(supported, "cli"), ...ALIAS_MODELS] : MODELS;
+    const known = new Set<string>();
+    const extras = dependencies.extraModels().map((model) => ({ ...model, source: model.source ?? "channel" }));
+    const unique = [...base, ...extras].filter((model) => !known.has(model.id) && known.add(model.id));
+    return unique.map((model) => ({ ...model, provider: "claude", efforts: model.efforts ? [DEFAULT_CHOICE, ...model.efforts] : EFFORTS }));
+  };
 
   const catalog = async (workspacePath: string): Promise<Catalog> => {
     const agents = [DEFAULT_CHOICE, ...dependencies.listAgents(workspacePath)];
-    const known = new Set(MODELS.map((model) => model.id));
-    const additions = dependencies.extraModels().filter((model) => !known.has(model.id) && known.add(model.id));
-    const models = [...MODELS, ...additions].map((model) => ({ ...model, provider: "claude", efforts: EFFORTS }));
     const located = dependencies.locate();
     if (!located.path) return { agents: [], models: [], health: { ok: false, detail: `The claude command was not found. Install it, sign in once by running claude yourself, or set ${CLAUDE_PATH_VARIABLE} to its full path.` } };
     try {
       const version = await dependencies.probeVersion(located.path, workspacePath);
+      const models = modelsOf(await supportedModelsOf(located.path, workspacePath));
       return { agents, models, meters: ["limits"], permissionModes: PERMISSION_MODES, commands: withBundledCommands(dependencies.listCommands(workspacePath)), defaultPermissionMode: DEFAULT_PERMISSION_MODE, health: { ok: true, detail: `found claude ${version}` } };
     } catch (error) {
       return { agents: [], models: [], health: { ok: false, detail: `The claude command at ${located.path} did not run: ${error instanceof Error ? error.message : String(error)}` } };
@@ -175,7 +205,10 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
   const supportsForwardedSubagentText = (executable: string, workspacePath: string): Promise<boolean> => {
     const known = subagentTextSupport.get(executable);
     if (known) return known;
-    const probed = dependencies.probeVersion(executable, workspacePath).then(supportsSubagentText, () => false);
+    const probed = dependencies.probeVersion(executable, workspacePath).then(supportsSubagentText, () => {
+      subagentTextSupport.delete(executable);
+      return false;
+    });
     subagentTextSupport.set(executable, probed);
     return probed;
   };
@@ -190,19 +223,25 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
   const execute = createStreamRuntime<ClaudeHandle, ClaudeRunState, { secret: string }>({
     limits: dependencies.limits,
     temporaryDirectory: dependencies.temporaryDirectory,
-    begin: (scope, push) => dependencies.approvals.register(createApprovalHandler(scope, push, approvalMemory)),
+    begin: (scope, push) =>
+      dependencies.approvals.register(
+        createApprovalHandler(scope, push, approvalMemory, dependencies.diagnostics),
+        dependencies.diagnostics ? [createDiagnosticsTool(dependencies.diagnostics, { boardId: scope.boardId, nodeId: scope.nodeId })] : [],
+      ),
     createState: createStreamState,
     translate: translateLine(dependencies.noteModelSeen),
     finish: (state) => (state.results.length > 0 && !state.isFinished ? finalEvents(state) : []),
     open: (handle, input, scope, { session, state, writeRunFile }) => {
       const configPath = writeRunFile("mcp.json", JSON.stringify(buildMcpConfig(`${dependencies.serverUrl}/mcp/${session.secret}`)));
-      const systemNote = [scope.systemNote, scope.contextNote].filter(Boolean).join("\n\n");
+      const selfNote = dependencies.diagnostics?.isAgentAccessOn() ? diagnosticsNote(dependencies.diagnostics.version) : undefined;
+      const systemNote = [scope.systemNote, selfNote, scope.contextNote].filter(Boolean).join("\n\n");
       const systemNotePath = systemNote ? writeRunFile("system.md", systemNote) : undefined;
       const args = buildClaudeArguments({ ...handle, model: scope.model, agent: scope.agent, effort: scope.effort, permissionMode: isChosen(scope.permissionMode) ? scope.permissionMode : DEFAULT_PERMISSION_MODE, mcpConfigPath: configPath, systemNotePath, addDirectories: attachmentDirectories(scope.files), forwardSubagentText: handle.forwardSubagentText });
       log.info("claude", `Launching ${handle.executable} for node ${scope.nodeId} (${handle.resumeFrom ? `forking ${handle.resumeFrom}` : "new session"} as ${handle.sessionId})`);
       scope.setRuntimeRef({ sessionId: handle.sessionId });
+      const userMessage = buildUserMessage(input, scope.files, dependencies.readBase64);
       const running = dependencies.launch(handle.executable, args, { cwd: scope.workspacePath, env: dependencies.environment() });
-      running.writeInput(buildUserMessage(input, scope.files, dependencies.readBase64));
+      running.writeInput(userMessage);
       return { lines: linesUntilFollowUpEnds(running.lines, state), kill: () => running.kill(), endFailure: async () => exitFailure(await running.exit) };
     },
   });
@@ -263,5 +302,5 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     return { executable: located.path, supportsSubagentText: supportsSubagentTextFlag, ...auth };
   };
 
-  return { id: "claude", editsFiles: true, canSuggestTitles: dependencies.suggestsTitles, slots: dependencies.limiter, generateText, diagnostics, catalog, openSession, execute, eventMap, answerRequest: async () => undefined };
+  return { id: "claude", editsFiles: true, canSuggestTitles: dependencies.suggestsTitles, slots: dependencies.limiter, generateText, diagnostics, catalog, forgetCaches: () => (supportedModels.clear(), subagentTextSupport.clear()), openSession, execute, eventMap, answerRequest: async () => undefined };
 };

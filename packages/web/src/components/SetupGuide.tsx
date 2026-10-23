@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { installCommandFor, isApiRuntime, needsKey, runtimeInfo, type Catalog, type CredentialStatus, type EngineSetup, type RuntimeId } from "@branchboard/core";
 import { fetchAbout, fetchCredentialStatus, fetchRuntimeCatalog } from "../api";
-import { useBoard } from "../store";
+import { copyText, useBoard } from "../store";
 
-const copy = (text: string) => void navigator.clipboard.writeText(text).then(() => useBoard.getState().notify("Copied"));
+const copy = (text: string) => void copyText(text);
 
 export const useRuntimeCatalog = (runtimeId: RuntimeId) => {
   const [catalog, setCatalog] = useState<Catalog>();
@@ -33,11 +33,12 @@ type RefreshCatalog = (isFresh?: boolean) => Promise<Catalog | undefined>;
 
 const ENGINE_POLL_MS = 1500;
 
-export const setUpEngine = async (runtimeId: RuntimeId, refresh: RefreshCatalog): Promise<boolean> => {
+export const setUpEngine = async (runtimeId: RuntimeId, refresh: RefreshCatalog, isCancelled: () => boolean = () => false): Promise<boolean> => {
   await useBoard.getState().send({ type: "setUpRuntime", runtimeId });
   for (;;) {
+    if (isCancelled()) return false;
     const phase = (await refresh(true))?.engine?.phase;
-    if (phase === "failed" || phase === undefined) return false;
+    if (isCancelled() || phase === "failed" || phase === undefined) return false;
     if (phase !== "installing") return true;
     await new Promise((resolve) => setTimeout(resolve, ENGINE_POLL_MS));
   }
@@ -79,6 +80,13 @@ export const CredentialForm = ({ runtimeId, catalog, refresh, isNoticeShown = fa
   const [isReplacing, setIsReplacing] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; detail: string }>();
   const [isBusy, setIsBusy] = useState(false);
+  const isMounted = useRef(true);
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
   useEffect(() => setBaseUrl(status?.baseUrl ?? credential.defaultBaseUrl), [status?.baseUrl, credential.defaultBaseUrl]);
   const send = async (command: Record<string, unknown>) => {
     setIsBusy(true);
@@ -88,10 +96,11 @@ export const CredentialForm = ({ runtimeId, catalog, refresh, isNoticeShown = fa
   };
   const save = async () => {
     const saved = await send({ type: "setCredential", key: key.trim() || undefined, ...(credential.baseUrlEditable ? { baseUrl } : {}) });
+    if (!saved) return;
     setKey("");
     setIsReplacing(false);
     setTestResult(undefined);
-    if (saved) void refresh(true);
+    void refresh(true);
   };
   const remove = async () => {
     if (!confirm(`Remove the saved ${info.label} key?`)) return;
@@ -99,7 +108,8 @@ export const CredentialForm = ({ runtimeId, catalog, refresh, isNoticeShown = fa
   };
   const test = async () => {
     setIsBusy(true);
-    const isEngineReady = await setUpEngine(runtimeId, refresh);
+    const isEngineReady = await setUpEngine(runtimeId, refresh, () => !isMounted.current);
+    if (!isMounted.current) return;
     setIsBusy(false);
     if (isEngineReady) setTestResult(await send({ type: "testCredential" }));
   };
@@ -126,7 +136,7 @@ export const CredentialForm = ({ runtimeId, catalog, refresh, isNoticeShown = fa
       )}
       <div className="row">
         {showField ? (
-          <button className="primary" disabled={isBusy || (!key.trim() && !credential.baseUrlEditable)} onClick={() => void save()}>Save</button>
+          <button className="primary" disabled={isBusy || (!key.trim() && !credential.baseUrlEditable)} title={!key.trim() && !credential.baseUrlEditable ? "Paste a key first" : undefined} onClick={() => void save()}>Save</button>
         ) : (
           <>
             <button disabled={isBusy} onClick={() => setIsReplacing(true)}>Replace</button>
@@ -148,12 +158,14 @@ export const ServerAddressForm = ({ runtimeId }: { runtimeId: RuntimeId }) => {
   const [password, setPassword] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [connection, setConnection] = useState<{ ok: boolean; detail: string }>();
+  const [loadError, setLoadError] = useState<string>();
   const loadStatus = useCallback(
     () =>
       fetchCredentialStatus(runtimeId).then((loaded) => {
         setStatus(loaded);
         setAddress(loaded.baseUrl ?? "");
-      }, () => undefined),
+        setLoadError(undefined);
+      }, (failure) => setLoadError(failure instanceof Error ? failure.message : String(failure))),
     [runtimeId],
   );
   useEffect(() => void loadStatus(), [loadStatus]);
@@ -187,6 +199,7 @@ export const ServerAddressForm = ({ runtimeId }: { runtimeId: RuntimeId }) => {
         {status?.baseUrl && <button disabled={isBusy} onClick={() => void save({ key: null, baseUrl: "" })}>Disconnect</button>}
         {status?.baseUrl && <button disabled={isBusy} onClick={() => void check()}>Check connection</button>}
       </div>
+      {loadError && <div className="part-error">{loadError}</div>}
       {connection && <div className={connection.ok ? "muted" : "part-error"}>{connection.ok ? "✓ " : ""}{connection.detail}</div>}
     </div>
   );
@@ -194,11 +207,13 @@ export const ServerAddressForm = ({ runtimeId }: { runtimeId: RuntimeId }) => {
 
 export const CliSetup = ({ runtimeId, onCheckAgain }: { runtimeId: RuntimeId; onCheckAgain: () => void }) => {
   const info = runtimeInfo(runtimeId);
-  const [platform, setPlatform] = useState("linux");
-  useEffect(() => void fetchAbout().then((about) => setPlatform(about.platform), () => undefined), []);
-  const install = installCommandFor(runtimeId, platform);
+  const [platform, setPlatform] = useState<string>();
+  const [aboutError, setAboutError] = useState<string>();
+  useEffect(() => void fetchAbout().then((about) => setPlatform(about.platform), (failure) => setAboutError(failure instanceof Error ? failure.message : String(failure))), []);
+  const install = platform ? installCommandFor(runtimeId, platform) : undefined;
   return (
     <div className="setup-guide">
+      {aboutError && <div className="part-error">{aboutError}</div>}
       {install && (
         <div className="setup-step">
           <div>1. Install it:</div>

@@ -11,6 +11,8 @@ const upsertPart = (parts: Part[], nodeId: Id, roll: number, partKey: string, cr
   return [...parts, { id, nodeId, roll, seq: parts.length, ...create() }];
 };
 
+export const subagentIdsOf = (part: Part): Id[] => (Array.isArray(part.meta?.subagentIds) ? part.meta.subagentIds.filter((id): id is Id => typeof id === "string") : []);
+
 type RunReducer<E extends RunEvent> = (parts: Part[], nodeId: Id, roll: number, event: E) => Part[];
 
 const keepParts: RunReducer<RunEvent> = (parts) => parts;
@@ -48,8 +50,8 @@ const runReducers: { [T in RunEvent["type"]]: RunReducer<Extract<RunEvent, { typ
       nodeId,
       roll,
       event.partKey,
-      () => ({ type: "tool", text: event.description, meta: { tool: event.tool, input: event.input, status: "running" } }),
-      (part) => part,
+      () => ({ type: "tool", text: event.description, meta: { tool: event.tool, input: event.input, status: "running", ...(event.subagentId ? { subagentIds: [event.subagentId] } : {}) } }),
+      (part) => (event.subagentId ? { ...part, meta: { ...part.meta, subagentIds: [...subagentIdsOf(part), event.subagentId] } } : part),
     ),
   "tool.done": (parts, nodeId, roll, event) =>
     parts.map((part) =>
@@ -78,7 +80,7 @@ const runReducers: { [T in RunEvent["type"]]: RunReducer<Extract<RunEvent, { typ
 };
 
 export const withPartKeyPrefix = (event: RunEvent, prefix: string): RunEvent => {
-  if (event.type === "part.delta" || event.type === "tool.started" || event.type === "tool.done") return { ...event, partKey: `${prefix}${event.partKey}` };
+  if (event.type === "part.delta" || event.type === "tool.started" || event.type === "tool.done" || event.type === "subagent.started") return { ...event, partKey: `${prefix}${event.partKey}` };
   if (event.type === "retry-restart") return { ...event, partKeys: event.partKeys.map((key) => `${prefix}${key}`) };
   return event;
 };
@@ -103,5 +105,19 @@ const viewReducers: { [T in BoardEvent["type"]]: ViewReducer<Extract<BoardEvent,
 
 export const applyBoardEvent = (view: BoardView, event: BoardEvent): BoardView =>
   (viewReducers[event.type] as ViewReducer<BoardEvent>)(view, event);
+
+export const INLINE_TOOL_OUTPUT_CHARS = 2000;
+
+const withoutLongToolOutput = (part: Part): Part => {
+  const output = part.meta?.output;
+  if (part.type !== "tool" || output === undefined || String(output).length <= INLINE_TOOL_OUTPUT_CHARS) return part;
+  const { output: _omitted, ...meta } = part.meta!;
+  return { ...part, meta: { ...meta, outputChars: String(output).length } };
+};
+
+export const isToolOutputOmitted = (part: Part): boolean => part.meta?.outputChars !== undefined && part.meta.output === undefined;
+
+export const withoutLongToolOutputs = (parts: Record<Id, Part[]>): Record<Id, Part[]> =>
+  Object.fromEntries(Object.entries(parts).map(([nodeId, list]) => [nodeId, list.map(withoutLongToolOutput)]));
 
 export const emptyView = (): BoardView => ({ graph: { nodes: {}, edges: {} }, parts: {}, requests: {}, savedAt: 0 });

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { codeViewOfPath } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
-import { capabilityOfPath, createCapabilityStore } from "../packages/server/src/capabilities";
+import { capabilityOfPath, createCapabilityStore, loggedPathOf } from "../packages/server/src/capabilities";
 
 const PORT = 47321;
 const ACCESS = "c".repeat(64);
@@ -50,7 +50,7 @@ afterAll(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-describe("F-2 HTML preview", () => {
+describe("HTML preview", () => {
   it("picks the html view for html files", () => {
     expect(codeViewOfPath("site/index.html")).toBe("html");
     expect(codeViewOfPath("notes.md")).toBe("markdown");
@@ -118,6 +118,12 @@ describe("F-2 HTML preview", () => {
     expect(capabilityOfPath("/constructor/abcdef")).toBeUndefined();
     expect(capabilityOfPath("/__proto__/abcdef")).toBeUndefined();
     expect((await send("/constructor/abcdef", undefined, anonymous)).status).toBe(401);
+  });
+
+  it("masks capability secrets in logged paths", () => {
+    expect(loggedPathOf("/preview/0123456789abcdef/site/index.html")).toBe("/preview/…/site/index.html");
+    expect(loggedPathOf("/mcp/0123456789abcdef")).toBe("/mcp/…/");
+    expect(loggedPathOf("/api/boards")).toBe("/api/boards");
   });
 });
 

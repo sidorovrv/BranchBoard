@@ -1,9 +1,11 @@
+import { useRef } from "react";
 import { isTextAttachment, type Attachment, type GraphNode } from "@branchboard/core";
 import { attachmentUrl } from "../api";
 import { attachToNode, detachFromNode, fileTypeLabel, formatBytes, isDisplayableImage, pickFiles } from "../attachments";
 import { ExtractAttachmentButton } from "./CodeNode";
 import { Icon } from "../kit/Icons";
 import { PreviewableImage } from "./ImagePreview";
+import { useRememberedScroll } from "../nodeScroll";
 
 const RemoveButton = ({ node, attachment }: { node: GraphNode; attachment: Attachment }) => (
   <button className="remove" title="Remove" aria-label={`Remove ${attachment.name}`} onClick={() => void detachFromNode(node.id, attachment.id)}>×</button>
@@ -65,12 +67,17 @@ const FileTile = ({ node, attachment }: { node: GraphNode; attachment: Attachmen
   </div>
 );
 
-export const FileGallery = ({ node }: { node: GraphNode }) => {
-  const attachments = node.attachments ?? [];
-  if (attachments.length === 0) return <div className="file-empty">Drop files here</div>;
+const FileTiles = ({ node, attachments }: { node: GraphNode; attachments: Attachment[] }) => {
+  const gallery = useRef<HTMLDivElement>(null);
+  useRememberedScroll(gallery, `${node.id}:files`);
   return (
-    <div className={`file-gallery nowheel ${attachments.length === 1 ? "is-single" : ""}`}>
+    <div ref={gallery} className={`file-gallery nowheel ${attachments.length === 1 ? "is-single" : ""}`}>
       {attachments.map((attachment) => <FileTile key={attachment.id} node={node} attachment={attachment} />)}
     </div>
   );
+};
+
+export const FileGallery = ({ node }: { node: GraphNode }) => {
+  const attachments = node.attachments ?? [];
+  return attachments.length === 0 ? <div className="file-empty">Drop files here</div> : <FileTiles node={node} attachments={attachments} />;
 };

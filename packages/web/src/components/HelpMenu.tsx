@@ -1,4 +1,6 @@
 import { SHORTCUT_AREAS, shortcutRows } from "@branchboard/core";
+import { useEffect } from "react";
+import { listenForEscape } from "../escape";
 import { displayShortcuts } from "../platform";
 import { useSettings } from "../settings";
 import { useBoard } from "../store";
@@ -25,10 +27,11 @@ export const HelpButton = () => {
 export const ShortcutsDialog = () => {
   const keybinds = useSettings((state) => state.settings.keybinds);
   const close = () => useBoard.getState().setShortcutsOpen(false);
+  useEffect(() => listenForEscape(close), []);
   const rows = shortcutRows(keybinds);
   return (
     <div className="dialog-backdrop" onMouseDown={close}>
-      <div className="dialog shortcuts-dialog" role="dialog" aria-label="Shortcuts" onMouseDown={(event) => event.stopPropagation()} onKeyDown={(event) => event.key === "Escape" && close()}>
+      <div className="dialog shortcuts-dialog" role="dialog" aria-label="Shortcuts" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
         <h3>Shortcuts</h3>
         <div className="shortcuts-body">
           {SHORTCUT_AREAS.map((area) => (

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/sidorovrv/BranchBoard/main/packages/web/public/readme/board.png" alt="A BranchBoard board with a license file, a chat about popular open source licenses and three follow-up branches wired together" width="900">
+  <img src="https://raw.githubusercontent.com/sidorovrv/BranchBoard/main/packages/web/public/readme/hero.gif" alt="A BranchBoard board for a market expansion decision: a shortlist prompt, parallel branches that each estimate customer acquisition cost for one market, and an expansion report with a scoring table" width="900">
 </p>
 
 ---
@@ -44,6 +44,8 @@ branchboard [options]
 
   --port <number>    Port to listen on
   --data-dir <dir>   Folder for boards and logs
+  --host             Accept connections from other devices on the local network
+  --no-key           Open without the access key
   --no-open          Do not open the browser
   --offline          Make no internet requests
   --no-auto-update   Do not install updates at start

@@ -1,8 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { mkdirSync, readFileSync, statSync } from "node:fs";
+import { requireLocalFolder } from "./pathBrowser";
+import { join } from "node:path";
 import {
   addNodeEdit,
   asNodeClipboard,
+  isToolOutputOmitted,
   canResume,
   DEFAULT_BOARD_TITLE,
   fileNameOf,
@@ -11,12 +13,13 @@ import {
   titleForPrompt,
   importBoardDocument,
   isHtmlPath,
+  isInFlight,
   isRuntimeId,
+  liveNodes,
   isSafeChoice,
   commentClearingEdits,
   commentTargetOf,
   promptWithComment,
-  isSensitivePath,
   newId,
   now,
   parseEnvironmentText,
@@ -49,7 +52,7 @@ import type { RunService, Runtimes } from "./run/pipeline";
 import type { Telemetry } from "./telemetry";
 import type { TrashService } from "./trash";
 import type { UsageRecorder } from "./usage";
-import { existingWorkspaceFile } from "./workspaceFiles";
+import { existingWorkspaceFile, isSensitiveWorkspaceFile, workspaceRelativePathOf } from "./workspaceFiles";
 import { writeWorkspaceFile } from "./workspaceWrites";
 
 export interface CommandContext {
@@ -130,7 +133,7 @@ const workspaceFileOf = ({ boards }: CommandContext, boardId: Id, requested: unk
 const readCodeFile = (context: CommandContext, command: Command) => {
   const boardId = command.boardId!;
   const path = workspaceFileOf(context, boardId, command.path);
-  const filePath = relative(realpathSync(context.boards.stateOf(boardId).board.workspacePath), realpathSync(path)).replace(/\\/g, "/");
+  const filePath = workspaceRelativePathOf(context.boards.stateOf(boardId).board.workspacePath, path);
   requireConfirmation(command, sensitivePathsOf([filePath]));
   if (statSync(path).size > MAX_EXTRACTED_FILE_BYTES) throw new RefusedError("That file is too large to extract into a node");
   const content = readFileSync(path, "utf8");
@@ -168,8 +171,10 @@ const writeCodeFileHandler: Handler = (context, command) => {
   if (node.gitRef) throw new RefusedError("A file shown from another branch cannot be edited");
   const content = String(command.content ?? "");
   if (Buffer.byteLength(content) > MAX_EXTRACTED_FILE_BYTES) throw new RefusedError("That text is too large to save into the file");
-  workspaceFileOf(context, boardId, node.filePath);
-  writeWorkspaceFile(context.boards.stateOf(boardId).board.workspacePath, node.filePath!, content, { allowSensitive: true });
+  const workspacePath = context.boards.stateOf(boardId).board.workspacePath;
+  const path = workspaceFileOf(context, boardId, node.filePath);
+  requireConfirmation(command, isSensitiveWorkspaceFile(workspacePath, node.filePath!, path) ? [node.filePath!] : []);
+  writeWorkspaceFile(workspacePath, node.filePath!, content, { allowSensitive: true });
   editHandler(context, { type: "editNode", boardId, nodeId: node.id, fields: { prompt: content } });
   return { ok: true };
 };
@@ -177,8 +182,8 @@ const writeCodeFileHandler: Handler = (context, command) => {
 const openPreviewHandler: Handler = (context, command) => {
   const node = gitCodeNodeOf(context, command);
   if (node.gitRef || !isHtmlPath(node.filePath!)) throw new RefusedError("Only an HTML file from the project folder can be previewed");
-  workspaceFileOf(context, command.boardId!, node.filePath);
-  if (isSensitivePath(node.filePath!)) throw new RefusedError("That file is on the sensitive list and is not previewed");
+  const path = workspaceFileOf(context, command.boardId!, node.filePath);
+  if (isSensitiveWorkspaceFile(context.boards.stateOf(command.boardId!).board.workspacePath, node.filePath!, path)) throw new RefusedError("That file is on the sensitive list and is not previewed");
   const secret = context.capabilities.issue("preview", command.boardId!, PREVIEW_TTL_MS);
   return { url: `/preview/${secret}/${node.filePath!.split(/[\\/]/).map(encodeURIComponent).join("/")}` };
 };
@@ -269,14 +274,10 @@ const rememberChoice = (boards: BoardService, boardId: Id, nodeId: Id) => {
   boards.saveBoard({ ...board, ...rememberedDefaults(graph.nodes[nodeId], board) });
 };
 
-const assertWorkspace = (path: string) => {
-  if (!path || !existsSync(path) || !statSync(path).isDirectory()) throw new RefusedError(`Workspace folder not found: ${path}`);
-};
-
 const connectProject = async ({ boards, runtimes }: CommandContext, workspacePath: string, mode: RuntimeId, name?: string, chosenModel?: unknown): Promise<Project> => {
   const runtime = runtimes[mode];
   if (!runtime) throw new RefusedError(`Unknown runtime ${mode}`);
-  assertWorkspace(workspacePath);
+  requireLocalFolder(workspacePath);
   const existing = boards.listProjects().find((project) => project.workspacePath === workspacePath && project.mode === mode);
   if (existing) return existing;
   const catalog = await runtime.catalog(workspacePath);
@@ -297,11 +298,19 @@ const renameProjectHandler: Handler = ({ boards }, command) => {
   return renamed;
 };
 
-const deleteProjectHandler: Handler = ({ boards }, command) => {
+const deleteBoardWithRuns = ({ boards, runs }: CommandContext, board: Board, deletedAt: number) => {
+  liveNodes(boards.stateOf(board.id).graph)
+    .filter(isInFlight)
+    .forEach((node) => runs.abort(board.id, node.id));
+  boards.saveBoard({ ...boards.stateOf(board.id).board, deleted: true, deletedAt, updatedAt: deletedAt });
+};
+
+const deleteProjectHandler: Handler = (context, command) => {
+  const { boards } = context;
   const project = boards.listProjects().find((candidate) => candidate.id === command.projectId);
   if (!project) throw new RefusedError("Project not found");
   const deletedAt = now();
-  boards.listBoards().filter((board) => board.projectId === project.id).forEach((board) => boards.saveBoard({ ...board, deleted: true, deletedAt, updatedAt: deletedAt }));
+  boards.listBoards().filter((board) => board.projectId === project.id).forEach((board) => deleteBoardWithRuns(context, board, deletedAt));
   boards.saveProject({ ...project, deleted: true, deletedAt, updatedAt: deletedAt });
   return { ok: true };
 };
@@ -340,12 +349,13 @@ const environmentOf = (text: unknown): Record<string, string> | undefined => {
 
 const updateBoardHandler: Handler = ({ boards }, command) => {
   const { board } = boards.stateOf(command.boardId!);
-  const fields = Object.fromEntries(["title", ...Object.values(RUN_CHOICE_DEFAULTS)].filter((key) => command[key] !== undefined).map((key) => [key, command[key]]));
+  const title = typeof command.title === "string" && command.title.trim() ? { title: command.title.trim() } : {};
+  const fields = Object.fromEntries(Object.values(RUN_CHOICE_DEFAULTS).filter((key) => isSafeChoice(command[key])).map((key) => [key, command[key]]));
   const budget = command.budgetTokens === undefined ? {} : { budgetTokens: Number(command.budgetTokens) > 0 ? Math.round(Number(command.budgetTokens)) : undefined };
   const share = command.summaryShare === undefined ? {} : { summaryShare: Math.min(1, Math.max(0, Number(command.summaryShare) || 0)) };
   const guide = command.answerFormatsGuide === undefined ? {} : { answerFormatsGuide: Boolean(command.answerFormatsGuide) };
   const environment = command.environment === undefined ? {} : { environment: environmentOf(command.environment) };
-  boards.saveBoard({ ...board, ...fields, ...budget, ...share, ...guide, ...environment, updatedAt: now() });
+  boards.saveBoard({ ...board, ...title, ...fields, ...budget, ...share, ...guide, ...environment, updatedAt: now() });
   boards.announceBoard(command.boardId!);
   return boards.stateOf(command.boardId!).board;
 };
@@ -370,7 +380,11 @@ const pasteNodesHandler: Handler = (context, command) => {
   const clipboard = asNodeClipboard(command.clipboard);
   if (!clipboard) throw new RefusedError("The clipboard does not hold Branchboard nodes");
   if (clipboard.nodes.length > MAX_PASTED_NODES) throw new RefusedError(`At most ${MAX_PASTED_NODES} nodes can be pasted at once`);
-  const sanitised = { ...clipboard, nodes: clipboard.nodes.map((node) => ({ ...node, attachments: storedAttachmentsOf(context, node) })) };
+  const sanitised = {
+    ...clipboard,
+    nodes: clipboard.nodes.map((node) => ({ ...node, attachments: storedAttachmentsOf(context, node) })),
+    parts: clipboard.parts.map((part) => (isToolOutputOmitted(part) ? { ...part, meta: { ...part.meta, output: boards.storedToolOutputOf(part) } } : part)),
+  };
   const anchor = command.position ?? { x: Math.min(...clipboard.nodes.map((node) => node.x)) + PASTE_NUDGE, y: Math.min(...clipboard.nodes.map((node) => node.y)) + PASTE_NUDGE };
   const plan = planPaste(boards.stateOf(boardId).graph, boardId, sanitised, anchor);
   boards.commitEdit(boardId, { type: "patch", patch: plan.patch });
@@ -387,9 +401,8 @@ const markBoardSeenHandler: Handler = ({ boards }, command) => {
   return { ok: true };
 };
 
-const deleteBoardHandler: Handler = ({ boards }, command) => {
-  const deletedAt = now();
-  boards.saveBoard({ ...boards.stateOf(command.boardId!).board, deleted: true, deletedAt, updatedAt: deletedAt });
+const deleteBoardHandler: Handler = (context, command) => {
+  deleteBoardWithRuns(context, context.boards.stateOf(command.boardId!).board, now());
   return { ok: true };
 };
 
@@ -494,7 +507,6 @@ export const commandHandlers: Record<string, Handler> = {
 };
 
 export const dispatchCommand = async (context: CommandContext, command: Command): Promise<unknown> => {
-  const handler = commandHandlers[command.type];
-  if (!handler) throw new RefusedError(`Unknown command ${command.type}`);
-  return handler(context, command);
+  if (!Object.hasOwn(commandHandlers, command.type)) throw new RefusedError(`Unknown command ${command.type}`);
+  return commandHandlers[command.type](context, command);
 };

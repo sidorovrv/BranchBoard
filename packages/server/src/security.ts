@@ -1,20 +1,34 @@
 import type { IncomingMessage } from "node:http";
+import { hostname, networkInterfaces } from "node:os";
 import type { MiddlewareHandler } from "hono";
 import { ACCESS_QUERY, accessCookieName, accessCookieHeader, cookieValueOf, tokensMatch } from "./accessToken";
-import { CAPABILITY_KINDS, capabilityOfPath } from "./capabilities";
+import { CAPABILITY_KINDS, capabilityOfPath, loggedPathOf } from "./capabilities";
 import { log } from "./log";
 
 export interface SecurityConfig {
   port: number;
   extraOrigins: string[];
   accessToken?: string;
+  networkNames?: string[];
 }
 
 const loopbackNames = ["127.0.0.1", "localhost"];
 
-export const allowedHosts = (config: SecurityConfig): string[] => loopbackNames.map((name) => `${name}:${config.port}`);
+export const LISTEN_ALL_ADDRESSES = "0.0.0.0";
 
-export const allowedOrigins = (config: SecurityConfig): string[] => [...loopbackNames.map((name) => `http://${name}:${config.port}`), ...config.extraOrigins];
+export const networkNamesOfThisComputer = (): string[] => {
+  const addresses = Object.values(networkInterfaces())
+    .flat()
+    .flatMap((entry) => (entry && entry.family === "IPv4" && !entry.internal ? [entry.address] : []));
+  const computerName = hostname().toLowerCase();
+  return [...new Set([...addresses, computerName, `${computerName}.local`])];
+};
+
+const hostNamesOf = (config: SecurityConfig): string[] => [...loopbackNames, ...(config.networkNames ?? [])];
+
+export const allowedHosts = (config: SecurityConfig): string[] => hostNamesOf(config).map((name) => `${name}:${config.port}`);
+
+export const allowedOrigins = (config: SecurityConfig): string[] => [...hostNamesOf(config).map((name) => `http://${name}:${config.port}`), ...config.extraOrigins];
 
 const hasAccess = (config: SecurityConfig, cookieHeader: string | undefined): boolean =>
   config.accessToken === undefined || tokensMatch(config.accessToken, cookieValueOf(cookieHeader, accessCookieName(config.port)));
@@ -43,7 +57,7 @@ const pathWithoutAccess = (url: URL): string => {
 export const securityMiddleware = (config: SecurityConfig): MiddlewareHandler => async (context, next) => {
   const host = context.req.header("host") ?? "";
   if (!allowedHosts(config).includes(host)) {
-    log.warn("security", `Rejected host "${host}" on ${context.req.method} ${context.req.path}`);
+    log.warn("security", `Rejected host "${host}" on ${context.req.method} ${loggedPathOf(context.req.path)}`);
     return context.json({ error: "Host not allowed" }, 403);
   }
   const origin = context.req.header("origin") ?? "";

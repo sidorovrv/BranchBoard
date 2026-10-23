@@ -1,6 +1,6 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Handle, Position, useConnection, useStore as useFlowStore, type Node, type NodeProps } from "@xyflow/react";
-import { activeRollOf, cacheReadShareOf, childIdsOf, edgesAtSide, isOnFlowAxis, isOutputSide, SIDES, usedSidesOf, type Side, formatCost, formatDuration, formatTokens, isChosen, isInFlight, isStale, isSummaryUsable, NODE_MAX_HEIGHT, NODE_MAX_WIDTH, preferredPermissionMode, UNSET_CHOICE, lockedNodeIds, minSizeOf, partsOfRoll, rollNumbersOf, shownSatelliteIdsOf, type GraphNode, type Part } from "@branchboard/core";
+import { activeRollOf, cacheReadShareOf, childIdsOf, edgesAtSide, isOnFlowAxis, isOutputSide, SIDES, usedSidesOf, type Side, formatCost, formatDuration, formatTokens, isChosen, isInFlight, isStale, isSummaryUsable, NODE_MAX_HEIGHT, NODE_MAX_WIDTH, preferredPermissionMode, UNSET_CHOICE, lockedNodeIds, minSizeOf, partsOfRoll, rollNumbersOf, subagentIdsOf, type GraphNode, type Part } from "@branchboard/core";
 import { availableNodeActions, commitGraphEdit, createAndFocus } from "../actions";
 import { fetchWorkspaceFiles } from "../api";
 import { attachToNode, droppedFiles, hasFiles } from "../attachments";
@@ -9,6 +9,7 @@ import { useCommentHighlights } from "../commentAnchors";
 import { clearGuides, isGuideHeld, snapResize } from "../dragSnap";
 import { SEEN_DWELL_MS, useIsUnseenResult, usePageVisible, useSeenResults } from "../seenResults";
 import { useGraphWithLiveMoves, useLiveMoves } from "../liveMoves";
+import { useSubagentDetached } from "../detachedSubagents";
 import { useSettings, type NodeTagId } from "../settings";
 import { tintStyleOf } from "../tint";
 import { sendBoardCommand, useBoard } from "../store";
@@ -27,6 +28,7 @@ import { ComposerFrame } from "../kit/ComposerFrame";
 import { ComposerPicker, insertPick, triggerAt, usePickerItems, type PickerItem } from "../kit/ComposerPicker";
 import { PromptEditor, type PromptEditorHandle } from "../kit/PromptEditor";
 import { RecoveryButton } from "./RecoveryButton";
+import { RememberedScroll, useRememberedScroll } from "../nodeScroll";
 
 const STATUS_LABELS: Record<GraphNode["status"], string> = {
   idle: "Ready",
@@ -93,15 +95,17 @@ const Composer = ({ node }: { node: GraphNode }) => {
   const run = () => {
     cancelScheduledSend(node.id);
     discardDraft();
-    return sendBoardCommand({ type: "run", nodeId: node.id, prompt, agent: agent || undefined, model: model || undefined, effort: chosenEffort, permissionMode: chosenMode });
+    return sendBoardCommand({ type: "run", boardId, nodeId: node.id, prompt, agent: agent || undefined, model: model || undefined, effort: chosenEffort, permissionMode: chosenMode });
   };
+  const latestRun = useRef(run);
+  latestRun.current = run;
   const scheduledAt = useScheduledSends((state) => state.runAt[node.id]);
   const now = useNow(scheduledAt !== undefined);
   const [openSendPanel, setOpenSendPanel] = useState<"menu" | "schedule">();
   const closeSendPanel = () => setOpenSendPanel(undefined);
   const isSendable = scheduledAt !== undefined || prompt.trim() !== "";
   const schedule = (at: number) => {
-    if (boardId) scheduleSend(node.id, at, run, { boardId, title: node.title, prompt });
+    if (boardId) scheduleSend(node.id, at, () => latestRun.current(), { boardId, title: node.title, prompt });
     closeSendPanel();
   };
   const unschedule = () => {
@@ -118,17 +122,19 @@ const Composer = ({ node }: { node: GraphNode }) => {
     <ComposerFrame
       picker={<ComposerPicker items={pickerItems} activeIndex={pickerIndex} onPick={pick} />}
       editor={
-        <PromptEditor
-          ref={editor}
-          className="composer-editor"
-          autoFocus={Date.now() - node.createdAt < FRESH_NODE_MS}
-          value={prompt}
-          placeholder="Ask something… (Shift+Enter for a new line, / for commands, @ for files and agents)"
-          onChange={setPrompt}
-          onCaret={setCaret}
-          onBlur={saveDraft}
-          onKeyDown={(event) => handlePickerKey(event) || handleEnterToRun(event)}
-        />
+        <RememberedScroll scrollKey={`${node.id}:composer`} selector=".cm-scroller">
+          <PromptEditor
+            ref={editor}
+            className="composer-editor"
+            autoFocus={Date.now() - node.createdAt < FRESH_NODE_MS}
+            value={prompt}
+            placeholder="Ask something… (Shift+Enter for a new line, / for commands, @ for files and agents)"
+            onChange={setPrompt}
+            onCaret={setCaret}
+            onBlur={saveDraft}
+            onKeyDown={(event) => handlePickerKey(event) || handleEnterToRun(event)}
+          />
+        </RememberedScroll>
       }
       attachments={<AttachmentList node={node} isEditable />}
       leading={
@@ -175,7 +181,9 @@ const Composer = ({ node }: { node: GraphNode }) => {
 const NoteBody = ({ node }: { node: GraphNode }) => {
   const { text, change, flush } = useAutosavedText(node.prompt, (saved) => void sendBoardCommand({ type: "editNode", nodeId: node.id, fields: { prompt: saved } }));
   return (
-    <PromptEditor className="note-text" value={text} placeholder="Write a note. It feeds every node it is connected to." onChange={change} onBlur={flush} />
+    <RememberedScroll scrollKey={`${node.id}:note`} selector=".cm-scroller">
+      <PromptEditor className="note-text" value={text} placeholder="Write a note. It feeds every node it is connected to." onChange={change} onBlur={flush} />
+    </RememberedScroll>
   );
 };
 
@@ -197,40 +205,54 @@ const NodeBody = ({ node, parts, roll }: { node: GraphNode; parts: Part[]; roll:
   return node.status === "idle" ? <Composer node={node} /> : <ChatBody node={node} parts={parts} roll={roll} />;
 };
 
-const SubagentInline = ({ satellite }: { satellite: GraphNode }) => {
+const SubagentToolCard = ({ part, satellite }: { part: Part; satellite: GraphNode }) => {
   const allParts = useBoard((state) => state.view.parts[satellite.id]) ?? EMPTY_PARTS;
   const parts = useMemo(() => partsOfRoll(allParts, activeRollOf(satellite)), [allParts, satellite]);
   const isFinished = SETTLED_STATUSES.includes(satellite.status);
+  const [isDetached, setDetached] = useSubagentDetached(satellite.id);
+  const focusNode = useBoard((state) => state.focusNode);
+  const toggleDetached = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDetached(!isDetached);
+    if (!isDetached) focusNode(satellite.id);
+  };
   return (
-    <details className="subagent-inline" open={!isFinished}>
+    <details className={`tool-card tool-${satellite.status}`} open={!isFinished}>
       <summary>
-        <IconRow names={["subagent"]} />
-        <span>{satellite.title}</span>
-        <span className={`badge status-${satellite.status}`}>{STATUS_LABELS[satellite.status]}</span>
-        <Elapsed node={satellite} />
+        <span className="tool-name">{String(part.meta?.tool)}</span>
+        <span className="tool-text">{part.text}</span>
+        <button type="button" className="extract-file" aria-pressed={isDetached} title={isDetached ? "Hide the separate node" : "Open as a separate node"} aria-label={isDetached ? "Hide the separate node" : "Open as a separate node"} onClick={toggleDetached}>
+          <Icon name="subagent" />
+        </button>
+        <span className="tool-status">{STATUS_LABELS[satellite.status]} <Elapsed node={satellite} /></span>
       </summary>
-      <div className="subagent-inline-body nowheel">
+      <div className="subagent-inline-body">
         <NodeRequests nodeId={satellite.id} />
-        {parts.map((part, index) => <PartView key={part.id} part={part} isFinished={isFinished} isLast={index === parts.length - 1} />)}
+        {parts.map((inner, index) => <PartView key={inner.id} part={inner} isFinished={isFinished} isLast={index === parts.length - 1} />)}
       </div>
     </details>
   );
 };
 
-const useInlineSubagents = (node: GraphNode, roll: number): GraphNode[] => {
-  const graph = useBoard((state) => state.view.graph);
+const useRenderSubagentPart = () => {
+  const nodes = useBoard((state) => state.view.graph.nodes);
   const isInline = useSettings((state) => state.settings.subagentDisplay) === "inline";
-  return useMemo(() => (isInline && node.kind === "turn" ? shownSatelliteIdsOf(graph, node.id, roll).map((id) => graph.nodes[id]) : []), [isInline, graph, node.id, node.kind, roll]);
+  return (part: Part) => {
+    const satellites = isInline ? subagentIdsOf(part).map((id) => nodes[id]).filter((satellite) => satellite && !satellite.deleted) : [];
+    return satellites.length > 0 ? satellites.map((satellite) => <SubagentToolCard key={satellite.id} part={part} satellite={satellite} />) : undefined;
+  };
 };
 
 const ChatBody = ({ node, parts, roll }: { node: GraphNode; parts: Part[]; roll: number }) => {
   const isFinished = SETTLED_STATUSES.includes(node.status) || roll !== activeRollOf(node);
   const answer = useRef<HTMLDivElement>(null);
-  const inlineSubagents = useInlineSubagents(node, roll);
+  const renderSubagentPart = useRenderSubagentPart();
   const isGrouping = useSettings((state) => state.settings.groupToolCalls);
   const isFollowing = useSettings((state) => state.settings.followScroll);
   const revert = useNodeRevert(node);
   useCommentHighlights(node, roll, answer);
+  useRememberedScroll(answer, `${node.id}:answer`);
   return (
     <ChatView
       parts={parts}
@@ -250,7 +272,7 @@ const ChatBody = ({ node, parts, roll }: { node: GraphNode; parts: Part[]; roll:
           <NodeRequests nodeId={node.id} />
         </>
       }
-      afterParts={inlineSubagents.map((satellite) => <SubagentInline key={satellite.id} satellite={satellite} />)}
+      renderPart={renderSubagentPart}
       footer={<NodeLiveControls node={node} />}
     />
   );
@@ -261,10 +283,10 @@ const TitleLabel = ({ node }: { node: GraphNode }) => {
   const [title, setTitle] = useState(node.title);
   const commit = () => {
     setIsEditing(false);
-    if (title.trim() && title !== node.title) void sendBoardCommand({ type: "editNode", nodeId: node.id, fields: { title: title.trim() } });
+    if (title.trim() && title.trim() !== node.title) void sendBoardCommand({ type: "editNode", nodeId: node.id, fields: { title: title.trim() } });
   };
   if (!isEditing) return <div className="node-label" onDoubleClick={() => (setTitle(node.title), setIsEditing(true))}>{node.title}</div>;
-  return <input className="node-label-input nodrag" autoFocus value={title} onChange={(event) => setTitle(event.target.value)} onBlur={commit} onKeyDown={(event) => event.key === "Enter" && commit()} />;
+  return <input className="node-label-input nodrag" autoFocus value={title} onChange={(event) => setTitle(event.target.value)} onBlur={commit} onKeyDown={(event) => (event.key === "Enter" && commit()) || (event.key === "Escape" && (setTitle(node.title), setIsEditing(false)))} />;
 };
 
 const LIVE_STATUSES: GraphNode["status"][] = ["running", "awaiting_approval"];
@@ -308,9 +330,9 @@ const RollSwitcher = ({ node, isViewOnly, shownRoll, onView }: RollSwitcherProps
   return (
     <div className="card-footer">
       <span data-tour="rolls" className="roll-switcher nodrag" title={title}>
-        <button disabled={position <= 0} onClick={() => select(-1)} aria-label="Previous roll">‹</button>
+        <button disabled={position <= 0} onClick={() => select(-1)} aria-label="Previous answer">‹</button>
         <span>{position + 1}/{rolls.length}</span>
-        <button disabled={position >= rolls.length - 1} onClick={() => select(1)} aria-label="Next roll">›</button>
+        <button disabled={position >= rolls.length - 1} onClick={() => select(1)} aria-label="Next answer">›</button>
       </span>
     </div>
   );
@@ -486,9 +508,9 @@ const FlowHandles = ({ node }: { node: GraphNode }) => {
         return (
           <Fragment key={side}>
             {(node.kind === "turn" || node.kind === "code" || isSatellite) && (
-              <Handle type="target" id={`${side}-target`} position={SIDE_POSITIONS[side]} isConnectable={!isSatellite} className={`${className} ${isOutput || isSatellite ? "is-passive" : ""}`} onContextMenu={disconnectMenuAt(side)} />
+              <Handle type="target" id={`${side}-target`} position={SIDE_POSITIONS[side]} isConnectable={!isSatellite} className={`${className} ${isSatellite ? "is-passive" : isOutput ? "is-passive is-hidden" : ""}`} onContextMenu={disconnectMenuAt(side)} />
             )}
-            {!isSatellite && <Handle type="source" id={`${side}-source`} position={SIDE_POSITIONS[side]} className={`${className} ${isOutput ? "" : "is-passive"}`} onContextMenu={disconnectMenuAt(side)} />}
+            {!isSatellite && <Handle type="source" id={`${side}-source`} position={SIDE_POSITIONS[side]} className={`${className} ${isOutput ? "" : "is-passive is-hidden"}`} onContextMenu={disconnectMenuAt(side)} />}
           </Fragment>
         );
       })}
@@ -498,6 +520,16 @@ const FlowHandles = ({ node }: { node: GraphNode }) => {
 };
 
 type BranchNode = Node<{ nodeId: string }, "bb">;
+
+const VIEWPORT_MARGIN_SHARE = 0.5;
+
+const useIsNearViewport = (x: number, y: number, w: number, h: number): boolean =>
+  useFlowStore((state) => {
+    const [panX, panY, zoom] = state.transform;
+    const [marginX, marginY] = [state.width * VIEWPORT_MARGIN_SHARE, state.height * VIEWPORT_MARGIN_SHARE];
+    const [left, top] = [x * zoom + panX, y * zoom + panY];
+    return left + w * zoom > -marginX && left < state.width + marginX && top + h * zoom > -marginY && top < state.height + marginY;
+  });
 
 const NodeShellComponent = ({ data, selected }: NodeProps<BranchNode>) => {
   const node = useBoard((state) => state.view.graph.nodes[data.nodeId]);
@@ -516,6 +548,7 @@ const NodeShellComponent = ({ data, selected }: NodeProps<BranchNode>) => {
   const stale = useMemo(() => (node ? isStale(graph, node) : false), [graph, node]);
   const hiddenCount = useMemo(() => (node?.collapsed ? childIdsOf(graph, node.id).length : 0), [graph, node]);
   const { size, beginResize } = useCornerResize(node ?? ({ id: data.nodeId, w: 0, h: 0 } as GraphNode));
+  const showsBody = useIsNearViewport(node?.x ?? 0, node?.y ?? 0, size.w, size.h) && !isLowDetail;
   const [isDropTarget, setIsDropTarget] = useState(false);
   const blinksForAttention = useSettings((state) => state.settings.blinkForAttention);
   const isOnlySelected = useBoard((state) => state.selectedIds.length <= 1);
@@ -549,8 +582,8 @@ const NodeShellComponent = ({ data, selected }: NodeProps<BranchNode>) => {
         {isLowDetail && <CommentsChip node={node} zoom={zoom} />}
         {(node.kind === "turn" || node.kind === "subagent") && <Badges node={node} stale={stale} isBlocked={isBlocked} summaryState={summaryState} />}
         {isLowDetail && <div className="lod-title" style={{ fontSize: Math.min(LOW_DETAIL_FONT_SCREEN_PX / zoom, Math.sqrt((node.w * node.h * LOW_DETAIL_FILL) / (Math.max(node.title.length, 1) * LOW_DETAIL_CHAR_ASPECT))) }}>{node.title}</div>}
-        {!isLowDetail && <NodeBody node={node} parts={parts} roll={shownRoll} />}
-        {!isLowDetail && <RollSwitcher node={node} isViewOnly={isViewOnly} shownRoll={shownRoll} onView={setViewedRoll} />}
+        {showsBody && <NodeBody node={node} parts={parts} roll={shownRoll} />}
+        {showsBody && <RollSwitcher node={node} isViewOnly={isViewOnly} shownRoll={shownRoll} onView={setViewedRoll} />}
         {hiddenCount > 0 && <div className="collapsed-note">{hiddenCount} collapsed</div>}
         {!node.pinned && RESIZE_HANDLES.map(({ className, title, direction }) => <div key={className} className={`resize-handle ${className} nodrag nopan`} onPointerDown={(event) => beginResize(event, direction)} title={title}><span /></div>)}
       </div>

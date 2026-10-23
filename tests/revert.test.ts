@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -135,6 +135,13 @@ describe("guarded workspace writes", () => {
     expect(() => writeWorkspaceFile(folder, "keep.txt", "new", { expectedHash: "0".repeat(64) })).toThrow(/changed/);
     expect(read(folder, "keep.txt")).toBe("keep");
   });
+
+  it.skipIf(process.platform === "win32")("refuses a dangling link that points outside", () => {
+    const outside = join(mkdtempSync(join(tmpdir(), "branchboard-outside-")), "target.txt");
+    symlinkSync(outside, join(folder, "dangling.txt"));
+    expect(() => writeWorkspaceFile(folder, "dangling.txt", "x")).toThrow(/link/);
+    expect(existsSync(outside)).toBe(false);
+  });
 });
 
 describe("git workspace snapshot", () => {
@@ -159,7 +166,7 @@ describe("git workspace snapshot", () => {
   });
 });
 
-describe("F-1 revert in a plain folder", () => {
+describe("revert in a plain folder", () => {
   it("restores an edited file, deletes a created one and can redo", async () => {
     const folder = newWorkspace({ "a.txt": "one\ntwo\n" });
     const boardId = await boardIn(folder);
@@ -228,7 +235,7 @@ describe("F-1 revert in a plain folder", () => {
   });
 });
 
-describe("F-1 revert in a git repository", () => {
+describe("revert in a git repository", () => {
   it("restores an overwritten file from the snapshot and leaves the index alone", async () => {
     const folder = newWorkspace({ "a.txt": "original\n" }, true);
     const boardId = await boardIn(folder);

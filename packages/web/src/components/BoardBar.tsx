@@ -67,7 +67,6 @@ const useRuntimeHealth = (boardId: string | undefined) => {
 
 export const BoardBar = () => {
   const board = useBoard((state) => state.board);
-  const project = useBoard((state) => state.projects.find((candidate) => candidate.id === state.board?.projectId));
   const isTourOpen = useBoard((state) => state.isTourOpen);
   useRuntimeHealth(isTourOpen ? undefined : board?.id);
   const meters = useBoard((state) => state.catalog?.meters) ?? [];
@@ -81,31 +80,17 @@ export const BoardBar = () => {
   const [isTrashOpen, setIsTrashOpen] = useState(false);
   const isReaderOpen = useBoard((state) => state.isReaderOpen);
 
-  const navigation = useSettings((state) => state.settings.boardNavigation);
-  const hasSidebar = navigation !== "tabs";
-  const hasTabs = navigation !== "sidebar";
-
   return (
     <header className="board-bar">
-      {hasSidebar && (
-        <button
-          onClick={() => updateSetting("isSidebarOpen", !isSidebarOpen)}
-          title={isSidebarOpen ? "Hide projects and boards" : "Show projects and boards"}
-          aria-label={isSidebarOpen ? "Hide projects and boards" : "Show projects and boards"}
-          aria-pressed={isSidebarOpen}
-        >
-          <IconRow names={[isSidebarOpen ? "sidebarClose" : "sidebarOpen"]} />
-        </button>
-      )}
-      {hasTabs && <BoardTabs />}
-      {board && !hasTabs && (
-        <span className="board-crumb">
-          {project && <span className="crumb-project">{project.name}</span>}
-          {project && <span className="crumb-separator">/</span>}
-          <strong className="crumb-board">{board.title}</strong>
-        </span>
-      )}
-      {!board && !hasTabs && <strong className="brand">Branchboard</strong>}
+      <button
+        onClick={() => updateSetting("isSidebarOpen", !isSidebarOpen)}
+        title={isSidebarOpen ? "Hide projects and boards" : "Show projects and boards"}
+        aria-label={isSidebarOpen ? "Hide projects and boards" : "Show projects and boards"}
+        aria-pressed={isSidebarOpen}
+      >
+        <IconRow names={[isSidebarOpen ? "sidebarClose" : "sidebarOpen"]} />
+      </button>
+      <BoardTabs />
       <span className="spacer" />
       <UpdateBanner />
       {board && (
@@ -126,7 +111,7 @@ export const BoardBar = () => {
           ))}
         </>
       )}
-      <button onClick={() => setIsTrashOpen(true)} title="Trash" aria-label="Trash"><IconRow names={["trash"]} /></button>
+      <button onClick={() => setIsTrashOpen(true)} title="Trash" aria-label="Trash"><IconRow names={["delete"]} /></button>
       <span className="bar-divider" />
       <HelpButton />
       <button onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Settings"><IconRow names={["settings"]} /></button>
@@ -140,8 +125,8 @@ export const BoardBar = () => {
       </button>
       <button
         onClick={() => updateSetting("isContextPanelOpen", !isContextPanelOpen)}
-        title={isContextPanelOpen ? "Hide the context panel" : "Show the context panel"}
-        aria-label={isContextPanelOpen ? "Hide the context panel" : "Show the context panel"}
+        title={isContextPanelOpen ? "Hide the side panel" : "Show the side panel"}
+        aria-label={isContextPanelOpen ? "Hide the side panel" : "Show the side panel"}
         aria-pressed={isContextPanelOpen}
       >
         <IconRow names={[isContextPanelOpen ? "contextPanelClose" : "contextPanelOpen"]} />

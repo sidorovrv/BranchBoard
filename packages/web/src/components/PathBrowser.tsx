@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { browseFolder, type BrowsedFolder } from "../api";
+import { listenForEscape } from "../escape";
 
 const joinPath = (folder: string, name: string) => `${folder}${/[\\/]$/.test(folder) ? "" : folder.includes("\\") ? "\\" : "/"}${name}`;
 
@@ -7,22 +8,30 @@ export const PathBrowser = ({ kind, start, onPick, onClose }: { kind: "folder" |
   const [folder, setFolder] = useState<BrowsedFolder>();
   const [location, setLocation] = useState(start);
   const [error, setError] = useState("");
+  const [typedPath, setTypedPath] = useState<string>();
+  useEffect(() => listenForEscape(onClose), [onClose]);
   useEffect(() => {
+    let isStale = false;
     browseFolder(location, kind === "file").then(
       (loaded) => {
+        if (isStale) return;
         setFolder(loaded);
+        setTypedPath(undefined);
         setError("");
       },
-      (failure) => setError(failure instanceof Error ? failure.message : String(failure)),
+      (failure) => !isStale && setError(failure instanceof Error ? failure.message : String(failure)),
     );
+    return () => {
+      isStale = true;
+    };
   }, [location, kind]);
   return (
     <div className="dialog-backdrop">
-      <div className="dialog path-browser">
+      <div className="dialog path-browser" role="dialog" aria-modal="true" aria-label={kind === "folder" ? "Choose a folder" : "Choose a file"}>
         <h3>{kind === "folder" ? "Choose a folder" : "Choose a file"}</h3>
         <div className="row">
           <button type="button" disabled={!folder?.parent} onClick={() => folder?.parent && setLocation(folder.parent)} title="Up one folder">↑</button>
-          <input value={folder?.path ?? location ?? ""} spellCheck={false} onChange={(event) => setFolder(folder && { ...folder, path: event.target.value })} onKeyDown={(event) => event.key === "Enter" && setLocation(event.currentTarget.value)} />
+          <input aria-label="Path" value={typedPath ?? folder?.path ?? location ?? ""} spellCheck={false} onChange={(event) => setTypedPath(event.target.value)} onKeyDown={(event) => event.key === "Enter" && setLocation(event.currentTarget.value)} />
         </div>
         {error && <div className="part-error">{error}</div>}
         <div className="file-picker-list path-browser-list">

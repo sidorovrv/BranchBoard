@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
+import { listenForEscape } from "../escape";
 
 const EDGE_GAP = 8;
 
@@ -35,18 +36,17 @@ const ContextMenu = ({ menu, onClose }: { menu: OpenMenu; onClose: () => void })
     const closeOnOutsidePress = (event: Event) => {
       if (!element.current?.contains(event.target as Node)) onClose();
     };
-    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && onClose();
     window.addEventListener("pointerdown", closeOnOutsidePress, true);
     window.addEventListener("mousedown", closeOnOutsidePress, true);
     window.addEventListener("wheel", close, true);
     window.addEventListener("blur", close);
-    window.addEventListener("keydown", closeOnEscape);
+    const stopListeningForEscape = listenForEscape(close);
     return () => {
       window.removeEventListener("pointerdown", closeOnOutsidePress, true);
       window.removeEventListener("mousedown", closeOnOutsidePress, true);
       window.removeEventListener("wheel", close, true);
       window.removeEventListener("blur", close);
-      window.removeEventListener("keydown", closeOnEscape);
+      stopListeningForEscape();
     };
   }, [onClose]);
   return createPortal(

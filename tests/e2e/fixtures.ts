@@ -54,4 +54,4 @@ export const test = base.extend<{ instance: Instance; demo: DemoBoard; appPage: 
   },
 });
 
-export { expect };
+export { expect, type Page };

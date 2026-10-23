@@ -6,7 +6,7 @@ export type LooseNative = NativeEvent & Record<string, any>;
 export const APPROVAL_OPTIONS = ["once", "always", "reject"];
 
 export const subagentEventMap = (mapOf: () => EventMap<LooseNative>): EventMap<LooseNative> => ({
-  "subagent-start": (native) => [{ type: "subagent.started", key: native.key, title: native.title, agent: native.agent, prompt: native.prompt }],
+  "subagent-start": (native) => [{ type: "subagent.started", key: native.key, partKey: native.partId ?? `subagent:${native.key}`, title: native.title, agent: native.agent, prompt: native.prompt }],
   "subagent-done": (native) => [{ type: "subagent.event", key: native.key, event: { type: "done" } }],
   sub: (native, scope) => (mapOf()[native.inner.type]?.(native.inner, scope) ?? []).map((event): RunEvent => ({ type: "subagent.event", key: native.key, event })),
 });
@@ -30,7 +30,9 @@ export interface UsageFields {
   costUsd?: number;
 }
 
-export const usageNative = (fields: UsageFields): LooseNative => ({ type: "usage", ...fields });
+export const numberOf = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+
+export const usageNative =(fields: UsageFields): LooseNative => ({ type: "usage", ...fields });
 
 export const usageEvents = (native: LooseNative): RunEvent[] => [
   {

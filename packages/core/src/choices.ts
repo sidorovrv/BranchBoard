@@ -15,7 +15,11 @@ export const RUN_CHOICE_KEYS = Object.keys(RUN_CHOICE_DEFAULTS) as RunChoiceKey[
 
 export type RunChoices = Partial<Pick<GraphNode, RunChoiceKey>>;
 
-export const isChosen = (value: string | undefined): value is string => Boolean(value) && value !== UNSET_CHOICE;
+const CHOICE_PATTERN = /^[\w.:/@+-]{1,120}$/;
+
+export const isSafeChoice = (value: unknown): value is string => typeof value === "string" && CHOICE_PATTERN.test(value);
+
+export const isChosen =(value: string | undefined): value is string => Boolean(value) && value !== UNSET_CHOICE;
 
 export const DEFAULT_MODEL_PREFERENCE = "sonnet";
 

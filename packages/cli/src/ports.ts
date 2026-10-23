@@ -54,5 +54,6 @@ export const resolvePort = async ({ requestedPort, lastPort, dataDirId, probe = 
   const state: PortState = knownPort === undefined ? { kind: "free" } : await probe(knownPort);
   if (knownPort !== undefined && state.kind === "branchboard" && state.dataDirId === dataDirId) return { kind: "reuse", port: knownPort };
   if (requestedPort !== undefined) return state.kind === "free" ? { kind: "start", port: requestedPort } : { kind: "none" };
+  if (knownPort !== undefined && state.kind === "free") return { kind: "start", port: knownPort };
   return { kind: "start", port: await pickPort() };
 };

@@ -9,6 +9,7 @@ export const BODY_CAPS = {
   attachments: 25 * MEGABYTE,
   mcp: 1 * MEGABYTE,
   perf: 16 * 1024,
+  settings: 64 * 1024,
 } as const;
 
 export type BodyKind = "json" | "bytes";

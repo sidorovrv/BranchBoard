@@ -10,6 +10,7 @@ export const readJsonFile = <T>(path: string, fallback: T): T => {
 };
 
 const LOCKED_FILE_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+export const isLockedFileError = (error: unknown): boolean => LOCKED_FILE_CODES.has((error as NodeJS.ErrnoException).code ?? "");
 const RENAME_ATTEMPTS = 10;
 const RENAME_RETRY_MS = 50;
 
@@ -20,7 +21,7 @@ export const replaceFile = (temporary: string, path: string) => {
     try {
       return renameSync(temporary, path);
     } catch (error) {
-      if (attempt >= RENAME_ATTEMPTS || !LOCKED_FILE_CODES.has((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      if (attempt >= RENAME_ATTEMPTS || !isLockedFileError(error)) throw error;
       pause(RENAME_RETRY_MS * attempt);
     }
   }

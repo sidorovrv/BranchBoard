@@ -3,6 +3,7 @@ import { activeRollOf, bulletOfQuote, isBranchList, liveNodes, quotedPrompt, wit
 import { createAndFocus } from "../actions";
 import { keepNativeMenuOnTextFields } from "./ContextMenu";
 import { ANSWER_SELECTOR, offsetsOfRange } from "../commentAnchors";
+import { listenForEscape } from "../escape";
 import { sendBoardCommand, useBoard } from "../store";
 import { addComment, askNow, CommentField, type CommentAnchor } from "./Comments";
 
@@ -99,15 +100,14 @@ export const SelectionMenu = () => {
   useEffect(() => {
     if (!menu) return;
     showHighlight(menu.selection.range);
-    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && close();
     window.addEventListener("mousedown", close);
     window.addEventListener("blur", close);
-    window.addEventListener("keydown", closeOnEscape);
+    const stopListeningForEscape = listenForEscape(close);
     return () => {
       showHighlight(undefined);
       window.removeEventListener("mousedown", close);
       window.removeEventListener("blur", close);
-      window.removeEventListener("keydown", closeOnEscape);
+      stopListeningForEscape();
     };
   }, [menu]);
 

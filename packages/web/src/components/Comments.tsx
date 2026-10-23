@@ -3,6 +3,7 @@ import { commentsPrompt, MAX_COMMENT_CHARS, newId, type GraphNode, type NodeComm
 import { createAndFocus } from "../actions";
 import { keepNativeMenuOnTextFields } from "./ContextMenu";
 import { ANSWER_SELECTOR, commentsOfRoll, rangeOfComment } from "../commentAnchors";
+import { listenForEscape } from "../escape";
 import { sendBoardCommand, useBoard } from "../store";
 import { Icon } from "../kit/Icons";
 
@@ -40,7 +41,8 @@ export const CommentField = ({ initialText = "", label, autoFocus, onSubmit, onA
     element.style.height = "auto";
     element.style.height = `${element.scrollHeight}px`;
   }, [text]);
-  const submit = () => onSubmit(text.trim());
+  const isBlank = text.trim() === "";
+  const submit = () => !isBlank && onSubmit(text.trim());
   return (
     <div className={`comment-field${onAsk ? " has-actions" : ""}`}>
       <textarea
@@ -52,18 +54,18 @@ export const CommentField = ({ initialText = "", label, autoFocus, onSubmit, onA
         placeholder="Add a comment"
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key !== "Enter" || event.shiftKey) return;
+          if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
           event.preventDefault();
           submit();
         }}
       />
       {onAsk ? (
         <div className="comment-actions">
-          <button onClick={submit} title={label}>{initialText ? "Save comment" : "Add to comments"}</button>
-          <button className="primary" disabled={text.trim() === ""} onClick={() => onAsk(text.trim())} title="Send the quote and the comment to a new node and run it now">Ask now</button>
+          <button disabled={isBlank} onClick={submit} title={label}>{initialText ? "Save comment" : "Add to comments"}</button>
+          <button className="primary" disabled={isBlank} onClick={() => onAsk(text.trim())} title="Send the quote and the comment to a new node and run it now">Ask now</button>
         </div>
       ) : (
-        <button className="comment-submit" onClick={submit} title={label} aria-label={label}><Icon name="comment" /></button>
+        <button className="comment-submit" disabled={isBlank} onClick={submit} title={label} aria-label={label}><Icon name="comment" /></button>
       )}
     </div>
   );
@@ -109,14 +111,13 @@ export const CommentMenu = () => {
   useEffect(() => {
     if (!open) return;
     const close = () => setOpen(undefined);
-    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && close();
     window.addEventListener("mousedown", close);
     window.addEventListener("blur", close);
-    window.addEventListener("keydown", closeOnEscape);
+    const stopListeningForEscape = listenForEscape(close);
     return () => {
       window.removeEventListener("mousedown", close);
       window.removeEventListener("blur", close);
-      window.removeEventListener("keydown", closeOnEscape);
+      stopListeningForEscape();
     };
   }, [open]);
 

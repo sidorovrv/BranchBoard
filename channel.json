@@ -1,4 +1,7 @@
 {
-  "claudeModels": [],
+  "claudeModels": [
+    { "id": "claude-haiku-5-5", "name": "Haiku 5.5" },
+    { "id": "claude-fable-5-1", "name": "Fable 5.1" }
+  ],
   "engine": { "version": "2.0.27" }
 }

@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { openNewBoard } from "../actions";
+import { listenForEscape } from "../escape";
 import { isApiRuntime, RUNTIMES, runtimeInfo, type RuntimeId } from "@branchboard/core";
 import { pickPath } from "../api";
 import { ChipSelect } from "../kit/ChipSelect";
@@ -37,27 +39,39 @@ export const ProjectDialog = ({ onClose }: { onClose: () => void }) => {
       setIsBrowsing(false);
     }
   };
+  const isOpen = useRef(true);
+  const isConnectingRef = useRef(false);
+  useEffect(() => {
+    isOpen.current = true;
+    const stopListening = listenForEscape(() => isConnectingRef.current || onClose());
+    return () => {
+      isOpen.current = false;
+      stopListening();
+    };
+  }, [onClose]);
   const connect = async () => {
-    const { send, loadBoards, openBoard } = useBoard.getState();
-    if (isApiRuntime(mode)) {
-      setIsConnecting(true);
-      const isEngineReady = await setUpEngine(mode, refresh);
-      setIsConnecting(false);
-      if (!isEngineReady) return;
+    const { send } = useBoard.getState();
+    isConnectingRef.current = true;
+    setIsConnecting(true);
+    try {
+      if (isApiRuntime(mode) && !(await setUpEngine(mode, refresh, () => !isOpen.current))) return;
+      if (!isOpen.current) return;
+      const project = await send<{ id: string }>({ type: "createProject", name: name.trim() || undefined, workspacePath, mode, defaultModel: modelId.trim() || undefined });
+      if (!project) return;
+      const board = await send<{ id: string }>({ type: "createBoard", projectId: project.id });
+      if (board) await openNewBoard(board.id);
+      onClose();
+    } finally {
+      isConnectingRef.current = false;
+      if (isOpen.current) setIsConnecting(false);
     }
-    const project = await send<{ id: string }>({ type: "createProject", name: name.trim() || undefined, workspacePath, mode, defaultModel: modelId.trim() || undefined });
-    if (!project) return;
-    const board = await send<{ id: string }>({ type: "createBoard", projectId: project.id });
-    await loadBoards();
-    if (board) await openBoard(board.id);
-    onClose();
   };
   const choices = isDemoShown ? [...RUNTIME_CHOICES, "fake" as RuntimeId] : RUNTIME_CHOICES;
   const isBlocked = catalog !== undefined && !catalog.health.ok;
   return (
     <div className="dialog-backdrop">
       {isBrowserShown && <PathBrowser kind="folder" start={workspacePath.trim() || undefined} onPick={(path) => { setWorkspacePath(path); setIsBrowserShown(false); }} onClose={() => setIsBrowserShown(false)} />}
-      <div className="dialog">
+      <div className="dialog" role="dialog" aria-modal="true" aria-label="Connect a project">
         <h3>Connect a project</h3>
         <div className="muted">A project is a folder. Its boards share that folder.</div>
         <div className="field">
@@ -69,7 +83,7 @@ export const ProjectDialog = ({ onClose }: { onClose: () => void }) => {
         </div>
         <label>Name (optional)<input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <div className="field">
-          <label>Runtime</label>
+          <div>Runtime</div>
           <ChipSelect icon="model" title="Runtime" value={mode} options={choices.map((id) => ({ value: id, label: RUNTIME_LABELS[id] ?? RUNTIMES[id].label }))} onChange={(id) => setMode(id as RuntimeId)} />
         </div>
         {runtimeInfo(mode).trustNote && <div className="muted">{RUNTIMES[mode].label} can read and edit files and run commands in this folder. Only connect folders you trust.</div>}
@@ -105,7 +119,7 @@ export const ProjectDialog = ({ onClose }: { onClose: () => void }) => {
         )}
         <div className="dialog-actions">
           <button onClick={onClose}>Close</button>
-          <button className="primary" disabled={!workspacePath.trim() || isBlocked || isConnecting} title={isBlocked ? catalog.health.detail : undefined} onClick={() => void connect()}>{isConnecting ? "Downloading the engine…" : "Connect"}</button>
+          <button className="primary" disabled={!workspacePath.trim() || isBlocked || isConnecting} title={isBlocked ? catalog.health.detail : workspacePath.trim() ? undefined : "Enter a folder first"} onClick={() => void connect()}>{isConnecting ? (isApiRuntime(mode) ? "Downloading the engine…" : "Connecting…") : "Connect"}</button>
         </div>
       </div>
     </div>

@@ -11,10 +11,10 @@ export const resolveInsideWorkspace = (workspacePath: string, relativePath: stri
   const target = resolve(root, relativePath);
   const inside = relative(root, target);
   if (inside === "" || escapesFolder(inside)) throw new RefusedError(`${relativePath} is not inside the project folder`);
+  if (lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) throw new RefusedError(`${relativePath} is a link and is not changed`);
   let ancestor = target;
-  while (!existsSync(ancestor)) ancestor = dirname(ancestor);
+  while (!lstatSync(ancestor, { throwIfNoEntry: false })) ancestor = dirname(ancestor);
   if (escapesFolder(relative(root, realpathSync(ancestor)))) throw new RefusedError(`${relativePath} leads outside the project folder`);
-  if (existsSync(target) && lstatSync(target).isSymbolicLink()) throw new RefusedError(`${relativePath} is a link and is not changed`);
   return target;
 };
 

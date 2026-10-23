@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { listenForEscape } from "../escape";
 import { nextOccurrence } from "../scheduledSends";
 
 const HOURS = Array.from({ length: 24 }, (_, hour) => hour);
@@ -28,7 +29,7 @@ const TimeColumn = ({ label, values, selected, onSelect }: TimeColumnProps) => {
   return (
     <ul className="schedule-column" ref={list} role="listbox" aria-label={label}>
       {values.map((value) => (
-        <li key={value} role="option" aria-selected={value === selected} className={value === selected ? "selected" : undefined} onClick={() => onSelect(value)}>
+        <li key={value} role="option" aria-selected={value === selected} className={value === selected ? "selected" : undefined} tabIndex={0} onClick={() => onSelect(value)} onKeyDown={(event) => (event.key === "Enter" || event.key === " ") && (event.preventDefault(), onSelect(value))}>
           {twoDigits(value)}
         </li>
       ))}
@@ -42,14 +43,11 @@ const useDismiss = (onClose: () => void, panel?: RefObject<HTMLElement | null>) 
       const target = event.target as Element;
       if (panel && !panel.current?.contains(target) && !target.closest(".send-split")) onClose();
     };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
     document.addEventListener("mousedown", closeOnOutsidePress);
-    window.addEventListener("keydown", closeOnEscape);
+    const stopListeningForEscape = listenForEscape(onClose);
     return () => {
       document.removeEventListener("mousedown", closeOnOutsidePress);
-      window.removeEventListener("keydown", closeOnEscape);
+      stopListeningForEscape();
     };
   }, [onClose, panel]);
 };
@@ -89,7 +87,7 @@ export const SendMenu = ({ onSchedule, onClose }: SendMenuProps) => {
   useDismiss(onClose, panel);
   return (
     <AnchoredPanel className="send-menu" label="Send options" role="menu" panel={panel}>
-      <button role="menuitem" onClick={onSchedule}>Schedule Run</button>
+      <button role="menuitem" onClick={onSchedule}>Schedule run</button>
     </AnchoredPanel>
   );
 };
@@ -109,7 +107,7 @@ export const ScheduleRunDialog = ({ scheduledAt, onSchedule, onUnschedule, onClo
   useDismiss(onClose, panel);
 
   return (
-    <AnchoredPanel className="schedule-dialog" label="Schedule Run" role="dialog" panel={panel}>
+    <AnchoredPanel className="schedule-dialog" label="Schedule run" role="dialog" panel={panel}>
       <div className="schedule-title">Run at</div>
       <div className="schedule-time">
         <TimeColumn label="Hour" values={HOURS} selected={hour} onSelect={setHour} />
@@ -117,7 +115,7 @@ export const ScheduleRunDialog = ({ scheduledAt, onSchedule, onUnschedule, onClo
         <TimeColumn label="Minute" values={MINUTES} selected={minute} onSelect={setMinute} />
       </div>
       <div className="schedule-actions">
-        <button className="primary" onClick={() => onSchedule(nextOccurrence(hour, minute, Date.now()))}>Schedule Run</button>
+        <button className="primary" onClick={() => onSchedule(nextOccurrence(hour, minute, Date.now()))}>Schedule run</button>
         {scheduledAt !== undefined && <button onClick={onUnschedule}>Unschedule</button>}
       </div>
     </AnchoredPanel>

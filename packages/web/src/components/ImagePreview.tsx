@@ -1,5 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { create } from "zustand";
+import { listenForEscape } from "../escape";
 import { Icon } from "../kit/Icons";
 
 interface PreviewTarget {
@@ -59,9 +60,7 @@ export const ImagePreviewLayer = () => {
   const { opened, hovered, close } = useImagePreview();
   useEffect(() => {
     if (!opened) return;
-    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && close();
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    return listenForEscape(close);
   }, [opened, close]);
   return (
     <>

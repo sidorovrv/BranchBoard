@@ -2,7 +2,7 @@ import { isAbsolute, relative } from "node:path";
 import { answerValueOf, decodeAnswers, isChosen, LINK_DONE_LABEL, NO_LABEL, parseQuestionSpec, patchTextOfFileChanges, YES_LABEL, type FileChange, type QuestionKind, type QuestionSpec, type SessionPlan } from "@branchboard/core";
 import type { RunFile } from "../run/types";
 import { codexFailureOf } from "./failures";
-import { attachmentReferences, isImageFile, usageNative, type LooseNative } from "./commonEvents";
+import { attachmentReferences, isImageFile, numberOf, usageNative, type LooseNative } from "./commonEvents";
 import type { RpcMessage } from "./jsonRpcProcess";
 
 export const QUESTION_FEATURE = "features.default_mode_request_user_input";
@@ -71,8 +71,6 @@ export const turnInput = (input: string, files: RunFile[], skills: SkillRef[] = 
 export const turnStartParams = (threadId: string, input: string, files: RunFile[], effort?: string, skills: SkillRef[] = []) => ({ threadId, input: turnInput(input, files, skills), ...(isChosen(effort) ? { effort } : {}) });
 
 const isRecord = (value: unknown): value is Record<string, any> => typeof value === "object" && value !== null;
-
-const numberOf = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
 
 export const commandTextOf = (source: { command?: string | null; commandActions?: { command?: string }[] | null }): string => {
   const actions = (source.commandActions ?? []).map((action) => action.command).filter((command): command is string => typeof command === "string" && command.length > 0);
@@ -215,7 +213,7 @@ const spawnedThreads = (item: any, state: CodexRunState): LooseNative[] =>
     .map((threadId: string): LooseNative => {
       state.threads.add(threadId);
       const prompt = typeof item.prompt === "string" ? item.prompt : undefined;
-      return { type: "subagent-start", key: threadId, title: prompt?.split("\n")[0]?.slice(0, 60) || "Subagent", agent: item.model || undefined, prompt };
+      return { type: "subagent-start", key: threadId, partId: `tool:${item.id}`, title: prompt?.split("\n")[0]?.slice(0, 60) || "Subagent", agent: item.model || undefined, prompt };
     });
 
 const itemStarted = (item: any, state: CodexRunState): LooseNative[] => {

@@ -2,8 +2,9 @@ import { useMemo, useState, type ReactNode } from "react";
 import { describeContext, formatAgo, formatTokens, incomingEdges, isStale, isSummaryUsable, orderedAncestorIds, sameMembers, type ContextMode, type GraphNode, type Id } from "@branchboard/core";
 import { commitGraphEdit, summariseNode } from "../actions";
 import { useSettings } from "../settings";
-import { sendBoardCommand, useBoard } from "../store";
+import { sendBoardCommand, useBoard, type SidePanelTab } from "../store";
 import { Icon } from "../kit/Icons";
+import { SearchPanel } from "./SearchPanel";
 
 const KIND_LABELS = { context: "Note", code: "Code", file: "File", turn: "Chat", subagent: "Subagent", summary: "Summary" };
 
@@ -140,7 +141,7 @@ const ContextBody = () => {
     return (
       <>
         <div className="ctx-heading"><KindDot kind={node.kind} /><strong>{node.title}</strong></div>
-        <div className="ctx-note">A {node.kind === "file" ? "file node" : node.kind === "code" ? "code node" : "note"} adds its content to the context of every node it is connected to.</div>
+        <div className="ctx-note">{node.kind === "subagent" ? `A subagent of ${graph.nodes[node.satelliteOf ?? ""]?.title ?? "another node"}. Its answer goes to that node only and is not sent to other nodes.` : `A ${node.kind === "file" ? "file node" : node.kind === "code" ? "code node" : "note"} adds its content to the context of every node it is connected to.`}</div>
       </>
     );
   }
@@ -177,15 +178,24 @@ const ContextBody = () => {
   );
 };
 
+const TABS: { id: SidePanelTab; label: string }[] = [
+  { id: "context", label: "Context" },
+  { id: "search", label: "Search" },
+];
+
 export const ContextPanel = () => {
   const updateSetting = useSettings((state) => state.update);
+  const tab = useBoard((state) => state.sidePanelTab);
+  const setTab = useBoard((state) => state.setSidePanelTab);
   return (
     <aside data-tour="context-panel" className="context-panel">
       <header className="ctx-header">
-        <strong>Context</strong>
-        <button className="icon-button" onClick={() => updateSetting("isContextPanelOpen", false)} title="Hide the context panel" aria-label="Hide the context panel"><Icon name="close" /></button>
+        <div className="ctx-tabs" role="tablist">
+          {TABS.map(({ id, label }) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "is-active" : ""} onClick={() => setTab(id)}>{label}</button>)}
+        </div>
+        <button className="icon-button" onClick={() => updateSetting("isContextPanelOpen", false)} title="Hide the side panel" aria-label="Hide the side panel"><Icon name="close" /></button>
       </header>
-      <div className="context-body"><ContextBody /></div>
+      <div className="context-body">{tab === "search" ? <SearchPanel /> : <ContextBody />}</div>
     </aside>
   );
 };

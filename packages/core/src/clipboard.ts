@@ -1,5 +1,5 @@
 import { contextHash } from "./context";
-import { applyPatch, liveEdges } from "./graph";
+import { applyPatch, isInFlight, liveEdges } from "./graph";
 import { indexBy, newId, now } from "./helpers";
 import type { TodoItem } from "./kit/types";
 import { activeRollOf, partsOfRoll, rollCountOf } from "./rolls";
@@ -93,7 +93,7 @@ const pastedNodeFields = (node: GraphNode, id: Id, boardId: Id, offset: { x: num
     boardId,
     x: node.x + offset.x,
     y: node.y + offset.y,
-    status: isSettled ? node.status : node.kind === "turn" ? "idle" : node.status,
+    status: isSettled ? node.status : node.kind === "turn" || isInFlight(node) ? "idle" : node.status,
     collapsed: false,
     pinned: false,
     runtimeRef: undefined,

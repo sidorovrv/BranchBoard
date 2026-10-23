@@ -1,4 +1,4 @@
-import { now, sessionReferencesOf, type Board, type BoardGraph, type GraphNode, type Id, type PendingRequest, type Project, type RuntimeRef, type TrashListing, type TrashedNodeGroup } from "@branchboard/core";
+import { attachmentIdsOf, now, sessionReferencesOf, type Board, type BoardGraph, type GraphNode, type Id, type PendingRequest, type Project, type RuntimeRef, type TrashListing, type TrashedNodeGroup } from "@branchboard/core";
 import type { AttachmentStore } from "./attachments";
 import { RefusedError, type BoardService } from "./boards";
 import type { Repository } from "./db";
@@ -25,13 +25,18 @@ export const createTrashService = (repository: Repository, boards: BoardService,
       if (legacy.length === 0) continue;
       const stamped = legacy.map((node) => ({ ...node, deletedAt: at }));
       stamped.forEach((node) => (boards.stateOf(board.id).graph.nodes[node.id] = node));
+      boards.invalidateView(board.id);
       repository.upsertMany("nodes", () => board.id, stamped);
     }
   };
 
   const groupDeletedNodes = (board: Board): TrashedNodeGroup[] => {
     const byTime = new Map<number, GraphNode[]>();
-    deletedNodesOf(board.id).forEach((node) => byTime.set(node.deletedAt ?? 0, [...(byTime.get(node.deletedAt ?? 0) ?? []), node]));
+    deletedNodesOf(board.id).forEach((node) => {
+      const group = byTime.get(node.deletedAt ?? 0) ?? [];
+      group.push(node);
+      byTime.set(node.deletedAt ?? 0, group);
+    });
     return [...byTime.entries()].map(([deletedAt, nodes]) => ({
       boardId: board.id,
       boardTitle: board.title,
@@ -97,19 +102,20 @@ export const createTrashService = (repository: Repository, boards: BoardService,
     const state = boards.stateOf(boardId);
     const removed = new Set(nodeIds);
     dropSessions(boards.stateOf(boardId).board, sessionReferencesOf(nodeIds.flatMap((id) => state.graph.nodes[id] ?? [])));
-    const edgeIds = Object.values(state.graph.edges).filter((edge) => removed.has(edge.fromId) || removed.has(edge.toId)).map((edge) => edge.id);
+    const edgeIds = new Set(Object.values(state.graph.edges).filter((edge) => removed.has(edge.fromId) || removed.has(edge.toId)).map((edge) => edge.id));
     repository.remove("nodes", nodeIds);
-    repository.remove("edges", edgeIds);
+    repository.remove("edges", [...edgeIds]);
     repository.remove("parts", repository.list<{ id: string; nodeId: Id }>("parts", boardId).filter((part) => removed.has(part.nodeId)).map((part) => part.id));
     repository.remove("requests", repository.list<PendingRequest>("requests", boardId).filter((request) => removed.has(request.nodeId)).map((request) => request.id));
     const graph: BoardGraph = {
       nodes: Object.fromEntries(Object.entries(state.graph.nodes).filter(([id]) => !removed.has(id))),
-      edges: Object.fromEntries(Object.entries(state.graph.edges).filter(([id]) => !edgeIds.includes(id))),
+      edges: Object.fromEntries(Object.entries(state.graph.edges).filter(([id]) => !edgeIds.has(id))),
     };
     state.graph = graph;
     nodeIds.forEach((id) => delete state.parts[id]);
     state.undoStack = [];
     state.redoStack = [];
+    boards.invalidateView(boardId);
   };
 
   const sweepAttachments = (graceMs = ATTACHMENT_GRACE_MS): number => {
@@ -137,10 +143,10 @@ export const createTrashService = (repository: Repository, boards: BoardService,
   };
 
   const attachmentIdsOfBoard = (boardId: Id): string[] =>
-    repository.list<GraphNode>("nodes", boardId).flatMap((node) => (node.attachments ?? []).map((attachment) => attachment.id));
+    attachmentIdsOf(repository.list<GraphNode>("nodes", boardId));
 
   const attachmentIdsOfNodes = (boardId: Id, nodeIds: Id[]): string[] =>
-    nodeIds.flatMap((id) => (boards.stateOf(boardId).graph.nodes[id]?.attachments ?? []).map((attachment) => attachment.id));
+    attachmentIdsOf(nodeIds.flatMap((id) => boards.stateOf(boardId).graph.nodes[id] ?? []));
 
   const removeUnreferenced = (candidateIds: string[]) => {
     const referenced = boards.referencedAttachmentIds();

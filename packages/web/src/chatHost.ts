@@ -1,5 +1,6 @@
+import type { Part } from "@branchboard/core";
 import { createAndFocus } from "./actions";
-import { workspaceFileUrl } from "./api";
+import { fetchToolOutput, workspaceFileUrl } from "./api";
 import type { ChatHost } from "./kit/host";
 import { boardId } from "./store";
 
@@ -9,4 +10,5 @@ export const boardChatHost: ChatHost = {
     const originId = source.closest(".react-flow__node")?.getAttribute("data-id") ?? undefined;
     void createAndFocus({ type: "extractFile", path, originId });
   },
+  toolOutput: (part) => fetchToolOutput(boardId(), (part as Part).nodeId, part.id),
 };

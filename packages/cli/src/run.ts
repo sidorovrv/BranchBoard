@@ -1,12 +1,12 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { installCommandFor, RUNTIMES } from "@branchboard/core";
+import { RUNTIMES } from "@branchboard/core";
 import { accessLinkOf, loadAccessToken } from "../../server/src/accessToken";
 import { dataDirectoryId, defaultDataDirectory } from "../../server/src/dataDirectory";
 import { locateClaude } from "../../server/src/runtimes/claudeLocator";
 import { locateCodex } from "../../server/src/runtimes/codexLocator";
 import { locateOpencode } from "../../server/src/runtimes/opencodeLocator";
-import { installProcessHandlers, startServer } from "../../server/src/start";
+import { installProcessHandlers, shutDown, startServer, type StartOptions } from "../../server/src/start";
 import { VERSION } from "../../server/src/version";
 import { parseArguments } from "./args";
 import { openBrowser } from "./browser";
@@ -21,6 +21,8 @@ Usage: branchboard [options]
 
   --port <number>    Port to listen on
   --data-dir <dir>   Folder for boards and logs
+  --host             Accept connections from other devices on the local network
+  --no-key           Open without the access key
   --no-open          Do not open the browser
   --offline          Make no internet requests
   --no-auto-update   Do not install updates at start
@@ -35,14 +37,13 @@ type CliRuntimeId = "opencode" | "claude" | "codex";
 
 const CLI_LOCATORS: Record<CliRuntimeId, () => { path?: string }> = { opencode: locateOpencode, claude: locateClaude, codex: locateCodex };
 
-export const runtimeSummary = (platform: string = process.platform, locators: Partial<Record<CliRuntimeId, () => { path?: string }>> = CLI_LOCATORS): string[] =>
-  (Object.keys(locators) as CliRuntimeId[]).map((id) => {
-    const { label, setup, pathVariable } = RUNTIMES[id];
-    const located = locators[id]!();
-    if (located.path) return `${label}: found (${located.path})`;
-    const install = installCommandFor(id, platform);
-    return `${label}: not found.${install ? ` Install it with: ${install}.` : ""}${setup.signIn ? ` Then sign in once by running: ${setup.signIn}.` : ""} More: ${setup.docsUrl} (or set ${pathVariable} to its full path).`;
+export const runtimeSummary = (locators: Partial<Record<CliRuntimeId, () => { path?: string }>> = CLI_LOCATORS): string[] => {
+  const found = (Object.keys(locators) as CliRuntimeId[]).flatMap((id) => {
+    const path = locators[id]!().path;
+    return path ? [`${RUNTIMES[id].label}: found (${path})`] : [];
   });
+  return found.length > 0 ? found : ["No claude, codex or opencode command was found. The setup guide in the browser shows how to install one."];
+};
 
 const fatal = (message: string, code = 1): never => {
   console.error(message);
@@ -55,18 +56,27 @@ const portFromEnvironment = (value: string | undefined): number | undefined => {
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : fatal(`The PORT environment variable must be a number from 1 to 65535, not "${value}".`, 2);
 };
 
-const startOrExplain = async (dataDirectory: string, webRoot: string, port: number) => {
+const startOrExplain = async (options: StartOptions) => {
+  const { port } = options;
   try {
-    return await startServer({ port, dataDirectory, webRoot });
+    return await startServer(options);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     return fatal(code === "EADDRINUSE" ? `Port ${port} was taken just now. Start again, or choose one with --port <number>.` : `Branchboard could not start: ${error instanceof Error ? error.message : String(error)}`);
   }
 };
 
-const announce = (accessLink: string, shouldOpenBrowser: boolean, lines: string[]) => {
+interface Links {
+  accessLink: string;
+  networkLinks: string[];
+  isKeyless?: boolean;
+}
+
+const announce = ({ accessLink, networkLinks, isKeyless }: Links, shouldOpenBrowser: boolean, lines: string[]) => {
   lines.forEach((line) => console.log(line));
-  console.log(`\nOpen this link in your browser (it holds your access key, keep it private):\n${accessLink}`);
+  console.log(`\nOpen this link in your browser${isKeyless ? "" : " (it holds your access key, keep it private)"}:\n${accessLink}`);
+  if (networkLinks.length > 0) console.log(`\nOn another device in the same network, open one of these links:\n${networkLinks.join("\n")}`);
+  if (isKeyless) console.log("\nThe access key is off. Any program on this computer can use Branchboard.");
   if (shouldOpenBrowser) openBrowser(accessLink);
 };
 
@@ -78,6 +88,7 @@ export const runCli = async (argv: string[]): Promise<void> => {
   if (parsed.kind === "update") return process.exit(await runUpdate(parsed));
   if (parsed.kind === "error") return fatal(`${parsed.message}\n\n${HELP}`, 2);
   if (parsed.offline) process.env.BRANCHBOARD_OFFLINE = "1";
+  if (!parsed.shouldAutoUpdate) process.env.BRANCHBOARD_AUTOUPDATE = "0";
   const dataDirectory = parsed.dataDirectory ?? defaultDataDirectory();
   const requestedPort = parsed.port ?? portFromEnvironment(process.env.PORT);
   const portFile = join(dataDirectory, "port");
@@ -85,13 +96,13 @@ export const runCli = async (argv: string[]): Promise<void> => {
   if (resolution.kind === "none") return fatal(`Port ${requestedPort} is already in use. Choose another with --port <number>.`);
   if (resolution.kind === "reuse") {
     const link = accessLinkOf(resolution.port, loadAccessToken(join(dataDirectory, "access-token")));
-    return announce(link, parsed.shouldOpenBrowser, [`Branchboard is already running on port ${resolution.port} with this data folder.`]);
+    return announce({ accessLink: link, networkLinks: [] }, parsed.shouldOpenBrowser, [`Branchboard is already running on port ${resolution.port} with this data folder.`]);
   }
   installProcessHandlers();
-  const { accessLink, port } = await startOrExplain(dataDirectory, webRoot, resolution.port);
-  writeLastPort(portFile, port);
-  announce(accessLink, parsed.shouldOpenBrowser, [`Branchboard ${VERSION} is running.\n`, ...runtimeSummary()]);
+  const started = await startOrExplain({ port: resolution.port, dataDirectory, webRoot, isOnNetwork: parsed.isOnNetwork, isKeyless: parsed.isKeyless });
+  writeLastPort(portFile, started.port);
+  announce({ ...started, isKeyless: parsed.isKeyless }, parsed.shouldOpenBrowser, [`Branchboard ${VERSION} is running.\n`, ...runtimeSummary()]);
   console.log("\nPress Enter or Ctrl+C to stop.");
-  if (process.stdin.isTTY) process.stdin.once("data", () => process.exit(0));
+  if (process.stdin.isTTY) process.stdin.once("data", () => void shutDown("Enter pressed"));
   if (shouldAutoUpdate(parsed)) void runAutoUpdate();
 };

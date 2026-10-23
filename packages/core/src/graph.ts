@@ -1,6 +1,6 @@
-import { RUN_CHOICE_KEYS } from "./choices";
-import { indexBy, isRefusal, mapValues, newId, now, refuse, sameMembers, sortBy, unique, type Refusal } from "./helpers";
-import { activeRollOf, canSelectRoll, rollPatchForDiscard, rollPatchForQueue, rollPatchForSelect } from "./rolls";
+import { isSafeChoice, RUN_CHOICE_KEYS } from "./choices";
+import { indexBy, isRefusal, mapValues, newId, now, ownValue, pickKeys, refuse, sameMembers, sortBy, unique, type Refusal } from "./helpers";
+import { canSelectRoll, rollPatchForDiscard, rollPatchForQueue, rollPatchForSelect } from "./rolls";
 import type { BoardGraph, EdgePatch, GraphEdge, GraphEdit, GraphNode, Id, NodeComment, NodePatch, NodeStatus, Patch } from "./types";
 
 export const NODE_WIDTH = 700;
@@ -157,7 +157,7 @@ export const hiddenByCollapse = (graph: BoardGraph): Set<Id> => {
 
 const IN_FLIGHT_STATUSES: NodeStatus[] = ["queued", "running", "awaiting_approval"];
 
-export const isInFlight = (node: GraphNode): boolean => IN_FLIGHT_STATUSES.includes(node.status);
+export const isInFlight = (node: Pick<GraphNode, "status">): boolean => IN_FLIGHT_STATUSES.includes(node.status);
 
 const lockedCache = new WeakMap<BoardGraph, Set<Id>>();
 
@@ -181,9 +181,9 @@ const refuseLocked = (graph: BoardGraph, ids: Id[]): string | undefined => {
 };
 
 export const checkEdgeCandidate = (graph: BoardGraph, fromId: Id, toId: Id, ignoreEdgeId?: Id): string | undefined => {
-  const from = graph.nodes[fromId];
-  const to = graph.nodes[toId];
-  if (!from || from.deleted || !to || to.deleted) return "That node no longer exists";
+  const from = liveNode(graph, fromId);
+  const to = liveNode(graph, toId);
+  if (!from || !to) return "That node no longer exists";
   if (fromId === toId) return "A node cannot feed itself";
   if (from.kind === "subagent") return "A subagent never feeds another node. Its parent already received its result";
   if (to.kind !== "turn" && to.kind !== "code") return "A note or file cannot receive context";
@@ -264,13 +264,6 @@ export const placeNode = (graph: BoardGraph, parentIds: Id[], size: PlacementSiz
   return placeAlongFlow(graph, parent, size, flow);
 };
 
-export const placeSatellite = (graph: BoardGraph, parentId: Id, size: PlacementSize): { x: number; y: number } => {
-  const parent = graph.nodes[parentId];
-  const siblings = satelliteIdsOf(graph, parentId).map((id) => graph.nodes[id]);
-  const y = siblings.length === 0 ? parent.y : Math.max(...siblings.map((node) => node.y + node.h)) + NODE_ROW_GAP;
-  return clearOfOtherNodes(graph, { x: parent.x + parent.w + NODE_GAP, y }, size);
-};
-
 const nodeFieldPatch = (graph: BoardGraph, ids: Id[], change: (node: GraphNode) => Partial<GraphNode>): Patch => ({
   nodes: indexBy(
     ids.map((id): NodePatch => ({ ...change(graph.nodes[id]), id })),
@@ -290,12 +283,12 @@ interface EditKind<E extends GraphEdit> {
 type EditOf<T extends GraphEdit["type"]> = Extract<GraphEdit, { type: T }>;
 
 const liveEdge = (graph: BoardGraph, edgeId: Id): GraphEdge | undefined => {
-  const edge = graph.edges[edgeId];
+  const edge = ownValue(graph.edges, edgeId);
   return edge && !edge.deleted ? edge : undefined;
 };
 
 const liveNode = (graph: BoardGraph, nodeId: Id): GraphNode | undefined => {
-  const node = graph.nodes[nodeId];
+  const node = ownValue(graph.nodes, nodeId);
   return node && !node.deleted ? node : undefined;
 };
 
@@ -369,15 +362,6 @@ export const satelliteIdsOf = (graph: BoardGraph, parentId: Id): Id[] =>
     .filter((node) => node.satelliteOf === parentId)
     .map((node) => node.id);
 
-export const shownSatelliteIdsOf = (graph: BoardGraph, parentId: Id, roll?: number): Id[] => {
-  const parent = graph.nodes[parentId];
-  const runStartedAt = parent && roll !== undefined && roll !== activeRollOf(parent) ? parent.rolls?.[roll]?.startedAt : parent?.startedAt;
-  return satelliteIdsOf(graph, parentId).filter((id) => {
-    const satellite = graph.nodes[id];
-    return satellite.satelliteRunStartedAt !== undefined ? satellite.satelliteRunStartedAt === runStartedAt : satellite.createdAt >= (runStartedAt ?? Infinity);
-  });
-};
-
 const nodesToDelete =(graph: BoardGraph, edit: EditOf<"deleteNodes">): Set<Id> => {
   const ids = new Set(edit.ids);
   if (edit.withExclusiveDescendants) exclusiveDescendantIds(graph, edit.ids).forEach((id) => ids.add(id));
@@ -407,8 +391,9 @@ const restoredEdgePatches = (graph: BoardGraph, restoredIds: Set<Id>): Record<Id
   const restoredNodesPatch: Patch = { nodes: indexBy([...restoredIds].map((id): NodePatch => ({ id, deleted: false })), (node) => node.id), edges: {} };
   let working = applyPatch(graph, restoredNodesPatch);
   const edges: Record<Id, EdgePatch> = {};
+  const lockedIds = lockedNodeIds(graph);
   for (const edge of candidates) {
-    if (checkEdgeCandidate(working, edge.fromId, edge.toId) !== undefined) continue;
+    if (lockedIds.has(edge.toId) || checkEdgeCandidate(working, edge.fromId, edge.toId) !== undefined) continue;
     const change: EdgePatch = { id: edge.id, deleted: false, deletedAt: undefined, seq: nextSeq(working, edge.toId) };
     edges[edge.id] = change;
     working = applyPatch(working, { nodes: {}, edges: { [edge.id]: change } });
@@ -417,12 +402,17 @@ const restoredEdgePatches = (graph: BoardGraph, restoredIds: Set<Id>): Record<Id
 };
 
 const restoreNodes: EditKind<EditOf<"restoreNodes">> = {
-  check: (graph, edit) => (edit.ids.length > 0 && edit.ids.every((id) => graph.nodes[id]?.deleted) ? undefined : "Nothing to restore"),
+  check: (graph, edit) => (edit.ids.length > 0 && edit.ids.every((id) => ownValue(graph.nodes, id)?.deleted) ? undefined : "Nothing to restore"),
   toPatch: (graph, edit) => ({
     nodes: nodeFieldPatch(graph, edit.ids, () => ({ deleted: false, deletedAt: undefined })).nodes,
     edges: restoredEdgePatches(graph, new Set(edit.ids)),
   }),
 };
+
+const GEOMETRY_KEYS = ["x", "y", "w", "h"] as const;
+
+const geometryOf = (position: Partial<Pick<GraphNode, "x" | "y" | "w" | "h">>) =>
+  Object.fromEntries(GEOMETRY_KEYS.filter((key) => Number.isFinite(position[key])).map((key) => [key, position[key]]));
 
 const moveNodes: EditKind<EditOf<"moveNodes">> = {
   check: (graph, edit) => (Object.keys(edit.positions).every((id) => liveNode(graph, id)) ? undefined : "A node no longer exists"),
@@ -430,7 +420,7 @@ const moveNodes: EditKind<EditOf<"moveNodes">> = {
     nodeFieldPatch(
       graph,
       Object.keys(edit.positions).filter((id) => !graph.nodes[id].pinned),
-      (node) => edit.positions[node.id],
+      (node) => geometryOf(edit.positions[node.id]),
     ),
 };
 
@@ -447,10 +437,20 @@ const setSummary: EditKind<EditOf<"setSummary">> = {
 
 const isPromptEditable = (node: GraphNode): boolean => node.kind !== "turn" || node.status === "idle";
 
+const EDITABLE_NODE_FIELDS = ["prompt", "title", "filePath", "gitRef", "forceAssemble", ...RUN_CHOICE_KEYS] as const;
+
+const isValidFieldValue = (key: string, value: unknown): boolean => {
+  if (key === "forceAssemble") return typeof value === "boolean";
+  if ((RUN_CHOICE_KEYS as readonly string[]).includes(key)) return value === "" || isSafeChoice(value);
+  return typeof value === "string";
+};
+
 const editNode: EditKind<EditOf<"editNode">> = {
   check: (graph, edit) => {
     const node = liveNode(graph, edit.nodeId);
     if (!node) return "That node no longer exists";
+    if (!Object.keys(edit.fields).every((key) => (EDITABLE_NODE_FIELDS as readonly string[]).includes(key))) return "That field cannot be edited";
+    if (!Object.entries(edit.fields).every(([key, value]) => isValidFieldValue(key, value))) return "That value is not valid for this field";
     const touchesRunFields = ["prompt", "forceAssemble", ...RUN_CHOICE_KEYS].some((key) => key in edit.fields);
     if (!touchesRunFields) return undefined;
     if (!isPromptEditable(node)) return "A finished node cannot change. Use Edit to reopen it";
@@ -458,7 +458,7 @@ const editNode: EditKind<EditOf<"editNode">> = {
   },
   toPatch: (graph, edit) => {
     const own = nodeFieldPatch(graph, [edit.nodeId], (node) => ({
-      ...edit.fields,
+      ...pickKeys(edit.fields, EDITABLE_NODE_FIELDS),
       ...("prompt" in edit.fields && edit.fields.prompt !== node.prompt ? rollPatchForDiscard(node) : {}),
       rev: "prompt" in edit.fields ? node.rev + 1 : node.rev,
     }));

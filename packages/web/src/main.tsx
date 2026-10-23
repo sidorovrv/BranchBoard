@@ -9,12 +9,13 @@ import "./kit/settings.css";
 import { App } from "./App";
 import { boardChatHost } from "./chatHost";
 import { ChatHostContext } from "./kit/host";
-import { resolveTheme, useSettings } from "./settings";
+import { loadServerSettings, resolveTheme, useSettings } from "./settings";
 
-document.documentElement.dataset.theme = resolveTheme(useSettings.getState().settings.theme);
-
-createRoot(document.getElementById("root")!).render(
-  <ChatHostContext.Provider value={boardChatHost}>
-    <App />
-  </ChatHostContext.Provider>,
-);
+void loadServerSettings().then(() => {
+  document.documentElement.dataset.theme = resolveTheme(useSettings.getState().settings.theme);
+  createRoot(document.getElementById("root")!).render(
+    <ChatHostContext.Provider value={boardChatHost}>
+      <App />
+    </ChatHostContext.Provider>,
+  );
+});

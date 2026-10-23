@@ -2,7 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { liveNodes, MAX_EXTRACTED_FILE_BYTES, type GraphNode, type Id } from "@branchboard/core";
 import { RefusedError, type BoardService } from "./boards";
 import { log } from "./log";
-import { existingWorkspaceFile } from "./workspaceFiles";
+import { existingWorkspaceFile, isSensitiveWorkspaceFile } from "./workspaceFiles";
 
 export const CODE_SYNC_INTERVAL_MS = 2000;
 
@@ -17,7 +17,7 @@ export const createCodeFileSync = (boards: BoardService) => {
 
   const syncNode = (boardId: Id, workspacePath: string, node: GraphNode) => {
     const path = existingWorkspaceFile(workspacePath, node.filePath ?? "");
-    if (!path) return;
+    if (!path || isSensitiveWorkspaceFile(workspacePath, node.filePath!, path)) return;
     const { mtimeMs, size } = statSync(path);
     const signature = `${mtimeMs}:${size}`;
     if (seenSignatures.get(node.id) === signature) return;

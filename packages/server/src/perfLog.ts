@@ -1,10 +1,11 @@
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
-import { log } from "./log";
+import { log, rotateIfLarge } from "./log";
 
 export const PERF_SAMPLE_MS = 5000;
 const MAX_PERF_FILE_BYTES = 5 * 1024 * 1024;
+const KEPT_PERF_FILES = 2;
 const MAX_WEB_SAMPLE_BYTES = 16 * 1024;
 const TOP_REQUEST_KEYS = 8;
 const NANOSECONDS_PER_MILLISECOND = 1e6;
@@ -26,16 +27,10 @@ export const createPerfLog = (directory: string) => {
   const file = join(directory, "perf.jsonl");
   const requestCounts = new Map<string, number>();
 
-  const rotateIfLarge = () => {
-    if (!existsSync(file) || statSync(file).size < MAX_PERF_FILE_BYTES) return;
-    rmSync(`${file}.1`, { force: true });
-    renameSync(file, `${file}.1`);
-  };
-
   const append = (source: "server" | "web", record: Record<string, unknown>) => {
     try {
       mkdirSync(directory, { recursive: true });
-      rotateIfLarge();
+      rotateIfLarge(file, MAX_PERF_FILE_BYTES, KEPT_PERF_FILES);
       appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), source, ...record })}\n`);
     } catch (error) {
       log.warn("perf", "Could not write the performance log", error);

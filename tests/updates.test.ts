@@ -112,7 +112,7 @@ describe("branchboard update", () => {
   it("tells npm, npx and source copies apart", () => {
     expect(installKindOf("/usr/lib/node_modules/branchboard/dist/branchboard.mjs")).toBe("npm");
     expect(installKindOf("C:\\Users\\a\\AppData\\Local\\npm-cache\\_npx\\1234\\node_modules\\branchboard\\dist\\branchboard.mjs")).toBe("npx");
-    expect(installKindOf("/work/WanderBoard/packages/cli/dist/branchboard.mjs")).toBe("source");
+    expect(installKindOf("/home/me/branchboard/packages/cli/dist/branchboard.mjs")).toBe("source");
   });
 
   const run = async (options: { isCheckOnly?: boolean; tags?: object; current?: string; installKind?: UpdateDependencies["installKind"]; installCode?: number }) => {

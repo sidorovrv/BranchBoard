@@ -4,6 +4,8 @@ export interface RunArguments {
   dataDirectory?: string;
   shouldOpenBrowser: boolean;
   offline?: true;
+  isOnNetwork?: true;
+  isKeyless?: true;
   shouldAutoUpdate: boolean;
 }
 
@@ -42,6 +44,8 @@ export const parseArguments = (argv: string[]): ParsedArguments => {
     if (argument === "--no-open") run.shouldOpenBrowser = false;
     else if (argument === "--offline") run.offline = true;
     else if (argument === "--no-auto-update") run.shouldAutoUpdate = false;
+    else if (argument === "--host") run.isOnNetwork = true;
+    else if (argument === "--no-key") run.isKeyless = true;
     else if (argument === "--port") {
       const port = portOf(argv[++index]);
       if (port === undefined) return { kind: "error", message: `--port needs a number between 1 and ${MAX_PORT}` };
@@ -52,5 +56,6 @@ export const parseArguments = (argv: string[]): ParsedArguments => {
       run.dataDirectory = directory;
     } else return { kind: "error", message: `Unknown option ${argument}` };
   }
+  if (run.isOnNetwork && run.isKeyless) return { kind: "error", message: "--no-key cannot be combined with --host: anyone on the network could run agents on this computer" };
   return run;
 };

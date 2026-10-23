@@ -1,41 +1,43 @@
-import { useEffect, useState, type DragEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import { applyOrder, DEFAULT_BOARD_TITLE, formatAgo, moveWithin, type Board, type ListPlacement, type Project, type RunInfo } from "@branchboard/core";
+import { openNewBoard } from "../actions";
 import { downloadFromApi } from "../api";
 import { useSidebarLayout } from "../sidebarLayout";
-import { useBoard } from "../store";
+import { reportFailures, useBoard } from "../store";
 import { useContextMenu } from "./ContextMenu";
 import { IconRow } from "../kit/Icons";
 import { ProjectDialog } from "./ProjectDialog";
 
 export const sendWorkspaceCommand = <T = any,>(command: Record<string, unknown>) => useBoard.getState().send<T>(command);
 
-export const createBoardIn = async (projectId: string) => {
-  const created = await sendWorkspaceCommand<{ id: string }>({ type: "createBoard", projectId });
-  if (!created) return;
-  await useBoard.getState().loadBoards();
-  await useBoard.getState().openBoard(created.id);
-};
+export const createBoardIn = (projectId: string) =>
+  reportFailures(async () => {
+    const created = await sendWorkspaceCommand<{ id: string }>({ type: "createBoard", projectId });
+    if (created) await openNewBoard(created.id);
+  });
 
-export const deleteBoard = async (board: Board) => {
-  if (!confirm(`Move board “${board.title}” to the trash?`)) return;
-  await sendWorkspaceCommand({ type: "deleteBoard", boardId: board.id });
-  await useBoard.getState().loadBoards();
-  const { board: current, boards, openBoard } = useBoard.getState();
-  if (current?.id !== board.id) return;
-  const next = boards[0];
-  if (next) await openBoard(next.id);
-  else useBoard.setState({ board: undefined });
-};
+export const deleteBoard = (board: Board) =>
+  reportFailures(async () => {
+    if (!confirm(`Move board “${board.title}” to the trash?`)) return;
+    await sendWorkspaceCommand({ type: "deleteBoard", boardId: board.id });
+    await useBoard.getState().loadBoards();
+    const { board: current, boards, openBoard } = useBoard.getState();
+    if (current?.id !== board.id) return;
+    const next = boards[0];
+    if (next) await openBoard(next.id);
+    else useBoard.setState({ board: undefined });
+  });
 
-const deleteProject = async (project: Project) => {
-  if (!confirm(`Move project “${project.name}” and all of its boards to the trash?`)) return;
-  await sendWorkspaceCommand({ type: "deleteProject", projectId: project.id });
-  await useBoard.getState().loadBoards();
-  const { board: current, boards, openBoard } = useBoard.getState();
-  if (current && boards.some((candidate) => candidate.id === current.id)) return;
-  if (boards[0]) await openBoard(boards[0].id);
-  else useBoard.setState({ board: undefined });
-};
+const deleteProject = (project: Project) =>
+  reportFailures(async () => {
+    if (!confirm(`Move project “${project.name}” and all of its boards to the trash?`)) return;
+    await sendWorkspaceCommand({ type: "deleteProject", projectId: project.id });
+    await useBoard.getState().loadBoards();
+    const { board: current, boards, openBoard } = useBoard.getState();
+    if (current && boards.some((candidate) => candidate.id === current.id)) return;
+    if (boards[0]) await openBoard(boards[0].id);
+    else useBoard.setState({ board: undefined });
+  });
 
 export const exportBoard = (board: Board, includeFiles = true) =>
   downloadFromApi(`/api/boards/${board.id}/export?files=${includeFiles ? 1 : 0}`, `${board.title.replace(/[^\w-]+/g, "_")}.branchboard.json`).catch((error) => useBoard.getState().notify(error.message));
@@ -55,26 +57,33 @@ const pickBoardFile = (): Promise<File | undefined> =>
     input.click();
   });
 
-export const importBoard = async (projectId: string) => {
-  const file = await pickBoardFile();
-  if (!file) return;
-  const imported = await sendWorkspaceCommand<{ id: string }>({ type: "importBoard", projectId, raw: await file.text() });
-  if (!imported) return;
-  await useBoard.getState().loadBoards();
-  await useBoard.getState().openBoard(imported.id);
-};
+export const importBoard = (projectId: string) =>
+  reportFailures(async () => {
+    const file = await pickBoardFile();
+    if (!file) return;
+    const imported = await sendWorkspaceCommand<{ id: string }>({ type: "importBoard", projectId, raw: await file.text() });
+    if (!imported) return;
+    await useBoard.getState().loadBoards();
+    await useBoard.getState().openBoard(imported.id);
+  });
 
 export const EditableName = ({ value, isEditing, onEditingChange, onCommit, className }: { value: string; isEditing: boolean; onEditingChange: (isEditing: boolean) => void; onCommit: (value: string) => void; className?: string }) => {
   const [draft, setDraft] = useState(value);
   useEffect(() => {
     if (isEditing) setDraft(value);
   }, [isEditing, value]);
-  const finish = () => {
+  const isSettled = useRef(false);
+  useEffect(() => {
+    if (isEditing) isSettled.current = false;
+  }, [isEditing]);
+  const finish = (isCancelled = false) => {
+    if (isSettled.current) return;
+    isSettled.current = true;
     onEditingChange(false);
-    if (draft.trim() && draft.trim() !== value) onCommit(draft.trim());
+    if (!isCancelled && draft.trim() && draft.trim() !== value) onCommit(draft.trim());
   };
   if (!isEditing) return <span className={className}>{value}</span>;
-  return <input className="sidebar-rename" autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={finish} onKeyDown={(event) => (event.key === "Enter" && finish()) || (event.key === "Escape" && onEditingChange(false))} />;
+  return <input className="sidebar-rename" autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={() => finish()} onKeyDown={(event) => (event.key === "Enter" && finish()) || (event.key === "Escape" && finish(true))} />;
 };
 
 export type BoardActivity = "attention" | "working" | "limit" | "unseen" | "none";

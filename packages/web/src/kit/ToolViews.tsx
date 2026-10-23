@@ -1,10 +1,30 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { describeToolGroup, fileEditOf, isRepeatedToolName, todoProgress, toolFilePathOf, toolGroupStatus, toolInputView, type ChatPart, type FileEdit, type TodoItem } from "@branchboard/core";
 import { DiffStat, DiffView } from "./DiffView";
 import { ExtractFileButton } from "./ExtractFileButton";
+import { useChatHost } from "./host";
 import { Icon } from "./Icons";
 
+const useToolOutput = (part: ChatPart): unknown => {
+  const { toolOutput } = useChatHost();
+  const isOmitted = part.meta?.output === undefined && part.meta?.outputChars !== undefined;
+  const [loaded, setLoaded] = useState<string>();
+  useEffect(() => {
+    if (!isOmitted || !toolOutput) return;
+    let isCurrent = true;
+    toolOutput(part).then(
+      (output) => isCurrent && setLoaded(output),
+      () => isCurrent && setLoaded("The tool output could not be loaded."),
+    );
+    return () => {
+      isCurrent = false;
+    };
+  }, [isOmitted, toolOutput, part.id]);
+  return isOmitted ? (loaded ?? "Loading the tool output…") : part.meta?.output;
+};
+
 const ToolCardBody = ({ part, edit }: { part: ChatPart; edit: FileEdit | undefined }) => {
+  const output = useToolOutput(part);
   const inputView = edit ? undefined : toolInputView(part.meta?.input);
   return (
     <>
@@ -12,7 +32,7 @@ const ToolCardBody = ({ part, edit }: { part: ChatPart; edit: FileEdit | undefin
       {inputView && <pre className="copyable nodrag tool-primary">{inputView.primaryText}</pre>}
       {inputView?.remaining && <pre className="copyable nodrag">{JSON.stringify(inputView.remaining, null, 2)}</pre>}
       {!edit && !inputView && part.meta?.input !== undefined && <pre className="copyable nodrag">{JSON.stringify(part.meta.input, null, 2)}</pre>}
-      {part.meta?.output !== undefined && <pre className="copyable nodrag">{String(part.meta.output)}</pre>}
+      {output !== undefined && <pre className="copyable nodrag">{String(output)}</pre>}
     </>
   );
 };

@@ -1,8 +1,9 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { RefusedError } from "./boards";
-import { escapesFolder, isSensitivePath } from "@branchboard/core";
+import { isSensitivePath } from "@branchboard/core";
+import { pathInsideWorkspace } from "./workspaceFiles";
 
 export interface BrowsedEntry {
   name: string;
@@ -17,12 +18,13 @@ export interface BrowsedFolder {
 
 const MAX_ENTRIES = 1000;
 
-const isLocalFolder = (path: string): boolean => isAbsolute(path) && !/^[\\/]{2}/.test(path) && existsSync(path) && statSync(path).isDirectory();
-
+export const requireLocalFolder = (path: unknown): string => {
+  if (typeof path !== "string" || !isAbsolute(path) || /^[\\/]{2}/.test(path) || !safeIsFolder(path)) throw new RefusedError("That is not an existing local folder");
+  return path;
+};
 
 export const browseFolder = (requested: string | undefined, includeFiles: boolean): BrowsedFolder => {
-  const path = resolve(requested || homedir());
-  if (!isLocalFolder(path)) throw new RefusedError("That is not an existing local folder");
+  const path = requireLocalFolder(resolve(requested || homedir()));
   const entries = readdirSync(path, { withFileTypes: true })
     .map((entry) => ({ name: entry.name, isFolder: entry.isDirectory() || (entry.isSymbolicLink() && safeIsFolder(join(path, entry.name))) }))
     .filter((entry) => entry.isFolder || (includeFiles && !isSensitivePath(entry.name)))
@@ -41,7 +43,7 @@ const safeIsFolder = (path: string): boolean => {
 };
 
 export const insideWorkspace = (workspacePath: string, picked: string): string => {
-  const relativePath = relative(workspacePath, picked);
-  if (!relativePath || escapesFolder(relativePath)) throw new RefusedError("Choose a file inside the project folder");
-  return relativePath.split("\\").join("/");
+  const relativePath = pathInsideWorkspace(workspacePath, picked);
+  if (!relativePath) throw new RefusedError("Choose a file inside the project folder");
+  return relativePath;
 };

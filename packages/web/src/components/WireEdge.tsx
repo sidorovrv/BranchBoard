@@ -31,6 +31,7 @@ export const WireEdge = ({ id, sourceX, sourceY, targetX, targetY, sourcePositio
             onMouseEnter={() => setIsHovered(true)}
             onClick={() => void commitGraphEdit({ type: "disconnect", edgeId: id })}
             title="Disconnect"
+            aria-label="Disconnect nodes"
           >
             ×
           </button>

@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { updateCommand, type UpdateNotice, type UpdateNoticeKind } from "@branchboard/core";
 import { useAbout, useUpdateNotice } from "../aboutStore";
-import { useBoard } from "../store";
+import { copyText } from "../store";
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -16,7 +16,7 @@ const COPYABLE_KINDS: UpdateNoticeKind[] = ["unsupported", "available"];
 
 export const copyUpdateCommand = (version: string) => {
   const command = updateCommand(version);
-  void navigator.clipboard.writeText(command).then(() => useBoard.getState().notify(`Copied: ${command}`));
+  void copyText(command, `Copied: ${command}`);
 };
 
 const NoticeBanner = ({ notice }: { notice: UpdateNotice }) => {

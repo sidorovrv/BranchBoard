@@ -40,7 +40,7 @@
     "packages/core/src/kit/usageLimit.ts": "bffdf829b288c4b08d819b0978d707d411d39f9f156c63041127d82482098539",
     "packages/web/src/kit/BlockFrame.tsx": "8f85bb096e15ab7f94c080109edd0146f17abdf477fc3b5f1fea72f9d772b7fa",
     "packages/web/src/kit/ChartBlock.tsx": "7c0381c946c8763fcb478077e709c16390a90ba6df0850a420f6882808db8e7d",
-    "packages/web/src/kit/chat.css": "ffb1b1f290a351986a50f92a572ce62205d1d43688938a5c8748345e2d98db68",
+    "packages/web/src/kit/chat.css": "608d6d8ce563f66ec480d94aa38a32a45c2dec7018d96d5947d276257e4a0b27",
     "packages/web/src/kit/ChatView.test.tsx": "8f55bbdfa57fd837520e460a26c1de531b829809b77c89bb841f8976f0f5f98d",
     "packages/web/src/kit/ChatView.tsx": "7190ebaf0738d9ebe4277dda545f6035d7ff690b2ffc23e15b47cf5a8437d826",
     "packages/web/src/kit/ChipSelect.tsx": "9322ca257aaab97cce44df0d1aff90167038e34fb4dbe3c2c630536e116e4468",
@@ -48,12 +48,12 @@
     "packages/web/src/kit/Composer.test.tsx": "5118fe8aa1c6dd90f27a18c6445bfedeabaf16753df0235e0bf611e367180a6e",
     "packages/web/src/kit/ComposerFrame.tsx": "edd62cf09ade6f54163d1e83fb4452034e58cdc20e6c3989d0c3b26b58dc7b51",
     "packages/web/src/kit/ComposerPicker.tsx": "e6b54b3d561b2c38d6edda3686c0e9ea1857eda2fb990397ade0dcc9926e97f6",
-    "packages/web/src/kit/DataTable.tsx": "5218ea39f74f8673157892566b2f5c42985f145c094b33dfd2c294992d34c1d8",
+    "packages/web/src/kit/DataTable.tsx": "90106dab2cb39f6945ff18d6ef688f8c32171115c6594716c7a5b899f7dfa538",
     "packages/web/src/kit/DiffView.tsx": "301a141f015e8a52b2e610ffeb8e3476407a904701db4ca7d3233bf8e712c785",
     "packages/web/src/kit/ExtractFileButton.tsx": "3b66e6c963be62335e9f2abb227718a4419b74aac67900b620231430a4207fab",
     "packages/web/src/kit/FileEdits.tsx": "499c3c2a60dbd937a0007b4f33fe3ba8adf4e831caa0bc27354df69c5fd920d7",
     "packages/web/src/kit/highlight.ts": "c6d3e356c76fcb4b4c1306dc8211aaa40d543b61f2ea9d27355acd9cc0ade929",
-    "packages/web/src/kit/host.tsx": "c15d3ca0eabe8e2b31d58c317a6cabe771df715087a6038ba5d6380ac4daf987",
+    "packages/web/src/kit/host.tsx": "4526f5e712b87463df27e3adbcbe2a77448861ca7eadc21e8d27a7d6931961e9",
     "packages/web/src/kit/Icons.tsx": "fcc8f37ecbbd842c2405c7e5e5233f1b8d9e59b651dd115d57c7510e1e89f374",
     "packages/web/src/kit/imports.test.ts": "6a76cdb87f3d5b65992c6ecd4f498df6986e45c391b4dc381eff170960e9fd04",
     "packages/web/src/kit/LimitsMeter.test.tsx": "fa765abd4df787dd51ea550219242b9f1f9ebac5b1d8bcca12eb4ec1f815f552",
@@ -70,7 +70,7 @@
     "packages/web/src/kit/Settings.test.tsx": "7530a4598227a37264d076a0b23fc828c97375254d361f91aa67a10b65404574",
     "packages/web/src/kit/Settings.tsx": "697e13f21d5005251cafb8d973b6c12fe7959b064a4e87775d1dc9ec78413daf",
     "packages/web/src/kit/svg.d.ts": "c3d4ee15047dc8caeb196ee01b5c861e13717b9f967567d135253b1c75e94564",
-    "packages/web/src/kit/ToolViews.tsx": "3ee87e1bae7cf2f50cc32a67b1510d3cbfce7e14eb70cd34ed6fd3497be45762",
+    "packages/web/src/kit/ToolViews.tsx": "13d2376f698fc7dbb09152df6ee38aed29f9a5e7b88f825ca6f67c3eda397e6a",
     "packages/web/src/kit/typing.ts": "b7218bb4847a0e4d8f38fd3d189b1755858472fb392d7baeda93d3f8dcd0e549"
   }
 }

@@ -25,6 +25,7 @@ import { Icon } from "../kit/Icons";
 import { Markdown } from "../kit/Markdown";
 import { boardId, sendBoardCommand } from "../store";
 import { ChipSelect } from "../kit/ChipSelect";
+import { useRememberedScroll } from "../nodeScroll";
 
 const ExtractButton = ({ name, command }: { name: string; command: Record<string, unknown> }) => {
   const extract = (event: MouseEvent<HTMLButtonElement>) => {
@@ -51,10 +52,14 @@ const FilePicker = ({ node }: { node: GraphNode }) => {
   const [query, setQuery] = useState("");
   const [files, setFiles] = useState<string[]>([]);
   useEffect(() => {
+    let isStale = false;
     const timer = setTimeout(() => {
-      fetchWorkspaceFiles(boardId(), query).then(setFiles, () => setFiles([]));
+      fetchWorkspaceFiles(boardId(), query).then((found) => !isStale && setFiles(found), () => !isStale && setFiles([]));
     }, PICKER_SEARCH_DELAY_MS);
-    return () => clearTimeout(timer);
+    return () => {
+      isStale = true;
+      clearTimeout(timer);
+    };
   }, [query]);
   const open = (path: string) => void sendBoardCommand({ type: "openFile", nodeId: node.id, path });
   const browse = () => pickPath("file", boardId()).then((path) => path && open(path), () => undefined);
@@ -166,6 +171,7 @@ const FormattedView = ({ node }: ViewProps) => {
   const view = useRef<HTMLDivElement>(null);
   const roll = activeRollOf(node);
   useCommentHighlights(node, roll, view);
+  useRememberedScroll(view, `${node.id}:formatted`);
   return (
     <div ref={view} data-roll={roll} className="markdown-view copyable nowheel"><Markdown text={node.prompt} sourcePath={node.sourceAttachmentId ? undefined : node.filePath} /></div>
   );
@@ -176,7 +182,9 @@ const EditView = ({ node }: ViewProps) => {
   const { text, change, flush } = useAutosavedText(node.prompt, (saved) =>
     void sendBoardCommand(isFileBacked ? { type: "writeCodeFile", nodeId: node.id, content: saved } : { type: "editNode", nodeId: node.id, fields: { prompt: saved } }),
   );
-  return <textarea className="markdown-edit nodrag nowheel" autoFocus value={text} onChange={(event) => change(event.target.value)} onBlur={flush} />;
+  const editor = useRef<HTMLTextAreaElement>(null);
+  useRememberedScroll(editor, `${node.id}:edit`);
+  return <textarea ref={editor} className="markdown-edit nodrag nowheel" autoFocus value={text} onChange={(event) => change(event.target.value)} onBlur={flush} />;
 };
 
 const RemovedMarker = ({ block }: { block: GitChanges["removedBlocks"][number] }) => (
@@ -194,9 +202,11 @@ const SourceView = ({ node, path, changes }: ViewProps) => {
   const highlighted = useMemo(() => highlightCode(node.prompt, languageOfPath(path)), [node.prompt, path]);
   const code = useRef<HTMLElement>(null);
   const roll = activeRollOf(node);
+  const scroller = useRef<HTMLPreElement>(null);
   useCommentHighlights(node, roll, code);
+  useRememberedScroll(scroller, `${node.id}:source`);
   return (
-    <pre className="copyable nodrag nowheel">
+    <pre ref={scroller} className="copyable nodrag nowheel">
       {changedRanges(changes?.added ?? []).map(({ start, length }) => <span key={start} className="changed-lines" style={{ top: `calc(var(--code-pad) + ${start - 1} * var(--code-line))`, height: `calc(${length} * var(--code-line))` }} />)}
       {(changes?.removedBlocks ?? []).map((block) => <RemovedMarker key={`${block.after}-${block.lines[0]}`} block={block} />)}
       {highlighted === undefined ? <code ref={code} data-roll={roll}>{node.prompt}</code> : <code ref={code} data-roll={roll} className="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />}
@@ -206,7 +216,9 @@ const SourceView = ({ node, path, changes }: ViewProps) => {
 
 const DiffBody = ({ node, changes }: ViewProps) => {
   const rows = useMemo(() => (hasChanges(changes) ? collapseUnchanged(rowsOfGitChanges(node.prompt, changes), DIFF_CONTEXT_LINES) : []), [node.prompt, changes]);
-  return rows.length === 0 ? <div className="muted code-empty-note">No differences from the comparison point.</div> : <DiffView rows={rows} />;
+  const scroller = useRef<HTMLDivElement>(null);
+  useRememberedScroll(scroller, `${node.id}:diff`);
+  return <div ref={scroller} className="code-diff nowheel">{rows.length === 0 ? <div className="muted code-empty-note">No differences from the comparison point.</div> : <DiffView rows={rows} />}</div>;
 };
 
 const useCapabilityUrl = (node: GraphNode, isSnapshot: boolean): string | undefined => {

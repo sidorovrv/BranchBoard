@@ -1,6 +1,7 @@
 import {
   activeRollOf,
   applyRunEvent,
+  attachmentIdsOf,
   collectBoard,
   emptyGraph,
   indexBy,
@@ -12,6 +13,7 @@ import {
   now,
   runEdit,
   sessionReferencesOf,
+  withoutLongToolOutputs,
   type Board,
   type BoardGraph,
   type BoardSnapshot,
@@ -60,6 +62,9 @@ export const createBoardService = (repository: Repository, hub: Hub, usage?: Usa
   const states = new Map<Id, BoardState>();
   const flushTimers = new Map<Id, NodeJS.Timeout>();
   let hasStoppedSaving = false;
+  const viewJsons = new Map<Id, string>();
+
+  const invalidateView = (boardId: Id) => void viewJsons.delete(boardId);
 
   const readState = (boardId: Id): BoardState | undefined => {
     const board = repository.get<Board>("boards", boardId);
@@ -82,14 +87,16 @@ export const createBoardService = (repository: Repository, hub: Hub, usage?: Usa
     return loaded;
   };
 
-  const persistGraph = (state: BoardState, patch: Patch) => {
+  const persistGraph = (state: BoardState, graph: BoardGraph, patch: Patch) => {
     const boardId = state.board.id;
-    repository.upsertMany("nodes", () => boardId, Object.keys(patch.nodes).map((id) => state.graph.nodes[id]));
-    repository.upsertMany("edges", () => boardId, Object.keys(patch.edges).map((id) => state.graph.edges[id]));
+    invalidateView(boardId);
+    repository.upsertMany("nodes", () => boardId, Object.keys(patch.nodes).map((id) => graph.nodes[id]));
+    repository.upsertMany("edges", () => boardId, Object.keys(patch.edges).map((id) => graph.edges[id]));
   };
 
   const saveBoard = (board: Board) => {
     repository.upsertMany("boards", (row) => row.id, [board]);
+    invalidateView(board.id);
     const cached = states.get(board.id);
     if (cached) cached.board = board;
   };
@@ -106,8 +113,8 @@ export const createBoardService = (repository: Repository, hub: Hub, usage?: Usa
     if (isRefusal(result)) throw new RefusedError(result.refusal);
     const touchedNodes = (graph: BoardGraph) => Object.keys(result.patch.nodes).flatMap((id) => graph.nodes[id] ?? []);
     const orphans = record ? orphanedSessions(sessionReferencesOf(touchedNodes(state.graph)), sessionReferencesOf(touchedNodes(result.graph))) : [];
+    persistGraph(state, result.graph, result.patch);
     state.graph = result.graph;
-    persistGraph(state, result.patch);
     if (orphans.length > 0) saveBoard({ ...state.board, discardedSessions: [...(state.board.discardedSessions ?? []), ...orphans] });
     markSaved(boardId);
     if (record) {
@@ -123,13 +130,13 @@ export const createBoardService = (repository: Repository, hub: Hub, usage?: Usa
     const patch = state[from].at(-1);
     if (!patch) return undefined;
     const locked = lockedNodeIds(state.graph);
-    const touchedIds = [...Object.keys(patch.nodes), ...Object.keys(patch.edges).flatMap((id) => [state.graph.edges[id]?.toId ?? ""])];
+    const touchedIds = [...Object.keys(patch.nodes), ...Object.keys(patch.edges).flatMap((id) => [state.graph.edges[id]?.toId ?? "", patch.edges[id].toId ?? ""])];
     if (touchedIds.some((id) => locked.has(id))) throw new RefusedError("Undo would change a node that is queued or running, or feeds one. Stop the run first");
-    state[from].pop();
     const result = runEdit(state.graph, { type: "patch", patch });
     if (isRefusal(result)) throw new RefusedError(result.refusal);
+    persistGraph(state, result.graph, result.patch);
+    state[from].pop();
     state.graph = result.graph;
-    persistGraph(state, result.patch);
     markSaved(boardId);
     state[to].push(result.inverse);
     hub.broadcast(boardId, { type: "patch", patch: result.patch });
@@ -152,6 +159,7 @@ export const createBoardService = (repository: Repository, hub: Hub, usage?: Usa
   const recordRunEvent = (boardId: Id, nodeId: Id, event: RunEvent) => {
     const state = stateOf(boardId);
     state.parts[nodeId] = applyRunEvent(state.parts[nodeId] ?? [], nodeId, activeRollOf(state.graph.nodes[nodeId]), event);
+    invalidateView(boardId);
     scheduleFlush(boardId, nodeId);
     hub.broadcast(boardId, { type: "run", nodeId, event });
   };
@@ -159,6 +167,7 @@ export const createBoardService = (repository: Repository, hub: Hub, usage?: Usa
   const saveRequest = (request: PendingRequest) => {
     const state = stateOf(request.boardId);
     state.requests[request.id] = request;
+    invalidateView(request.boardId);
     repository.upsertMany("requests", () => request.boardId, [request]);
     hub.broadcast(request.boardId, { type: "request", request });
   };
@@ -172,7 +181,11 @@ export const createBoardService = (repository: Repository, hub: Hub, usage?: Usa
 
   const recoverInterruptedRuns = () => {
     for (const board of repository.listAll<Board>("boards")) {
-      if (board.deleted) continue;
+      if (board.deleted) {
+        repository.upsertMany("nodes", () => board.id, repository.list<GraphNode>("nodes", board.id).filter(isInFlight).map((node) => ({ ...node, status: "interrupted" as const })));
+        repository.upsertMany("requests", () => board.id, repository.list<PendingRequest>("requests", board.id).filter((request) => request.status === "open").map((request) => ({ ...request, status: "closed" as const, answer: "interrupted" })));
+        continue;
+      }
       const state = stateOf(board.id);
       const interrupted = liveNodes(state.graph).filter(isInFlight);
       interrupted.forEach((node) => {
@@ -234,21 +247,51 @@ export const createBoardService = (repository: Repository, hub: Hub, usage?: Usa
 
   adoptLegacyBoards();
 
-  const attachmentIdsInPatch = (patch: Patch): string[] =>
-    Object.values(patch.nodes).flatMap((node) => (node.attachments ?? []).map((attachment) => attachment.id));
+  const attachmentIdsInPatch = (patch: Patch): string[] => attachmentIdsOf(Object.values(patch.nodes) as GraphNode[]);
 
   const referencedAttachmentIds = (): Set<string> => {
-    const stored = repository.listAll<BoardGraph["nodes"][Id]>("nodes").flatMap((node) => (node.attachments ?? []).map((attachment) => attachment.id));
+    const stored = attachmentIdsOf(repository.listAll<GraphNode>("nodes"));
     const pending = [...states.values()].flatMap((state) => [...state.undoStack, ...state.redoStack]).flatMap(attachmentIdsInPatch);
     return new Set([...stored, ...pending]);
+  };
+
+  const dropHistoryOf = (boardId: Id, nodeId: Id) => {
+    const state = stateOf(boardId);
+    const untouched = (patch: Patch) => !(nodeId in patch.nodes);
+    state.undoStack = state.undoStack.filter(untouched);
+    state.redoStack = state.redoStack.filter(untouched);
   };
 
   const sessionIdsHeldByHistory = (): Set<string> =>
     new Set([...states.values()].flatMap((state) => [...state.undoStack, ...state.redoStack]).flatMap(sessionIdsInPatch));
 
+  const viewJsonOf = (boardId: Id): string => {
+    const cached = viewJsons.get(boardId);
+    if (cached) return cached;
+    const { board, graph, parts, requests } = stateOf(boardId);
+    const json = JSON.stringify({ board, graph, parts: withoutLongToolOutputs(parts), requests, savedAt: board.updatedAt });
+    viewJsons.set(boardId, json);
+    return json;
+  };
+
+  const toolOutputOf = (boardId: Id, nodeId: Id, partId: Id): unknown => stateOf(boardId).parts[nodeId]?.find((part) => part.id === partId)?.meta?.output;
+
+  const storedToolOutputOf = (part: Part): unknown => {
+    const stored = repository.get<Part>("parts", part.id);
+    return stored?.nodeId === part.nodeId ? stored.meta?.output : undefined;
+  };
+
   return {
-    forget: (boardId: Id) => void states.delete(boardId),
+    forget: (boardId: Id) => {
+      states.delete(boardId);
+      invalidateView(boardId);
+    },
+    invalidateView,
+    viewJsonOf,
+    toolOutputOf,
+    storedToolOutputOf,
     referencedAttachmentIds,
+    dropHistoryOf,
     sessionIdsHeldByHistory,
     loadedBoardIds: () => [...states.keys()],
     saveNow,

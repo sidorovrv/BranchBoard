@@ -48,7 +48,7 @@ const loadInitialBoard = async () => {
 const LoadingOverlay = () => (
   <div className="loading-overlay" role="status" aria-live="polite">
     <div className="loading-spinner" />
-    <div>Preparing the board...</div>
+    <div>Preparing the board…</div>
   </div>
 );
 
@@ -67,7 +67,6 @@ export const App = () => {
     };
   }, []);
   const isSidebarOpen = useSettings((state) => state.settings.isSidebarOpen);
-  const navigation = useSettings((state) => state.settings.boardNavigation);
   const isContextPanelOpen = useSettings((state) => state.settings.isContextPanelOpen);
   const answerFont = useSettings((state) => state.settings.answerFont);
   useEffect(() => {
@@ -92,7 +91,7 @@ export const App = () => {
     <div className={`app${isTourOpen ? " is-touring" : ""}`}>
       <BoardBar />
       <div className="workspace">
-        {isSidebarOpen && navigation !== "tabs" && <Sidebar />}
+        {isSidebarOpen &&<Sidebar />}
         {board ? (
           <>
             <main className="canvas-area">

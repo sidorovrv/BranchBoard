@@ -15,6 +15,7 @@ import { BUNDLED_COMMANDS, listWorkspaceCommands, withBundledCommands } from "..
 import { fakeRuntime } from "../packages/server/src/runtimes/fake";
 import { opencodeRuntime } from "../packages/server/src/runtimes/opencodeAuto";
 import type { ProcessExit, RunningProcess } from "../packages/server/src/runtimes/spawnProcess";
+import { parseSupportedModels } from "../packages/server/src/runtimes/claudeSupportedModels";
 
 const PORT = 47124;
 const HOST = `127.0.0.1:${PORT}`;
@@ -268,7 +269,7 @@ describe("stream translation", () => {
       { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "task-1", content: "done" }] } },
     ]);
     expect(natives.map((native) => native.type)).toEqual(["tool-start", "subagent-start", "tool-done", "subagent-done"]);
-    expect(natives[1]).toMatchObject({ key: "task-1", title: "Find the bug", agent: "explorer" });
+    expect(natives[1]).toMatchObject({ key: "task-1", partId: natives[0].partId, title: "Find the bug", agent: "explorer" });
   });
 
   it("turns TodoWrite into a todo list instead of a tool card", () => {
@@ -549,13 +550,46 @@ describe("runtime availability", () => {
   });
 
   it("reports the version and offers models and workspace agents when healthy", async () => {
-    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", listAgents: () => ["reviewer"] });
+    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", listAgents: () => ["reviewer"], probeModels: async () => [] });
     const catalog = await runtime.catalog(workspace);
     expect(catalog.health).toEqual({ ok: true, detail: "found claude 2.9.9" });
     expect(catalog.agents).toEqual(["default", "reviewer"]);
-    expect(catalog.models.map((model) => model.id)).toEqual(["default", "sonnet", "opus", "haiku", "claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"]);
+    expect(catalog.models.map((model) => model.id)).toEqual(["default", "sonnet", "opus", "haiku", "claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-1"]);
     expect(catalog.models.every((model) => model.efforts?.includes("high"))).toBe(true);
     expect(catalog.permissionModes?.map((mode) => mode.id)).toEqual(["manual", "plan", "acceptEdits", "auto", "dontAsk"]);
+  });
+
+  it("lists the models the claude command reports, caches them and refreshes after forgetCaches", async () => {
+    let probes = 0;
+    const probeModels = async () => {
+      probes += 1;
+      return [{ id: "haiku", name: "Haiku 5.5", efforts: ["low", "high"] }, { id: "claude-haiku-5-5", name: "Haiku 5.5 pinned" }];
+    };
+    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", probeModels });
+    const catalog = await runtime.catalog(workspace);
+    expect(catalog.models.map((model) => model.id)).toEqual(["default", "haiku", "claude-haiku-5-5", "sonnet", "opus"]);
+    expect(catalog.models[1]).toMatchObject({ name: "Haiku 5.5", efforts: ["default", "low", "high"] });
+    expect(catalog.models[2].efforts).toContain("xhigh");
+    await runtime.catalog(workspace);
+    expect(probes).toBe(1);
+    await runtime.forgetCaches?.();
+    await runtime.catalog(workspace);
+    expect(probes).toBe(2);
+  });
+
+  it("falls back to the built-in models when the model probe fails", async () => {
+    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", probeModels: async () => Promise.reject(new Error("not signed in")) });
+    const catalog = await runtime.catalog(workspace);
+    expect(catalog.health.ok).toBe(true);
+    expect(catalog.models.map((model) => model.id)).toContain("claude-haiku-5-5");
+  });
+
+  it("reads supported models leniently from the initialize response", () => {
+    const response = (models: unknown) => JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "branchboard-initialize", response: { models } } });
+    expect(parseSupportedModels(response([{ value: "default", displayName: "Default" }, { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku 5.5", supportedEffortLevels: ["low", 3] }, { displayName: "No value" }, null]))).toEqual([{ id: "haiku", name: "Haiku 5.5", efforts: ["low"] }]);
+    expect(parseSupportedModels(response(undefined))).toEqual([]);
+    expect(parseSupportedModels("not json")).toBeUndefined();
+    expect(parseSupportedModels(JSON.stringify({ type: "control_response", response: { request_id: "other" } }))).toBeUndefined();
   });
 
   it("lists the workspace's slash commands with their descriptions and templates", async () => {
@@ -665,6 +699,7 @@ describe("runs through the board", () => {
       serverUrl: `http://${HOST}`,
       locate: () => ({ path: EXECUTABLE, searched: [] }),
       probeVersion: async () => "9.9.9",
+      probeModels: async () => [],
       temporaryDirectory: join(directory, "mcp"),
       readBase64: () => "",
       suggestsTitles: false,

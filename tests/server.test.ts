@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { activeRollOf, answerText, encodeAnswers, isStale, liveEdges, REJECTED_ANSWER, type BoardView, type GraphNode } from "@branchboard/core";
-import { ACCESS_QUERY, accessCookieName, cookieValueOf, loadAccessToken } from "../packages/server/src/accessToken";
+import { ACCESS_QUERY, accessCookieName, accessLinkOf, cookieValueOf, loadAccessToken } from "../packages/server/src/accessToken";
 import { createApp } from "../packages/server/src/app";
-import { isUpgradeAllowed } from "../packages/server/src/security";
+import { isUpgradeAllowed, networkNamesOfThisComputer } from "../packages/server/src/security";
 
 const PORT = 47123;
 const security = { port: PORT, extraOrigins: [] };
@@ -160,6 +160,20 @@ describe("access key", () => {
     expect(isUpgradeAllowed({ ...config, accessToken: undefined }, upgrade({}))).toBe(true);
   });
 
+  it("accepts the network names of this computer only when they are configured", () => {
+    const lanHost = `192.168.1.20:${PORT}`;
+    const upgrade = { headers: { host: lanHost, origin: `http://${lanHost}`, cookie } } as IncomingMessage;
+    expect(isUpgradeAllowed({ port: PORT, extraOrigins: [], accessToken }, upgrade)).toBe(false);
+    expect(isUpgradeAllowed({ port: PORT, extraOrigins: [], accessToken, networkNames: ["192.168.1.20"] }, upgrade)).toBe(true);
+    expect(isUpgradeAllowed({ port: PORT, extraOrigins: [], accessToken, networkNames: ["192.168.1.20"] }, { headers: { ...upgrade.headers, cookie: undefined } } as IncomingMessage)).toBe(false);
+    expect(networkNamesOfThisComputer()).not.toContain("127.0.0.1");
+  });
+
+  it("builds links with and without the key", () => {
+    expect(accessLinkOf(PORT, accessToken)).toBe(`http://127.0.0.1:${PORT}/?${ACCESS_QUERY}=${accessToken}`);
+    expect(accessLinkOf(PORT, undefined, "192.168.1.20")).toBe(`http://192.168.1.20:${PORT}/`);
+  });
+
   it("keeps one key across restarts", () => {
     const path = join(directory, "keys", "access-token");
     const first = loadAccessToken(path);
@@ -211,6 +225,12 @@ describe("importing a board shared by someone else", () => {
     const imported = (await command({ type: "importBoard", projectId: await projectOf(), raw: JSON.stringify(document) })).json;
     const nodes = Object.values((await view(imported.id)).graph.nodes);
     expect(nodes.every((node) => node.permissionMode === undefined && node.agent === undefined)).toBe(true);
+  });
+
+  it("refuses commands that are not objects or name a prototype key", async () => {
+    expect((await server.app.request(`http://127.0.0.1:${PORT}/api/commands`, { method: "POST", headers: trusted, body: "null" })).status).toBe(409);
+    expect((await command({ type: "constructor" })).status).toBe(409);
+    expect((await command({ type: "hasOwnProperty" })).status).toBe(409);
   });
 
   it("refuses a file whose connections loop", async () => {
@@ -765,5 +785,20 @@ describe("workspace files", () => {
     server.codeFileSync.syncAll();
     expect((await view(filesBoard)).graph.nodes[nodeId].prompt).toBe("const two = 22222;");
     expect(server.boards.stateOf(filesBoard).undoStack.some((patch) => patch.nodes[nodeId]?.prompt === "const one = 1;")).toBe(false);
+  });
+
+  it("never refreshes a code node from a sensitive file and asks before writing one", async () => {
+    writeFileSync(join(folder, ".env"), "TOKEN=one");
+    const extracted = await command({ type: "extractFile", boardId: filesBoard, path: ".env", allowSensitive: true });
+    const nodeId = extracted.json.nodeId;
+    writeFileSync(join(folder, ".env"), "TOKEN=two");
+    server.codeFileSync.syncAll();
+    expect((await view(filesBoard)).graph.nodes[nodeId].prompt).toBe("TOKEN=one");
+    const unconfirmed = await command({ type: "writeCodeFile", boardId: filesBoard, nodeId, content: "TOKEN=three" });
+    expect(unconfirmed.status).toBe(409);
+    expect(unconfirmed.json.sensitiveFiles).toEqual([".env"]);
+    expect(readFileSync(join(folder, ".env"), "utf8")).toBe("TOKEN=two");
+    expect((await command({ type: "writeCodeFile", boardId: filesBoard, nodeId, content: "TOKEN=three", allowSensitive: true })).status).toBe(200);
+    expect(readFileSync(join(folder, ".env"), "utf8")).toBe("TOKEN=three");
   });
 });

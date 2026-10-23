@@ -1,10 +1,11 @@
 import { pathToFileURL } from "node:url";
 import { decodeAnswers, isChosen, parseQuestionSpec, REJECTED_ANSWER, SESSION_GONE_MESSAGE, UNSET_CHOICE, type Catalog, type CatalogCommand, type CatalogModel, type PendingRequest, type RunEvent } from "@branchboard/core";
-import { approvalOpened, questionOpened, streamEventMap, subagentEventMap, usageEvents, usageNative } from "./commonEvents";
+import { approvalOpened, numberOf, questionOpened, streamEventMap, subagentEventMap, usageEvents, usageNative } from "./commonEvents";
 import { log } from "../log";
 import { locateOpencode } from "./opencodeLocator";
 import { generateThroughSession } from "../run/askOnce";
-import { createServerPool, isNotFound, opencodeSlots, serverSentEvents, splitModel, type OpencodeServer } from "./opencodeServer";
+import { failureOf } from "./failures";
+import { closeStream, createServerPool, interruptOnAbort, isNotFound, opencodeSlots, serverSentEvents, splitModel, type OpencodeServer } from "./opencodeServer";
 import { pickSmallModel } from "./smallModel";
 import { RecoverableError, type EventMap, type NativeEvent, type RunScope, type RuntimeSteps } from "../run/types";
 
@@ -65,8 +66,6 @@ interface MessageUsage {
   cacheRead: number;
   cacheWrite: number;
 }
-
-const numberOf = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
 
 const recordAssistantUsage = (raw: OpencodeNative, handle: Pick<OpencodeHandle, "sessionId">, seen: SeenState): boolean => {
   const info = raw.properties?.info;
@@ -148,26 +147,27 @@ async function* execute(handle: OpencodeHandle, input: string, scope: RunScope):
   const { server, directory, sessionId } = handle;
   const stream = await call(server, directory, "/event", { signal: scope.signal });
   const seen = createSeenState();
-  scope.signal.addEventListener("abort", () => void call(server, directory, `/session/${sessionId}/abort`, { method: "POST" }).catch(() => undefined), { once: true });
-  await call(server, directory, `/session/${sessionId}/prompt_async`, {
-    method: "POST",
-    body: JSON.stringify({ agent: scope.agent, model: splitModel(scope.model), variant: isChosen(scope.effort) ? scope.effort : undefined, system: [scope.systemNote, scope.contextNote].filter(Boolean).join("\n\n") || undefined, parts: [{ type: "text", text: input }, ...scope.files.map((file) => ({ type: "file", mime: file.mime, filename: file.name, url: pathToFileURL(file.path).href }))] }),
-  });
+  const interrupts = interruptOnAbort(scope.signal, () => call(server, directory, `/session/${sessionId}/abort`, { method: "POST" }));
   try {
+    await call(server, directory, `/session/${sessionId}/prompt_async`, {
+      method: "POST",
+      body: JSON.stringify({ agent: scope.agent, model: splitModel(scope.model), variant: isChosen(scope.effort) ? scope.effort : undefined, system: [scope.systemNote, scope.contextNote].filter(Boolean).join("\n\n") || undefined, parts: [{ type: "text", text: input }, ...scope.files.map((file) => ({ type: "file", mime: file.mime, filename: file.name, url: pathToFileURL(file.path).href }))] }),
+    });
+    interrupts.resendIfAborted();
     for await (const raw of serverSentEvents<OpencodeNative>(stream, scope.signal)) {
       for (const native of translateEvent(raw, handle, seen)) {
         yield native;
-        if (native.type === "idle" || native.type === "failure") {
-          scope.setRuntimeRef({ sessionId, lastMessageId: seen.lastAssistantMessage });
-          return;
-        }
+        if (native.type === "idle" || native.type === "failure") return;
       }
     }
+    if (!scope.signal.aborted) yield { type: "failure", ...failureOf({ isEarlyEnd: true }) };
   } catch (error) {
     if (scope.signal.aborted) log.info("opencode", `Event stream for session ${sessionId} stopped`);
     else log.error("opencode", `Event stream for session ${sessionId} broke`, error);
     throw error;
   } finally {
+    interrupts.stop();
+    closeStream(stream);
     scope.setRuntimeRef({ sessionId, lastMessageId: seen.lastAssistantMessage });
   }
 }

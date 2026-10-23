@@ -21,6 +21,9 @@ describe("command line arguments", () => {
       shouldAutoUpdate: true,
     });
     expect(parseArguments(["--no-auto-update"])).toEqual({ kind: "run", shouldOpenBrowser: true, shouldAutoUpdate: false });
+    expect(parseArguments(["--host"])).toEqual({ kind: "run", shouldOpenBrowser: true, shouldAutoUpdate: true, isOnNetwork: true });
+    expect(parseArguments(["--no-key"])).toEqual({ kind: "run", shouldOpenBrowser: true, shouldAutoUpdate: true, isKeyless: true });
+    expect(parseArguments(["--host", "--no-key"]).kind).toBe("error");
     expect(parseArguments(["--enable-claude"]).kind).toBe("error");
   });
 
@@ -85,6 +88,12 @@ describe("serving the web app from a folder", () => {
     expect(asset.status).toBe(200);
     expect(await asset.text()).toBe("console.log(1)");
     expect(await (await get("/boards/abc")).text()).toContain("Branchboard");
+  });
+
+  it("answers an unknown API route with 404 instead of the page", async () => {
+    const response = await get("/api/no-such-route");
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Not found" });
   });
 
   it("does not serve files outside the folder", async () => {

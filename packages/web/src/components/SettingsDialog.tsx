@@ -34,8 +34,8 @@ import { useAbout } from "../aboutStore";
 import { fetchRuntimePanels, runPanelAction } from "../api";
 import { shortcutCapture } from "../actions";
 import { displayBinding, displayModifier, displayShortcuts } from "../platform";
-import { ACTIVE_JOBS_SHOWN_MAX, ALT_CLICK_ZOOM_MAX, ALT_CLICK_ZOOM_MIN, KEYBOARD_PAN_SPEED_MAX, KEYBOARD_PAN_SPEED_MIN, NODE_TAGS, useSettings } from "../settings";
-import { sendBoardCommand, useBoard } from "../store";
+import { ACTIVE_JOBS_SHOWN_MAX, ALT_CLICK_ZOOM_MAX, BOARD_MEMORY_MINUTES_MAX, ALT_CLICK_ZOOM_MIN, KEYBOARD_PAN_SPEED_MAX, KEYBOARD_PAN_SPEED_MIN, NODE_TAGS, useSettings } from "../settings";
+import { copyText, sendBoardCommand, useBoard } from "../store";
 import { ChipSelect } from "../kit/ChipSelect";
 import { Icon } from "../kit/Icons";
 import { NumberInput, SettingFields, SettingRow, SettingsDialog as KitSettingsDialog, ToggleSwitch, type SettingField, type SettingsSection } from "../kit/Settings";
@@ -50,6 +50,7 @@ interface BoardSettingsSection extends SettingsSection {
 }
 
 const DEFAULT_SHARE_PERCENT = 60;
+const BUDGET_TOKENS_MAX = 1_000_000_000;
 
 const CAPTURE_PROMPTS: Record<BindingKind, string> = {
   key: "Press a key or key combination, or a mouse button (middle, 4 or 5). Esc cancels.",
@@ -162,10 +163,10 @@ const TelemetrySettings = ({ isOffline }: { isOffline: boolean }) => {
   const [isPreviewShown, setIsPreviewShown] = useState(false);
   useEffect(() => void load(), [load]);
   if (!overview) return null;
-  const copyPath = () => void navigator.clipboard.writeText(overview.sentLogPath).then(() => useBoard.getState().notify("Copied"));
+  const copyPath = () => void copyText(overview.sentLogPath);
   return (
     <>
-      <SettingRow label="Send aggregated anonymous telemetry" description={`Counts of runs, nodes and boards, sent once a day.${isOffline ? " Branchboard runs with --offline and sends nothing." : ""}`}>
+      <SettingRow label="Send aggregated anonymous telemetry" description={`Counts of runs, nodes and boards, sent once a day.${isOffline ? " Telemetry is off because Branchboard was started with --offline." : ""}`}>
         <ToggleSwitch checked={overview.consent === "granted"} label="Send aggregated anonymous telemetry" onChange={(isGranted) => void setConsent(isGranted)} />
       </SettingRow>
       <SettingRow label="Show what is sent" description="The counts for today so far.">
@@ -298,6 +299,12 @@ const BoardShareControl = ({ label }: { label: string }) => {
   return <NumberInput value={percent} min={0} max={100} unit="% of window" label={label} disabled={!board} onCommit={commit} />;
 };
 
+const BoardBudgetControl = ({ label }: { label: string }) => {
+  const board = useBoard((state) => state.board);
+  const commit = (draft: string) => void sendBoardCommand({ type: "updateBoard", budgetTokens: Math.min(BUDGET_TOKENS_MAX, Math.max(0, Number(draft) || 0)) });
+  return <NumberInput value={board?.budgetTokens ?? 0} min={0} max={BUDGET_TOKENS_MAX} step={10000} unit="tokens" label={label} disabled={!board} onCommit={commit} />;
+};
+
 const BoardEnvironmentControl = ({ label }: { label: string }) => {
   const board = useBoard((state) => state.board);
   const saved = environmentTextOf(board?.environment);
@@ -326,15 +333,19 @@ const SECTIONS: BoardSettingsSection[] = [
     fields: [
       { kind: "custom", label: "Default model", description: "Model preselected for new chats. Replies and branches use their parent's model.", control: <ModelControl label="Default model" /> },
       { kind: "custom", label: "Default permission mode", description: "Permission mode preselected for new chats. Replies and branches use their parent's mode.", control: <PermissionModeControl label="Default permission mode" /> },
+      { key: "agentDiagnosticsAccess", kind: "toggle", label: "Agent access to Branchboard diagnostics", description: "Claude runs can read Branchboard's models, runtime health, settings, logs and runs through the branchboard_diagnostics tool, and get a one-line system note about it." },
+      { key: "agentCrossNodeLogs", kind: "toggle", label: "Agent access to other nodes' results through the logs", description: "The runs section of the diagnostics tool includes the run logs of every board and node. When off, it returns only the records of the calling node." },
     ],
   },
   {
     id: "boards",
     label: "Boards",
     icon: "dashboard",
-    summary: "Settings of the open board.",
+    summary: "Board switching and settings of the open board.",
     fields: [
+      { key: "boardMemoryMinutes", kind: "number", label: "Keep inactive boards loaded", description: "Minutes a board you switched away from stays loaded in this browser tab, so switching back to it is instant. 0 loads every board again on each switch.", min: 0, max: BOARD_MEMORY_MINUTES_MAX, unit: "min" },
       { kind: "custom", label: "Summarise long context", description: "Summarise earlier turns before a run when the re-sent context exceeds this share of the model window. 0 turns it off.", control: <BoardShareControl label="Summarise long context" /> },
+      { kind: "custom", label: "Token budget", description: "New runs on this board are refused once its runs used this many tokens. Running ones finish. 0 turns it off.", control: <BoardBudgetControl label="Token budget" /> },
       { kind: "custom", label: "Environment variables", description: "One NAME=value per line, passed to OpenCode shell commands.", control: <BoardEnvironmentControl label="Environment variables" /> },
       { kind: "custom", label: "Tell agents about charts and tables", description: "Add a system note of about 350 tokens to every run that explains chart, table and file-link blocks.", control: <BoardToggleControl label="Tell agents about charts and tables" /> },
     ],
@@ -344,10 +355,8 @@ const SECTIONS: BoardSettingsSection[] = [
     id: "keys",
     label: "Models",
     icon: "key",
-    summary: "Claude cost display, API keys and the OpenCode server.",
-    fields: [
-      { key: "showClaudeCost", kind: "toggle", label: "Show Claude CLI cost", description: "Show the cost tag on Claude CLI nodes. The cost is an estimate at API prices." },
-    ],
+    summary: "API keys and the OpenCode server.",
+    fields: [],
     Editor: KeysEditor,
   },
   {
@@ -367,29 +376,6 @@ const SECTIONS: BoardSettingsSection[] = [
         ],
       },
       {
-        key: "keyboardPan",
-        kind: "choice",
-        label: "Move the board with the keyboard",
-        description: "Pan the board with held keys while no text box is focused.",
-        options: [
-          { value: "none", label: "Off" },
-          { value: "wasd", label: "W A S D" },
-          { value: "arrows", label: "Arrow keys" },
-        ],
-      },
-      { key: "keyboardPanSpeed", kind: "slider", label: "Keyboard movement speed", description: "100% is about 900 pixels per second.", min: KEYBOARD_PAN_SPEED_MIN, max: KEYBOARD_PAN_SPEED_MAX, step: 5, unit: "%" },
-      {
-        key: "boardNavigation",
-        kind: "choice",
-        label: "Switching boards",
-        description: "Where to switch between boards.",
-        options: [
-          { value: "sidebar", label: "Left bar" },
-          { value: "tabs", label: "Tabs" },
-          { value: "both", label: "Both" },
-        ],
-      },
-      {
         key: "subagentDisplay",
         kind: "choice",
         label: "Subagents",
@@ -401,10 +387,8 @@ const SECTIONS: BoardSettingsSection[] = [
       },
       { key: "defaultNodeWidth", kind: "number", label: "Default width", description: "Width of new top-level nodes.", min: NODE_MIN_WIDTH, max: NODE_MAX_WIDTH, unit: "px" },
       { key: "defaultNodeHeight", kind: "number", label: "Default height", description: "Height of new top-level nodes.", min: NODE_MIN_HEIGHT, max: NODE_MAX_HEIGHT, unit: "px" },
-      { key: "altClickZoom", kind: "slider", label: `${displayModifier("Alt")}-click zoom`, description: `Share of the screen a node fills after ${displayModifier("Alt")}-click.`, min: ALT_CLICK_ZOOM_MIN, max: ALT_CLICK_ZOOM_MAX, step: 5, unit: "%" },
       { key: "snapNextPrompt", kind: "toggle", label: "Snap on Next Prompt", description: "Place “Next prompt…” nodes directly below their parent." },
       { key: "followScroll", kind: "toggle", label: "Follow streaming answers", description: "Keep streaming answers scrolled to the bottom." },
-      { key: "groupToolCalls", kind: "toggle", label: "Group tool calls", description: "Fold all tool calls between two text outputs into one line, for example “Read 3 files, ran a command”." },
       { key: "blinkForAttention", kind: "toggle", label: "Blink nodes that need an answer", description: "Blink nodes that wait for a question or permission on the minimap and when zoomed out." },
     ],
   },
@@ -412,8 +396,22 @@ const SECTIONS: BoardSettingsSection[] = [
     id: "shortcuts",
     label: "Shortcuts",
     icon: "keyboard",
-    summary: "Each action accepts several shortcuts. Shared shortcuts are highlighted.",
-    fields: [],
+    summary: "Keyboard movement, click zoom and the shortcut for each action. Each action accepts several shortcuts. Shared shortcuts are highlighted.",
+    fields: [
+      {
+        key: "keyboardPan",
+        kind: "choice",
+        label: "Move the board with the keyboard",
+        description: "Pan the board with held keys while no text box is focused.",
+        options: [
+          { value: "none", label: "Off" },
+          { value: "wasd", label: "W A S D" },
+          { value: "arrows", label: "Arrow keys" },
+        ],
+      },
+      { key: "keyboardPanSpeed", kind: "slider", label: "Keyboard movement speed", description: "100% is about 900 pixels per second.", min: KEYBOARD_PAN_SPEED_MIN, max: KEYBOARD_PAN_SPEED_MAX, step: 5, unit: "%" },
+      { key: "altClickZoom", kind: "slider", label: `${displayModifier("Alt")}-click zoom`, description: `Share of the screen a node fills after ${displayModifier("Alt")}-click.`, min: ALT_CLICK_ZOOM_MIN, max: ALT_CLICK_ZOOM_MAX, step: 5, unit: "%" },
+    ],
     Editor: ShortcutsEditor,
   },
   {
@@ -430,7 +428,7 @@ const SECTIONS: BoardSettingsSection[] = [
     id: "appearance",
     label: "Appearance",
     icon: "palette",
-    summary: "Colours, typefaces and node tags.",
+    summary: "Colours, typefaces, tool calls, cost and node tags.",
     fields: [
       {
         key: "theme",
@@ -453,6 +451,8 @@ const SECTIONS: BoardSettingsSection[] = [
           { value: "serif", label: "Serif" },
         ],
       },
+      { key: "groupToolCalls", kind: "toggle", label: "Group tool calls", description: "Fold all tool calls between two text outputs into one line, for example “Read 3 files, ran a command”." },
+      { key: "showClaudeCost", kind: "toggle", label: "Show Claude CLI cost", description: "Show the cost tag on Claude CLI nodes. The cost is an estimate at API prices." },
       { key: "shownTags", kind: "checklist", label: "Node tags", description: "Tags shown in the header of a node.", options: NODE_TAGS.map((tag) => ({ value: tag.id, label: tag.label })) },
     ],
   },

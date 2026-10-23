@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { buildNodeClipboard, formatDuration, type NodeClipboard, type RunInfo } from "@branchboard/core";
 import { fetchBoardView } from "../api";
+import { listenForEscape } from "../escape";
 import { isUnseenCompletion, useSeenResults } from "../seenResults";
 import { useSettings } from "../settings";
 import { cancelScheduledSend, formatRunCountdown, useScheduledSends, type ScheduledDetails } from "../scheduledSends";
-import { currentViewCentre, sendBoardCommand, useBoard } from "../store";
+import { copyText, currentViewCentre, reportFailures, sendBoardCommand, useBoard } from "../store";
 import { useContextMenu, type MenuItem } from "./ContextMenu";
 import { ELAPSED_TICK_MS } from "./NodeShell";
 
@@ -47,20 +48,21 @@ const clipboardOfRun = async (run: RunInfo): Promise<NodeClipboard | undefined> 
   return buildNodeClipboard(view.graph, view.parts, [run.nodeId]);
 };
 
-const copyRun = async (run: RunInfo) => {
-  const { notify } = useBoard.getState();
-  const clipboard = await clipboardOfRun(run);
-  if (!clipboard) return notify("That node no longer exists.");
-  await navigator.clipboard.writeText(JSON.stringify(clipboard));
-  notify("Copied the node. Paste on any board to duplicate.");
-};
+const copyRun = (run: RunInfo) =>
+  reportFailures(async () => {
+    const { notify } = useBoard.getState();
+    const clipboard = await clipboardOfRun(run);
+    if (!clipboard) return notify("That node no longer exists.");
+    await copyText(JSON.stringify(clipboard), "Copied the node. Paste on any board to duplicate.");
+  });
 
-const addRunHere = async (run: RunInfo) => {
-  const clipboard = await clipboardOfRun(run);
-  if (!clipboard) return useBoard.getState().notify("That node no longer exists.");
-  const pasted = await sendBoardCommand<{ nodeIds: string[] }>({ type: "pasteNodes", clipboard, position: currentViewCentre() ?? { x: 0, y: 0 } });
-  if (pasted) useBoard.getState().requestSelection(pasted.nodeIds);
-};
+const addRunHere = (run: RunInfo) =>
+  reportFailures(async () => {
+    const clipboard = await clipboardOfRun(run);
+    if (!clipboard) return useBoard.getState().notify("That node no longer exists.");
+    const pasted = await sendBoardCommand<{ nodeIds: string[] }>({ type: "pasteNodes", clipboard, position: currentViewCentre() ?? { x: 0, y: 0 } });
+    if (pasted) useBoard.getState().requestSelection(pasted.nodeIds);
+  });
 
 const dotOf = (run: RunInfo, isUnseen: boolean): string => {
   if (run.status === "running") return "is-working";
@@ -223,9 +225,7 @@ export const RunsOverlay = () => {
   }, [isOpen, isTicking]);
   useEffect(() => {
     if (!isOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && setIsOpen(false);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    return listenForEscape(() => setIsOpen(false));
   }, [isOpen]);
   const hide = (run: RunInfo) => setHiddenKeys((keys) => new Set(keys).add(hideKeyOf(run)));
   const isListed = (run: RunInfo) => !hiddenKeys.has(hideKeyOf(run));

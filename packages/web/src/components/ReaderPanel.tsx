@@ -1,8 +1,8 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { activeRollOf, describeContext, formatTokens, partsOfRoll, type GraphNode, type Part, type Turn, type TurnKind } from "@branchboard/core";
 import { useEdgeResize } from "../panelResize";
 import { READER_DEFAULT_WIDTH, READER_MAX_WIDTH, READER_MIN_WIDTH, useSettings } from "../settings";
-import { useBoard } from "../store";
+import { copyText, useBoard } from "../store";
 import { Icon } from "../kit/Icons";
 import { Markdown } from "../kit/Markdown";
 
@@ -74,13 +74,15 @@ const transcriptOf = (turns: Turn[], node: GraphNode, answer: string): string =>
 
 const CopyTranscript = ({ text }: { text: string }) => {
   const [isCopied, setIsCopied] = useState(false);
-  const copy = () => {
-    void navigator.clipboard.writeText(text).then(() => {
-      setIsCopied(true);
-      setTimeout(() => setIsCopied(false), COPIED_FEEDBACK_MS);
-    }).catch(() => undefined);
+  const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(resetTimer.current), []);
+  const copy = async () => {
+    if (!(await copyText(text))) return;
+    setIsCopied(true);
+    clearTimeout(resetTimer.current);
+    resetTimer.current = setTimeout(() => setIsCopied(false), COPIED_FEEDBACK_MS);
   };
-  return <button className="icon-button" onClick={copy} title="Copy the conversation as Markdown" aria-label="Copy the conversation as Markdown"><Icon name={isCopied ? "check" : "copy"} /></button>;
+  return <button className="icon-button" onClick={() => void copy()} title="Copy the conversation as Markdown" aria-label="Copy the conversation as Markdown"><Icon name={isCopied ? "check" : "copy"} /></button>;
 };
 
 const ReaderEmpty = () => (

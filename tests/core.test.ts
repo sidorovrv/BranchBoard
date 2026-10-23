@@ -15,6 +15,7 @@ import {
   highlightSpans,
   titleForPrompt,
   importBoardDocument,
+  isInFlight,
   isRefusal,
   isStale,
   liveEdges,
@@ -105,6 +106,28 @@ describe("edge refusals", () => {
     expect(isRefusal(runEdit(base, { type: "reattach", edgeId: edge.id, end: "from", nodeId: "C" }))).toBe(true);
     expect(isRefusal(runEdit(base, { type: "reattach", edgeId: edge.id, end: "from", nodeId: "D" }))).toBe(false);
   });
+
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty"])("refuses the prototype key %s as a node or edge id", (id) => {
+    const base = buildGraph(["A", "B"], [["A", "B"]]);
+    const edits: GraphEdit[] = [
+      { type: "editNode", nodeId: id, fields: { title: "x" } },
+      { type: "moveNodes", positions: { [id]: { x: 1 } } },
+      { type: "connect", fromId: "A", toId: id },
+      { type: "connect", fromId: id, toId: "B" },
+      { type: "disconnect", edgeId: id },
+      { type: "deleteNodes", ids: [id] },
+      { type: "restoreNodes", ids: [id] },
+      { type: "collapse", nodeId: id },
+      { type: "pin", nodeId: id },
+      { type: "reopen", nodeId: id },
+      { type: "queue", nodeId: id },
+      { type: "selectRoll", nodeId: id, roll: 0 },
+      { type: "editComments", nodeId: id, clearRoll: 0 },
+      { type: "setSummary", nodeId: id },
+      { type: "detach", nodeId: id, attachmentId: "a" },
+    ];
+    for (const edit of edits) expect(isRefusal(runEdit(base, edit)), edit.type).toBe(true);
+  });
 });
 
 describe("property tests on random DAGs", () => {
@@ -179,6 +202,25 @@ describe("run locks", () => {
     expect(isRefusal(runEdit(graph, { type: "connect", fromId: "B", toId: "X" }))).toBe(false);
     const branch = makeNode(BOARD, { id: "child" });
     expect(isRefusal(runEdit(graph, { type: "addNode", node: branch, parentIds: ["A"] }))).toBe(false);
+  });
+
+  it("edits and moves change only their own fields", () => {
+    const graph = running(buildGraph(["A", "B"], [["A", "B"]]), "B");
+    const forged = { type: "editNode", nodeId: "B", fields: { status: "idle" } } as unknown as GraphEdit;
+    expect(isRefusal(runEdit(graph, forged))).toBe(true);
+    const moved = mustApply(graph, { type: "moveNodes", positions: { B: { x: 5, status: "idle" } as never } });
+    expect(moved.nodes.B.x).toBe(5);
+    expect(moved.nodes.B.status).toBe("running");
+  });
+
+  it("refuses edit values of the wrong type", () => {
+    const graph = buildGraph(["A"], []);
+    const edit = (fields: Record<string, unknown>) => runEdit(graph, { type: "editNode", nodeId: "A", fields } as GraphEdit);
+    expect(isRefusal(edit({ prompt: {} }))).toBe(true);
+    expect(isRefusal(edit({ title: 3 }))).toBe(true);
+    expect(isRefusal(edit({ forceAssemble: "yes" }))).toBe(true);
+    expect(isRefusal(edit({ model: "bad model; rm -rf" }))).toBe(true);
+    expect(isRefusal(edit({ model: "claude-sonnet-5-5", agent: "" }))).toBe(false);
   });
 
   it("reopen and queue only apply to finished or idle chats", () => {
@@ -337,6 +379,17 @@ describe("export and import", () => {
     const importedParts = Object.values(imported.parts).flat();
     expect(importedParts.map((part) => part.text).sort()).toEqual(["alpha", "beta"]);
     expect(importedParts.every((part) => part.id.startsWith(part.nodeId))).toBe(true);
+  });
+
+  it("settles in-flight nodes of every kind and gives foreign part ids the new node id", () => {
+    const graph = buildGraph(["A", "B"], [["A", "B"]]);
+    graph.nodes.B = { ...graph.nodes.B, kind: "context", status: "running" };
+    const parts = { A: [{ ...finishedParts("A", "alpha")[0], id: "foreign-part" }] };
+    const board = { id: BOARD, title: "t", workspacePath: ".", mode: "fake" as const, createdAt: 1, updatedAt: 1, deleted: false };
+    const imported = importBoardDocument(encoders.json(collectBoard({ board, graph, parts })));
+    expect(Object.values(imported.graph.nodes).every((node) => !isInFlight(node))).toBe(true);
+    expect(Object.values(imported.parts).flat().map((part) => part.id)).toEqual([expect.stringMatching(/:foreign-part$/)]);
+    expect(Object.values(imported.parts).flat().every((part) => part.id.startsWith(part.nodeId))).toBe(true);
   });
 
   it("still imports documents exported under the previous product name", () => {

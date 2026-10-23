@@ -40,7 +40,15 @@ export const quoteForCmdShell = (value: string): string => {
 
 export const withoutCurrentDirectorySearch = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({ ...env, NoDefaultCurrentDirectoryInExePath: "1" });
 
-export const spawnExecutable = (executable: string, args: string[], options: LaunchOptions): ChildProcess => {
+const LOOPBACK_HOSTS = ["127.0.0.1", "localhost"];
+
+export const withLoopbackDirect = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+  const listed = [env.NO_PROXY, env.no_proxy].flatMap((value) => (value ?? "").split(",")).map((entry) => entry.trim()).filter(Boolean);
+  const bypass = [...new Set([...listed, ...LOOPBACK_HOSTS])].join(",");
+  return { ...env, NO_PROXY: bypass, no_proxy: bypass };
+};
+
+export const spawnExecutable =(executable: string, args: string[], options: LaunchOptions): ChildProcess => {
   const spawnOptions = { cwd: options.cwd, env: withoutCurrentDirectorySearch(options.env), stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
   if (!needsShell(executable)) return spawn(executable, args, spawnOptions);
   return spawn(quoteForCmdShell(executable), args.map(quoteForCmdShell), { ...spawnOptions, shell: true });
@@ -66,12 +74,38 @@ export const launchProcess: LaunchProcess = (executable, args, options) => {
   };
 };
 
-export const readOutput = (executable: string, args: string[], options: LaunchOptions): Promise<string> =>
+export interface CommandResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+export interface CommandOptions extends LaunchOptions {
+  timeoutMs: number;
+  tailChars?: number;
+}
+
+const PROBE_TIMEOUT_MS = 15000;
+
+export const runCommand = (executable: string, args: string[], { timeoutMs, tailChars = Number.MAX_SAFE_INTEGER, ...options }: CommandOptions): Promise<CommandResult> =>
   new Promise((resolve, reject) => {
     const child = spawnExecutable(executable, args, options);
-    let output = "";
-    child.stdout?.on("data", (chunk: Buffer) => (output += chunk.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve(output.trim()) : reject(new Error(`${executable} exited with code ${code}`))));
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      killTree(child);
+      reject(new Error(`${executable} did not finish within ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout?.on("data", (chunk: Buffer) => (stdout = (stdout + chunk.toString()).slice(-tailChars)));
+    child.stderr?.on("data", (chunk: Buffer) => (stderr = (stderr + chunk.toString()).slice(-tailChars)));
+    child.stdin?.on("error", () => undefined);
+    child.on("error", (error) => (clearTimeout(timer), reject(error)));
+    child.on("close", (code) => (clearTimeout(timer), resolve({ code, stdout, stderr })));
     child.stdin?.end();
   });
+
+export const readOutput = async (executable: string, args: string[], options: LaunchOptions): Promise<string> => {
+  const { code, stdout } = await runCommand(executable, args, { ...options, timeoutMs: PROBE_TIMEOUT_MS });
+  if (code !== 0) throw new Error(`${executable} exited with code ${code}`);
+  return stdout.trim();
+};

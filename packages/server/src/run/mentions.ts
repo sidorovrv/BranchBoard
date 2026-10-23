@@ -1,8 +1,8 @@
-import { realpathSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { basename } from "node:path";
-import { isSensitivePath, mentionTokensOf } from "@branchboard/core";
+import { mentionTokensOf } from "@branchboard/core";
 import { MAX_ATTACHMENT_BYTES } from "../attachments";
-import { existingWorkspaceFile, mimeOfPath } from "../workspaceFiles";
+import { existingWorkspaceFile, isSensitiveWorkspaceFile, mimeOfPath } from "../workspaceFiles";
 import type { RunFile } from "./types";
 
 const fileOfMention = (workspacePath: string, token: string): RunFile | undefined => {
@@ -14,7 +14,7 @@ const fileOfMention = (workspacePath: string, token: string): RunFile | undefine
 export const sensitiveMentionsOf = (prompt: string, workspacePath: string): string[] =>
   mentionTokensOf(prompt).filter((token) => {
     const path = existingWorkspaceFile(workspacePath, token);
-    return path !== undefined && (isSensitivePath(token) || isSensitivePath(realpathSync(path)));
+    return path !== undefined && isSensitiveWorkspaceFile(workspacePath, token, path);
   });
 
 export interface MentionTargets {

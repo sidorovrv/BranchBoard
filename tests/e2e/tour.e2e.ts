@@ -29,7 +29,7 @@ test("the tour reaches every anchor, ends with Finish and returns to the previou
   await expect(card.getByRole("button", { name: "Next" })).toHaveCount(0);
   await card.getByRole("button", { name: "Finish" }).click();
   await expect(card).toHaveCount(0);
-  await expect(appPage.locator(".board-crumb, .sidebar-board-open.active", { hasText: "Demo board" }).first()).toBeVisible();
+  await expect(appPage.locator(".sidebar-board.active .sidebar-board-open", { hasText: "Demo board" })).toBeVisible();
   await expect(appPage.locator("[data-node-title]", { hasText: SAMPLE_BOARD_TITLE })).toHaveCount(0);
 });
 

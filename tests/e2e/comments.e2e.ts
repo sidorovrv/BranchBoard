@@ -1,6 +1,4 @@
-import { expect, test, type Instance } from "./fixtures";
-
-type Page = import("@playwright/test").Page;
+import { expect, test, type Instance, type Page } from "./fixtures";
 
 const ANSWER_PROMPT = "First paragraph alpha one\n\nSecond paragraph beta two\n\n| name | value |\n|---|---|\n| cellone | 1 |\n| celltwo | 2 |";
 
@@ -128,7 +126,7 @@ test("a comment can be made while the answer streams and survives the end of the
 });
 
 test("a comment can be made inside a tool card and inside a grouped tool run", async ({ appPage, instance, demo }) => {
-  await appPage.evaluate(() => localStorage.setItem("branchboard.settings", JSON.stringify({ groupToolCalls: true })));
+  await appPage.evaluate(() => localStorage.setItem("branchboard.settingsOverride",JSON.stringify({ groupToolCalls: true })));
   await appPage.reload();
   await appPage.locator(".sidebar-board-open", { hasText: "Demo board" }).click();
   const { nodeId } = await sendFrom(appPage, instance)({ type: "reply", boardId: demo.boardId, parentIds: [], prompt: "/write notes.txt :: tool body text" });

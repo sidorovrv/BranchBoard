@@ -26,9 +26,12 @@ describe("choosing a port", () => {
     expect(await resolvePort({ dataDirId: ours, probe: probeOf({}), pickPort })).toEqual({ kind: "start", port: 51234 });
   });
 
-  it("picks a new port when the remembered one is gone, taken by another program or by another data folder", async () => {
+  it("starts on the remembered port when nothing answers there, so the browser keeps its stored settings", async () => {
+    expect(await resolvePort({ lastPort: 4000, dataDirId: ours, probe: probeOf({}), pickPort })).toEqual({ kind: "start", port: 4000 });
+  });
+
+  it("picks a new port when the remembered one is taken by another program or by another data folder", async () => {
     const other = { kind: "branchboard" as const, dataDirId: dataDirectoryId("/data/b") };
-    expect(await resolvePort({ lastPort: 4000, dataDirId: ours, probe: probeOf({}), pickPort })).toEqual({ kind: "start", port: 51234 });
     expect(await resolvePort({ lastPort: 4000, dataDirId: ours, probe: probeOf({ 4000: { kind: "busy" } }), pickPort })).toEqual({ kind: "start", port: 51234 });
     expect(await resolvePort({ lastPort: 4000, dataDirId: ours, probe: probeOf({ 4000: other }), pickPort })).toEqual({ kind: "start", port: 51234 });
   });
@@ -74,18 +77,15 @@ describe("runtime registry and start summary", () => {
     expect(isRuntimeId("constructor")).toBe(false);
   });
 
-  it("prints install, sign-in and override lines for a missing command and the path for a found one", () => {
-    const summary = runtimeSummary("win32", { opencode: () => ({ path: "C:\\bin\\opencode.cmd" }), claude: () => ({}) });
-    expect(summary[0]).toBe("OpenCode: found (C:\\bin\\opencode.cmd)");
-    expect(summary[1]).toContain("npm install -g @anthropic-ai/claude-code");
-    expect(summary[1]).toContain("BRANCHBOARD_CLAUDE_PATH");
+  it("prints only the commands that were found", () => {
+    const summary = runtimeSummary({ opencode: () => ({ path: "C:\\bin\\opencode.cmd" }), claude: () => ({}), codex: () => ({}) });
+    expect(summary).toEqual(["OpenCode: found (C:\\bin\\opencode.cmd)"]);
     expect(installCommandFor("claude", "darwin")).toBe("npm install -g @anthropic-ai/claude-code");
     expect(installCommandFor("anthropic", "linux")).toBeUndefined();
   });
 
-  it("prints the codex install and sign-in lines", () => {
-    const [codex] = runtimeSummary("linux", { codex: () => ({}) });
-    expect(codex).toBe("ChatGPT subscription: not found. Install it with: npm install -g @openai/codex. Then sign in once by running: codex login. More: https://developers.openai.com/codex (or set BRANCHBOARD_CODEX_PATH to its full path).");
+  it("points to the setup guide when no command was found", () => {
+    expect(runtimeSummary({ claude: () => ({}), codex: () => ({}) })).toEqual(["No claude, codex or opencode command was found. The setup guide in the browser shows how to install one."]);
   });
 });
 

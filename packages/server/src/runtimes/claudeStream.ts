@@ -80,7 +80,9 @@ export const describeToolCall = (toolName: string, input: Record<string, any> | 
 
 export const approvalDetail = (toolName: string, input: Record<string, any> | undefined): string => {
   const specific = toolName === "Bash" ? firstText(input, ["command"]) : firstText(input, PATH_KEYS);
-  return (specific ?? JSON.stringify(input ?? {})).slice(0, MAX_DETAIL_CHARS);
+  if (specific !== undefined) return specific;
+  const serialized = JSON.stringify(input ?? {});
+  return serialized.length > MAX_DETAIL_CHARS ? `${serialized.slice(0, MAX_DETAIL_CHARS)}…` : serialized;
 };
 
 export const MIN_SUBAGENT_TEXT_VERSION = [2, 1, 211];
@@ -203,7 +205,7 @@ const translateAssistant = (message: any, state: StreamState): LooseNative[] => 
       if (!SUBAGENT_TOOLS.includes(block.name)) return [toolStart];
       state.subagentKeys.add(block.id);
       const title = block.input?.description ?? block.input?.subagent_type ?? "Subagent";
-      return [toolStart, { type: "subagent-start", key: block.id, title: String(title), agent: block.input?.subagent_type, prompt: typeof block.input?.prompt === "string" ? block.input.prompt : undefined }];
+      return [toolStart, { type: "subagent-start", key: block.id, partId: toolStart.partId, title: String(title), agent: block.input?.subagent_type, prompt: typeof block.input?.prompt === "string" ? block.input.prompt : undefined }];
     }
     if (state.streamedMessages.has(messageId)) return [];
     if (block.type === "text" && block.text) return [{ type: "text", partId, delta: block.text }];

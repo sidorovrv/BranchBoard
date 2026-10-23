@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { edgesAtSide, makeNode, NODE_GAP, placeSatellite, satelliteLinksOf, usedSidesOf, wireSidesOf } from "../packages/core/src";
+import { edgesAtSide, makeNode, NODE_GAP, placeNode, satelliteLinksOf, usedSidesOf, wireSidesOf } from "../packages/core/src";
 import { mustApply, buildGraph } from "./support";
 
 const box = (x: number, y: number) => ({ x, y, w: 100, h: 100 });
@@ -18,14 +18,25 @@ describe("connections at a side and satellites", () => {
     expect(edgesAtSide(graph, "C1", "left", "horizontal").map((edge) => edge.otherNodeId)).toEqual(["P"]);
   });
 
-  it("places a satellite beside its parent, below earlier satellites and clear of other nodes", () => {
+  it("places a satellite like a reply: beside its parent, else the nearest free spot above or below", () => {
     let graph = graphWithParent();
     const parent = graph.nodes.P;
     const size = { w: 360, h: 240 };
-    const first = placeSatellite(graph, "P", size);
+    const first = placeNode(graph, ["P"], size);
     expect(first).toEqual({ x: parent.x + parent.w + NODE_GAP, y: parent.y });
     graph = mustApply(graph, { type: "addNode", parentIds: [], node: makeNode("B", { id: "S1", kind: "subagent", satelliteOf: "P", ...size, ...first }) });
-    expect(placeSatellite(graph, "P", size).y).toBeGreaterThanOrEqual(first.y + size.h);
+    expect(placeNode(graph, ["P"], size).y).toBeGreaterThanOrEqual(first.y + size.h);
+  });
+
+  it("places a satellite above its parent's row when the column beside it is full below", () => {
+    let graph = mustApply(buildGraph([], []), { type: "addNode", parentIds: [], node: makeNode("B", { id: "P", x: 0, y: 0 }) });
+    const parent = graph.nodes.P;
+    const column = parent.x + parent.w + NODE_GAP;
+    ["A", "B", "C"].forEach((id, row) => (graph = mustApply(graph, { type: "addNode", parentIds: [], node: makeNode("B", { id, x: column, y: 100 + row * 400 }) })));
+    const size = { w: 360, h: 240 };
+    const spot = placeNode(graph, ["P"], size);
+    expect(spot.x).toBe(column);
+    expect(spot.y + size.h).toBeLessThanOrEqual(100);
   });
 
   it("links a satellite to its parent on the flow axis and counts the sides as used", () => {

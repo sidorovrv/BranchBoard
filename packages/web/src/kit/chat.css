@@ -30,7 +30,7 @@ span.icon { --icon: none; flex: none; display: block; width: 16px; height: 16px;
 .data-table table { display: table; margin: 0; }
 .data-table thead th { position: sticky; top: 0; z-index: 1; padding: 0; }
 .data-table .is-numeric { text-align: right; font-variant-numeric: tabular-nums; }
-.sort-header { display: flex; width: 100%; align-items: center; gap: 4px; padding: 3px 8px; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; text-align: inherit; cursor: pointer; white-space: nowrap; }
+.sort-header { display: flex; width: 100%; align-items: center; gap: 4px; padding: 3px 8px; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; text-align: inherit; white-space: nowrap; }
 .is-numeric .sort-header { justify-content: flex-end; }
 .sort-header:hover { background: var(--hover-strong); }
 .sort-arrow { display: inline-block; min-width: 1ch; color: var(--accent-text); }
@@ -67,7 +67,7 @@ span.icon { --icon: none; flex: none; display: block; width: 16px; height: 16px;
 .code-head button:hover { background: var(--hover-strong); color: var(--text); }
 .code-block pre { margin: 0; padding: 10px 12px; overflow-x: auto; white-space: pre; line-height: 1.5; font-size: 12px; }
 .code-block pre code { background: none; padding: 0; font-size: inherit; }
-.extract-file { flex: none; display: inline-flex; align-items: center; vertical-align: middle; margin-left: 4px; padding: 1px; border: 0; border-radius: 5px; background: none; color: var(--muted); cursor: pointer; opacity: 0.55; }
+.extract-file { flex: none; align-self: center; display: inline-flex; align-items: center; vertical-align: middle; margin-left: 4px; padding: 1px; border: 0; border-radius: 5px; background: none; color: var(--muted); cursor: pointer; opacity: 0.55; }
 .extract-file:hover { opacity: 1; background: var(--hover-strong); color: var(--text); }
 .extract-file .icon { width: 14px; height: 14px; }
 .live-controls { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--border); }

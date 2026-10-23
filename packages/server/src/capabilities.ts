@@ -22,6 +22,11 @@ export const capabilityOfPath = (path: string): CapabilityRequest | undefined =>
   return Object.hasOwn(CAPABILITY_KINDS, kind) && secret !== undefined && SECRET_PATTERN.test(secret) ? { kind: kind as CapabilityKind, secret, rest } : undefined;
 };
 
+export const loggedPathOf = (path: string): string => {
+  const capability = capabilityOfPath(path);
+  return capability ? `/${capability.kind}/…/${capability.rest.join("/")}` : path;
+};
+
 interface Entry {
   kind: CapabilityKind;
   subject: string;

@@ -10,6 +10,8 @@ const roundMs = (value: number): number => Math.round(value * 10) / 10;
 
 const afterNextPaint = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
+export type SidePanelTab = "context" | "search";
+
 interface BoardStore {
   runs: RunInfo[];
   finishedRuns: RunInfo[];
@@ -24,7 +26,7 @@ interface BoardStore {
   pendingFocus?: Id;
   pendingSelection?: Id[];
   requestSelection: (ids: Id[] | undefined) => void;
-  isSearchOpen: boolean;
+  sidePanelTab: SidePanelTab;
   isReaderOpen: boolean;
   setReaderOpen: (isOpen: boolean) => void;
   isSettingsOpen: boolean;
@@ -44,7 +46,7 @@ interface BoardStore {
   send: <T = any>(command: Record<string, unknown>) => Promise<T | undefined>;
   notify: (message: string) => void;
   select: (ids: Id[]) => void;
-  setSearchOpen: (isOpen: boolean) => void;
+  setSidePanelTab: (tab: SidePanelTab) => void;
   requestFocus: (id: Id | undefined) => void;
 }
 
@@ -58,10 +60,48 @@ const sendAfterConfirmation = async (command: Record<string, unknown>, files: st
   }
 };
 
+interface KeptBoard {
+  board: Board;
+  view: BoardView;
+  expiry: ReturnType<typeof setTimeout>;
+}
+
 let pendingEvents: BoardEvent[] = [];
 let isFlushScheduled = false;
-let unsubscribe: (() => void) | undefined;
+let shownBoardId: Id | undefined;
+const subscriptions = new Map<Id, () => void>();
+const keptBoards = new Map<Id, KeptBoard>();
 let focusHandler: (id: Id) => void = () => undefined;
+
+const closeSubscription = (boardId: Id) => {
+  subscriptions.get(boardId)?.();
+  subscriptions.delete(boardId);
+};
+
+const forgetKeptBoard = (boardId: Id) => {
+  clearTimeout(keptBoards.get(boardId)?.expiry);
+  keptBoards.delete(boardId);
+  closeSubscription(boardId);
+};
+
+const keepBoard = (board: Board, view: BoardView) => {
+  const minutes = useSettings.getState().settings.boardMemoryMinutes;
+  if (minutes <= 0 || !subscriptions.has(board.id)) return forgetKeptBoard(board.id);
+  keptBoards.set(board.id, { board, view, expiry: setTimeout(() => forgetKeptBoard(board.id), minutes * 60_000) });
+};
+
+const takeKeptBoard = (boardId: Id): KeptBoard | undefined => {
+  const kept = keptBoards.get(boardId);
+  if (!kept) return undefined;
+  clearTimeout(kept.expiry);
+  keptBoards.delete(boardId);
+  return kept;
+};
+
+const applyToKeptBoard = (kept: KeptBoard, event: BoardEvent) => {
+  kept.view = applyBoardEvent(kept.view, event);
+  if (event.type === "board") kept.board = event.board;
+};
 
 export const useBoard = create<BoardStore>((set, get) => {
   const flushEvents = () => {
@@ -84,10 +124,7 @@ export const useBoard = create<BoardStore>((set, get) => {
     }
   };
 
-  const reload = async (boardId: Id) => {
-    const startedAt = performance.now();
-    const { body, fetchMs, parseMs } = await fetchTimedBoardView(boardId);
-    const { board, ...view } = body;
+  const showBoard = (board: Board, view: BoardView, startedAt: number, fetchMs = 0, parseMs = 0) => {
     pendingEvents = [];
     const renderStartedAt = performance.now();
     set({ board, view });
@@ -97,16 +134,42 @@ export const useBoard = create<BoardStore>((set, get) => {
     });
   };
 
+  const reload = async (boardId: Id) => {
+    const startedAt = performance.now();
+    const { body, fetchMs, parseMs } = await fetchTimedBoardView(boardId);
+    if (boardId !== shownBoardId) return;
+    const { board, ...view } = body;
+    showBoard(board, view, startedAt, fetchMs, parseMs);
+  };
+
+  const routeEvent = (boardId: Id) => (event: BoardEvent) => {
+    const kept = keptBoards.get(boardId);
+    if (kept) applyToKeptBoard(kept, event);
+    else if (boardId === shownBoardId) queueEvent(event);
+  };
+
   const subscribeAndLoad = (boardId: Id) =>
     new Promise<void>((resolve, reject) => {
       let isFirstOpen = true;
-      unsubscribe = subscribeToBoard(boardId, queueEvent, () => {
+      const onOpen = () => {
+        if (keptBoards.has(boardId)) return forgetKeptBoard(boardId);
         const loading = reload(boardId);
         if (!isFirstOpen) return void loading;
         isFirstOpen = false;
         loading.then(resolve, reject);
-      });
+      };
+      subscriptions.set(boardId, subscribeToBoard(boardId, routeEvent(boardId), onOpen));
     });
+
+  const leaveShownBoard = (nextBoardId?: Id) => {
+    const leftId = shownBoardId;
+    shownBoardId = undefined;
+    if (!leftId) return;
+    if (pendingEvents.length > 0) flushEvents();
+    const { board, view, isTourOpen } = get();
+    if (board?.id === leftId && leftId !== nextBoardId && !isTourOpen) keepBoard(board, view);
+    else closeSubscription(leftId);
+  };
 
   const activeBoardKey = (runs: RunInfo[]) => unique(runs.map((run) => run.boardId)).sort().join(",");
 
@@ -137,7 +200,7 @@ export const useBoard = create<BoardStore>((set, get) => {
     projects: [],
     view: emptyView(),
     selectedIds: [],
-    isSearchOpen: false,
+    sidePanelTab: "context",
     isReaderOpen: false,
     setReaderOpen: (isOpen) => set({ isReaderOpen: isOpen }),
     isSettingsOpen: false,
@@ -149,8 +212,7 @@ export const useBoard = create<BoardStore>((set, get) => {
     beginTour: (sample) => {
       if (get().isTourOpen) return;
       const tourReturnBoardId = get().board?.id;
-      unsubscribe?.();
-      unsubscribe = undefined;
+      leaveShownBoard();
       pendingEvents = [];
       set({ board: sample.board, view: sample.view, selectedIds: [], catalog: undefined, isTourOpen: true, tourReturnBoardId });
     },
@@ -161,26 +223,36 @@ export const useBoard = create<BoardStore>((set, get) => {
       set({ board: undefined, view: emptyView(), catalog: undefined });
     },
     focusNode: (id) => focusHandler(id),
-    registerFocus: (focus) => (focusHandler = focus),
+    registerFocus: (focus) => {
+      focusHandler = focus;
+    },
     loadBoards: async () => {
       const [boards, projects] = await Promise.all([fetchBoards(), fetchProjects()]);
       set({ boards, projects });
     },
     openBoard: async (boardId) => {
-      unsubscribe?.();
+      const startedAt = performance.now();
+      leaveShownBoard(boardId);
+      shownBoardId = boardId;
+      const catalog = fetchCatalog(boardId);
+      catalog.catch(() => undefined);
       set({ selectedIds: [], catalog: undefined, isBoardLoading: true });
       try {
-        await subscribeAndLoad(boardId);
+        const kept = takeKeptBoard(boardId);
+        if (kept) showBoard(kept.board, kept.view, startedAt);
+        else await subscribeAndLoad(boardId);
+      } catch (error) {
+        get().notify(error instanceof Error ? error.message : String(error));
+        return;
       } finally {
-        set({ isBoardLoading: false });
+        if (shownBoardId === boardId) set({ isBoardLoading: false });
       }
+      if (shownBoardId !== boardId) return;
       const opened = get().board;
-      if (opened?.hasUnseenResult || opened?.hitUsageLimit) {
-        set({ board: { ...opened, hasUnseenResult: false, hitUsageLimit: false } });
-        await get().send({ type: "markBoardSeen", boardId });
-        await get().loadBoards();
-      }
-      set({ catalog: await fetchCatalog(boardId) });
+      const markingSeen = opened?.hasUnseenResult || opened?.hitUsageLimit ? get().send({ type: "markBoardSeen", boardId }).then(() => get().loadBoards()) : undefined;
+      if (markingSeen && opened) set({ board: { ...opened, hasUnseenResult: false, hitUsageLimit: false } });
+      const [loadedCatalog] = await Promise.all([catalog, markingSeen]);
+      if (shownBoardId === boardId) set({ catalog: loadedCatalog });
       localStorage.setItem("branchboard.lastBoard", boardId);
     },
     send: async (command) => {
@@ -195,13 +267,33 @@ export const useBoard = create<BoardStore>((set, get) => {
     },
     notify: (message) => set({ toast: { message, id: Date.now() } }),
     select: (ids) => set((state) => (sameMembers(state.selectedIds, ids) ? state : { selectedIds: ids })),
-    setSearchOpen: (isOpen) => set({ isSearchOpen: isOpen }),
+    setSidePanelTab: (tab) => set({ sidePanelTab: tab }),
     requestFocus: (id) => set({ pendingFocus: id }),
     requestSelection: (ids) => set({ pendingSelection: ids }),
   };
 });
 
 export const boardId = (): Id => useBoard.getState().board?.id ?? "";
+
+export const copyText = async (text: string, message = "Copied"): Promise<boolean> => {
+  const { notify } = useBoard.getState();
+  try {
+    await navigator.clipboard.writeText(text);
+    notify(message);
+    return true;
+  } catch {
+    notify("Could not copy to the clipboard.");
+    return false;
+  }
+};
+
+export const reportFailures = async (work: () => Promise<unknown>) => {
+  try {
+    await work();
+  } catch (error) {
+    useBoard.getState().notify(error instanceof Error ? error.message : String(error));
+  }
+};
 
 const NODE_CREATING_COMMANDS = ["reply", "note", "file", "code", "extractFile", "extractAttachment"];
 

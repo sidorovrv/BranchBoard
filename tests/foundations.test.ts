@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import {
   COMMAND_TYPE_HEADER,
   migrateDocumentWith,
@@ -55,6 +55,34 @@ describe("capped request bodies", () => {
     const bigSample = await server.app.request("http://127.0.0.1:47199/api/perf", { method: "POST", headers, body: "y".repeat(BODY_CAPS.perf + 1) });
     expect(bigSample.status).toBe(409);
     server.close();
+  });
+
+  it("keeps the settings in the data folder", async () => {
+    const dataDirectory = mkdtempSync(join(directory, "settings-"));
+    const databasePath = join(dataDirectory, "t.db");
+    const headers = { host: "127.0.0.1:47199", origin: "http://127.0.0.1:47199", "content-type": "application/json" };
+    const url = "http://127.0.0.1:47199/api/settings";
+    const first = createApp({ databasePath, security: { port: 47199, extraOrigins: [] } });
+    expect(await (await first.app.request(url, { headers })).json()).toBeNull();
+    expect((await first.app.request(url, { method: "PUT", headers, body: JSON.stringify({ theme: "dark" }) })).status).toBe(204);
+    expect((await first.app.request(url, { method: "PUT", headers, body: JSON.stringify([1]) })).status).toBe(409);
+    first.close();
+    const second = createApp({ databasePath, security: { port: 47199, extraOrigins: [] } });
+    expect(await (await second.app.request(url, { headers })).json()).toEqual({ theme: "dark" });
+    second.close();
+  });
+
+  it("reads and writes the file named by BRANCHBOARD_SETTINGS_FILE", async () => {
+    const dataDirectory = mkdtempSync(join(directory, "settings-file-"));
+    const settingsFile = join(dataDirectory, "other.json");
+    const headers = { host: "127.0.0.1:47199", origin: "http://127.0.0.1:47199", "content-type": "application/json" };
+    vi.stubEnv("BRANCHBOARD_SETTINGS_FILE", settingsFile);
+    const server = createApp({ databasePath: join(dataDirectory, "t.db"), security: { port: 47199, extraOrigins: [] } });
+    await server.app.request("http://127.0.0.1:47199/api/settings", { method: "PUT", headers, body: JSON.stringify({ theme: "light" }) });
+    server.close();
+    vi.unstubAllEnvs();
+    expect(JSON.parse(readFileSync(settingsFile, "utf8"))).toEqual({ theme: "light" });
+    expect(existsSync(join(dataDirectory, "settings.json"))).toBe(false);
   });
 });
 

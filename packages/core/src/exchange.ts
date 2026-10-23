@@ -1,6 +1,6 @@
 import { contextHash, isStale } from "./context";
-import { liveEdges, liveNodes } from "./graph";
-import { indexBy, newId } from "./helpers";
+import { isInFlight, liveEdges, liveNodes } from "./graph";
+import { indexBy, mapValues, newId } from "./helpers";
 import { LATEST_SCHEMA_VERSION, migrateDocumentWith } from "./migrations";
 import type { Attachment, Board, BoardDocument, BoardGraph, DocumentFile, GraphEdge, GraphNode, Id, Part } from "./types";
 import { hasCycle, MAX_EXPORT_FILE_BYTES, MAX_UNTRUSTED_EDGES, MAX_UNTRUSTED_NODES, MAX_UNTRUSTED_PARTS, megabytesLabel, sanitiseEdge, sanitiseFiles, sanitiseList, sanitiseNode, sanitisePart } from "./untrusted";
@@ -54,7 +54,7 @@ export const restoreFiles = (document: BoardDocument, restore: RestoreFile): Boa
   const files = document.files ?? {};
   const restored = new Map<Id, Attachment | undefined>();
   const restoredBy = (id: Id): Attachment | undefined => {
-    if (!restored.has(id)) restored.set(id, files[id] ? restore(files[id]) : undefined);
+    if (!restored.has(id)) restored.set(id, Object.hasOwn(files, id) ? restore(files[id]) : undefined);
     return restored.get(id);
   };
   const nodes = document.nodes.map((node) => {
@@ -128,10 +128,17 @@ export const reidentifyDocument = (document: BoardDocument, title?: string): Imp
     satelliteOf: node.satelliteOf === undefined ? undefined : nodeIds.get(node.satelliteOf),
     contextNodeIds: node.contextNodeIds?.map(remap),
     contextHash: node.contextHash === undefined ? undefined : STALE_MARKER,
-    status: node.status === "done" ? "done" : node.kind === "turn" ? "interrupted" : node.status,
+    status: node.status === "done" || node.status === "idle" ? node.status : node.kind === "turn" || isInFlight(node) ? "interrupted" : node.status,
+    rolls: node.rolls && mapValues(node.rolls, (snapshot) => ({
+      ...snapshot,
+      runtimeRef: undefined,
+      contextNodeIds: snapshot.contextNodeIds?.map(remap),
+      contextHash: snapshot.contextHash === undefined ? undefined : STALE_MARKER,
+      status: isInFlight(snapshot) ? "interrupted" : snapshot.status,
+    })),
   }));
   const edges: GraphEdge[] = document.edges.map((edge) => ({ ...edge, id: newId(), boardId, fromId: remap(edge.fromId), toId: remap(edge.toId) }));
-  const parts: Part[] = document.parts.map((part) => ({ ...part, id: part.id.replace(part.nodeId, remap(part.nodeId)), nodeId: remap(part.nodeId) }));
+  const parts: Part[] = document.parts.map((part) => ({ ...part, id: part.id.includes(part.nodeId) ? part.id.replace(part.nodeId, remap(part.nodeId)) : `${remap(part.nodeId)}:${part.id}`, nodeId: remap(part.nodeId) }));
   const graph: BoardGraph = { nodes: indexBy(nodes, (node) => node.id), edges: indexBy(edges, (edge) => edge.id) };
   const staleIds = new Set(document.staleNodeIds.map(remap));
   const sourceGraph: BoardGraph = { nodes: indexBy(document.nodes, (node) => node.id), edges: Object.fromEntries(document.edges.map((edge, index) => [String(index), edge])) };
@@ -144,7 +151,7 @@ export const reidentifyDocument = (document: BoardDocument, title?: string): Imp
     return { ...withHash, summary };
   });
   const partsByNode: Record<Id, Part[]> = {};
-  parts.forEach((part) => (partsByNode[part.nodeId] = [...(partsByNode[part.nodeId] ?? []), part]));
+  parts.forEach((part) => (partsByNode[part.nodeId] ??= []).push(part));
   return { boardId, title: title ?? `${document.board.title} (imported)`, graph: { ...graph, nodes: indexBy(settled, (node) => node.id) }, parts: partsByNode };
 };
 

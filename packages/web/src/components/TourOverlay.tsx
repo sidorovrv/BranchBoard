@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { TOUR_STEPS, type TourStep } from "@branchboard/core";
+import { listenForEscape } from "../escape";
 import { useSettings } from "../settings";
 import { useBoard } from "../store";
 import { endTour } from "../tour";
@@ -19,7 +20,10 @@ export const tourTargetOf = (step: TourStep): Element | null => {
 };
 
 const prepareStep = (step: TourStep) => {
-  if (step.anchor === "context-panel") useSettings.getState().update("isContextPanelOpen", true);
+  if (step.anchor === "context-panel") {
+    useSettings.getState().update("isContextPanelOpen", true);
+    useBoard.getState().setSidePanelTab("context");
+  }
   if (!step.focusTitle) return;
   const { nodes } = useBoard.getState().view.graph;
   const node = Object.values(nodes).find((candidate) => candidate.title === step.focusTitle);
@@ -52,11 +56,7 @@ export const TourOverlay = () => {
     const timer = setInterval(measure, TARGET_POLL_MS);
     return () => clearInterval(timer);
   }, [step]);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && close();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  useEffect(() => listenForEscape(close), []);
   const isLast = index === TOUR_STEPS.length - 1;
   return (
     <div className="tour-layer" role="dialog" aria-label="Tour">

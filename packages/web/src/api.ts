@@ -100,23 +100,35 @@ export const fetchTimedBoardView = (boardId: string) => getTimedJson<BoardView &
 
 export const fetchBoardView = async (boardId: string) => (await fetchTimedBoardView(boardId)).body;
 
-export const fetchCatalog = (boardId: string) => getJson<Catalog>(`/api/runtime/catalog?board=${boardId}`);
+export const fetchToolOutput = async (boardId: string, nodeId: string, partId: string): Promise<string> =>
+  (await getJson<{ output: string }>(`/api/boards/${boardId}/tool-output?node=${encodeURIComponent(nodeId)}&part=${encodeURIComponent(partId)}`)).output;
+
+export const fetchCatalog =(boardId: string) => getJson<Catalog>(`/api/runtime/catalog?board=${boardId}`);
 
 const RECONNECT_DELAY_MS = 1000;
 
 export const subscribeToBoard = (boardId: string, onEvent: (event: BoardEvent) => void, onOpen: () => void): (() => void) => {
   let socket: WebSocket | undefined;
   let closed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const connect = () => {
+    if (closed) return;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     socket = new WebSocket(`${scheme}://${location.host}/api/events?board=${boardId}`);
     socket.onopen = onOpen;
-    socket.onmessage = (message) => onEvent(JSON.parse(message.data));
-    socket.onclose = () => !closed && setTimeout(connect, RECONNECT_DELAY_MS);
+    socket.onmessage = (message) => {
+      try {
+        onEvent(JSON.parse(message.data));
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+      }
+    };
+    socket.onclose = () => (reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS));
   };
   connect();
   return () => {
     closed = true;
+    clearTimeout(reconnectTimer);
     socket?.close();
   };
 };

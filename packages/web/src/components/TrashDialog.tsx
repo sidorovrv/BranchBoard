@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { formatAgo, type TrashListing, type TrashedNodeGroup } from "@branchboard/core";
 import { fetchTrash } from "../api";
+import { listenForEscape } from "../escape";
 import { useBoard } from "../store";
 import { IconRow } from "../kit/Icons";
 
@@ -18,8 +19,17 @@ const describeGroup = (group: TrashedNodeGroup): string => {
 
 export const TrashDialog = ({ onClose }: { onClose: () => void }) => {
   const [listing, setListing] = useState<TrashListing>();
-  const refresh = useCallback(async () => setListing(await fetchTrash()), []);
+  const [error, setError] = useState<string>();
+  const refresh = useCallback(async () => {
+    try {
+      setListing(await fetchTrash());
+      setError(undefined);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    }
+  }, []);
   useEffect(() => void refresh(), [refresh]);
+  useEffect(() => listenForEscape(onClose), [onClose]);
 
   const restoreAndRefresh = async (command: Record<string, unknown>) => {
     const result = await useBoard.getState().send(command);
@@ -35,10 +45,11 @@ export const TrashDialog = ({ onClose }: { onClose: () => void }) => {
 
   return (
     <div className="dialog-backdrop">
-      <div className="dialog trash-dialog">
-        <h3><IconRow names={["trash"]} /> Trash</h3>
+      <div className="dialog trash-dialog" role="dialog" aria-modal="true" aria-label="Trash">
+        <h3><IconRow names={["delete"]} /> Trash</h3>
         <div className="muted">{RETENTION_NOTE}</div>
-        {!listing && <div className="muted">Loading…</div>}
+        {error && <div className="part-error">{error}</div>}
+        {!listing && !error && <div className="muted">Loading…</div>}
         {listing && isEmpty(listing) && <div className="muted">The trash is empty.</div>}
         {listing && (
           <ul className="trash-list">

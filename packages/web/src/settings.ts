@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { getJson } from "./api";
 import { DEFAULT_MODEL_PREFERENCE, FLOW_DIRECTIONS, KEYBOARD_PAN_MODES, RUNTIME_DEFAULT_PERMISSION_MODE, NODE_HEIGHT, normaliseKeybinds, type FlowDirection, type KeyboardPanMode, type Keybinds, NODE_MAX_HEIGHT, NODE_MAX_WIDTH, NODE_MIN_HEIGHT, NODE_MIN_WIDTH, NODE_WIDTH } from "@branchboard/core";
 
 export interface Settings {
@@ -20,10 +21,12 @@ export interface Settings {
   altClickZoom: number;
   keyboardPan: KeyboardPanMode;
   keyboardPanSpeed: number;
-  boardNavigation: BoardNavigation;
   showTopbarMeters: boolean;
   showClaudeCost: boolean;
+  agentDiagnosticsAccess: boolean;
+  agentCrossNodeLogs: boolean;
   activeJobsShown: number;
+  boardMemoryMinutes: number;
   shownTags: NodeTagId[];
   keybinds: Keybinds;
 }
@@ -53,9 +56,8 @@ const ALL_NODE_TAGS: NodeTagId[] = NODE_TAGS.map((tag) => tag.id);
 export const ACTIVE_JOBS_SHOWN_MAX = 20;
 export const ACTIVE_JOBS_SHOWN_DEFAULT = 5;
 
-export type BoardNavigation = "sidebar" | "tabs" | "both";
-
-export const BOARD_NAVIGATIONS: BoardNavigation[] = ["sidebar", "tabs", "both"];
+export const BOARD_MEMORY_MINUTES_MAX = 60;
+export const BOARD_MEMORY_MINUTES_DEFAULT = 10;
 
 export const KEYBOARD_PAN_SPEED_MIN = 25;
 export const KEYBOARD_PAN_SPEED_MAX = 500;
@@ -82,9 +84,11 @@ export type ThemeChoice = "system" | "light" | "dark";
 export const THEME_CHOICES: ThemeChoice[] = ["system", "light", "dark"];
 
 
-export const DEFAULT_SETTINGS: Settings = { followScroll: true, defaultNodeWidth: NODE_WIDTH, defaultNodeHeight: NODE_HEIGHT, blinkForAttention: true, snapNextPrompt: false, groupToolCalls: false, defaultModel: DEFAULT_MODEL_PREFERENCE, defaultPermissionMode: RUNTIME_DEFAULT_PERMISSION_MODE, isSidebarOpen: true, isContextPanelOpen: true, readerWidth: READER_DEFAULT_WIDTH, answerFont: "sans", theme: "system", flowDirection: "horizontal", subagentDisplay: "node", altClickZoom: ALT_CLICK_ZOOM_DEFAULT, keyboardPan: "none", keyboardPanSpeed: KEYBOARD_PAN_SPEED_DEFAULT, boardNavigation: "sidebar", showTopbarMeters: true, showClaudeCost: false, activeJobsShown: ACTIVE_JOBS_SHOWN_DEFAULT, shownTags: ALL_NODE_TAGS, keybinds: normaliseKeybinds({}) };
+export const DEFAULT_SETTINGS: Settings = { followScroll: true, defaultNodeWidth: NODE_WIDTH, defaultNodeHeight: NODE_HEIGHT, blinkForAttention: true, snapNextPrompt: false, groupToolCalls: false, defaultModel: DEFAULT_MODEL_PREFERENCE, defaultPermissionMode: RUNTIME_DEFAULT_PERMISSION_MODE, isSidebarOpen: true, isContextPanelOpen: false, readerWidth: READER_DEFAULT_WIDTH, answerFont: "sans", theme: "system", flowDirection: "horizontal", subagentDisplay: "node", altClickZoom: ALT_CLICK_ZOOM_DEFAULT, keyboardPan: "none", keyboardPanSpeed: KEYBOARD_PAN_SPEED_DEFAULT, showTopbarMeters: true, showClaudeCost: false, agentDiagnosticsAccess: true, agentCrossNodeLogs: true, activeJobsShown: ACTIVE_JOBS_SHOWN_DEFAULT, boardMemoryMinutes: BOARD_MEMORY_MINUTES_DEFAULT, shownTags: ALL_NODE_TAGS, keybinds: normaliseKeybinds({}) };
 
 const STORAGE_KEY = "branchboard.settings";
+const OVERRIDE_KEY = "branchboard.settingsOverride";
+const SETTINGS_PATH = "/api/settings";
 
 type SettingNormalizers = { [K in keyof Settings]: (value: unknown) => Settings[K] };
 
@@ -122,12 +126,17 @@ const normalizers: SettingNormalizers = {
     const percent = Number(value);
     return Number.isFinite(percent) ? Math.min(KEYBOARD_PAN_SPEED_MAX, Math.max(KEYBOARD_PAN_SPEED_MIN, Math.round(percent))) : DEFAULT_SETTINGS.keyboardPanSpeed;
   },
-  boardNavigation: (value) => (BOARD_NAVIGATIONS.includes(value as BoardNavigation) ? (value as BoardNavigation) : DEFAULT_SETTINGS.boardNavigation),
   showTopbarMeters: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.showTopbarMeters),
   showClaudeCost: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.showClaudeCost),
+  agentDiagnosticsAccess: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.agentDiagnosticsAccess),
+  agentCrossNodeLogs: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.agentCrossNodeLogs),
   activeJobsShown: (value) => {
     const count = Number(value);
     return Number.isFinite(count) ? Math.min(ACTIVE_JOBS_SHOWN_MAX, Math.max(0, Math.round(count))) : DEFAULT_SETTINGS.activeJobsShown;
+  },
+  boardMemoryMinutes: (value) => {
+    const minutes = Number(value);
+    return Number.isFinite(minutes) ? Math.min(BOARD_MEMORY_MINUTES_MAX, Math.max(0, Math.round(minutes))) : DEFAULT_SETTINGS.boardMemoryMinutes;
   },
   shownTags: (value) => (Array.isArray(value) ? ALL_NODE_TAGS.filter((id) => value.includes(id)) : DEFAULT_SETTINGS.shownTags),
   keybinds: normaliseKeybinds,
@@ -152,10 +161,12 @@ const normalize = (raw: Partial<Record<keyof Settings, unknown>>): Settings => (
   altClickZoom: normalizers.altClickZoom(raw.altClickZoom),
   keyboardPan: normalizers.keyboardPan(raw.keyboardPan),
   keyboardPanSpeed: normalizers.keyboardPanSpeed(raw.keyboardPanSpeed),
-  boardNavigation: normalizers.boardNavigation(raw.boardNavigation),
   showTopbarMeters: normalizers.showTopbarMeters(raw.showTopbarMeters),
   showClaudeCost: normalizers.showClaudeCost(raw.showClaudeCost),
+  agentDiagnosticsAccess: normalizers.agentDiagnosticsAccess(raw.agentDiagnosticsAccess),
+  agentCrossNodeLogs: normalizers.agentCrossNodeLogs(raw.agentCrossNodeLogs),
   activeJobsShown: normalizers.activeJobsShown(raw.activeJobsShown),
+  boardMemoryMinutes: normalizers.boardMemoryMinutes(raw.boardMemoryMinutes),
   shownTags: normalizers.shownTags(raw.shownTags),
   keybinds: normalizers.keybinds(raw.keybinds),
 });
@@ -166,17 +177,35 @@ const systemPrefersDark = (): boolean => typeof matchMedia === "function" && mat
 
 export const resolveTheme = (choice: ThemeChoice): ResolvedTheme => (choice === "system" ? (systemPrefersDark() ? "dark" : "light") : choice);
 
-const load = (): Settings => {
+const readStoredObject = (key: string): Record<string, unknown> | null => {
   try {
-    return normalize(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}"));
+    const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "null");
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
   } catch {
-    return DEFAULT_SETTINGS;
+    return null;
   }
 };
 
+const settingsOverride = () => readStoredObject(OVERRIDE_KEY);
+
+const load = (): Settings => normalize({ ...readStoredObject(STORAGE_KEY), ...settingsOverride() });
+
 const save = (settings: Settings) => {
+  if (settingsOverride()) return;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    return;
+  } finally {
+    void fetch(SETTINGS_PATH, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(settings) }).catch(() => undefined);
+  }
+};
+
+export const loadServerSettings = async (): Promise<void> => {
+  try {
+    const stored = await getJson<Record<string, unknown> | null>(SETTINGS_PATH);
+    if (stored) useSettings.setState({ settings: normalize({ ...stored, ...settingsOverride() }) });
+    else if (localStorage.getItem(STORAGE_KEY) !== null) save(useSettings.getState().settings);
   } catch {
     return;
   }

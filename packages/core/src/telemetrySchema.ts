@@ -24,7 +24,7 @@ const countMap: Shape = (value) =>
 const objectOf =
   (shape: Record<string, Shape>): Shape =>
   (value) =>
-    isObject(value) && Object.keys(value).every((key) => key in shape) && Object.entries(shape).every(([key, check]) => check(value[key]));
+    isObject(value) && Object.keys(value).every((key) => Object.hasOwn(shape, key)) && Object.entries(shape).every(([key, check]) => check(value[key]));
 
 const DAILY_PAYLOAD_SHAPE: Record<string, Shape> = {
   schema: (value) => value === TELEMETRY_SCHEMA,
