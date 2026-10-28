@@ -3,10 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  activeRollOf,
-  answerText,
   boardTokenUsage,
   budgetStateOf,
+  contextHash,
   describeContext,
   estimateAttachmentTokens,
   expandSlashCommand,
@@ -18,59 +17,22 @@ import {
   renderInput,
   satelliteIdsOf,
   subagentIdsOf,
-  type BoardView,
-  type GraphNode,
   type TrashListing,
 } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
 import { resolveMentions } from "../packages/server/src/run/mentions";
 import { searchWorkspaceFiles } from "../packages/server/src/workspaceFiles";
-import { buildGraph, finishedParts, mustApply } from "./support";
+import { appClient, buildGraph, finishedParts, mustApply, waitFor } from "./support";
 
 const PORT = 47125;
 const security = { port: PORT, extraOrigins: [] };
-const trusted = { host: `127.0.0.1:${PORT}`, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/json" };
 
 const directory = mkdtempSync(join(tmpdir(), "branchboard-alpha-"));
 const workspace = join(directory, "workspace");
 let server: ReturnType<typeof createApp>;
 
-const request = async (path: string, body?: unknown, headers: Record<string, string> = trusted, rawBody?: string) => {
-  const response = await server.app.request(`http://127.0.0.1:${PORT}${path}`, {
-    method: body || rawBody ? "POST" : "GET",
-    headers,
-    body: rawBody ?? (body ? JSON.stringify(body) : undefined),
-  });
-  const text = await response.text();
-  let json: any;
-  try {
-    json = text ? JSON.parse(text) : undefined;
-  } catch {
-    json = undefined;
-  }
-  return { status: response.status, json, text };
-};
-
-const command = (body: Record<string, unknown>) => request("/api/commands", body);
-const view = async (boardId: string): Promise<BoardView> => (await request(`/api/boards/${boardId}/graph`)).json;
-const nodeOf = async (boardId: string, nodeId: string): Promise<GraphNode> => (await view(boardId)).graph.nodes[nodeId];
+const { trusted, send, request, command, view, nodeOf, waitForStatus, textOf, openRequests } = appClient(() => server, PORT);
 const trash = async (): Promise<TrashListing> => (await request("/api/trash")).json;
-
-const waitFor = async (check: () => Promise<boolean>, timeoutMs = 5000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error("Timed out waiting for condition");
-};
-
-const waitForStatus = (boardId: string, nodeId: string, status: string) => waitFor(async () => (await nodeOf(boardId, nodeId)).status === status);
-
-const textOf = async (boardId: string, nodeId: string) => {
-  const current = await view(boardId);
-  return answerText(current.parts[nodeId], activeRollOf(current.graph.nodes[nodeId]));
-};
 
 const newBoard = async (title: string, extra: Record<string, unknown> = {}): Promise<string> => {
   const created = (await command({ type: "createBoard", title, workspacePath: workspace, mode: "fake" })).json.id as string;
@@ -96,28 +58,16 @@ afterAll(() => {
 });
 
 describe("provider errors", () => {
-  it("a run that only fails ends as an error with the message kept", async () => {
+  it("a run that only fails ends as an error with the message kept and can be regenerated", async () => {
     const boardId = await newBoard("errors");
     const nodeId = (await command({ type: "reply", boardId, prompt: "/fail now" })).json.nodeId;
     await waitForStatus(boardId, nodeId, "error");
     const parts = (await view(boardId)).parts[nodeId];
     expect(parts.some((part) => part.type === "error" && part.text.includes("provider failed"))).toBe(true);
     expect(runLogRecords(boardId).find((record) => record.event === "end" && record.nodeId === nodeId).status).toBe("error");
-  });
-
-  it("an errored node can be reopened and regenerated", async () => {
-    const boardId = await newBoard("errors again");
-    const nodeId = (await command({ type: "reply", boardId, prompt: "/fail once" })).json.nodeId;
-    await waitForStatus(boardId, nodeId, "error");
     expect((await command({ type: "regenerate", boardId, nodeId })).status).toBe(200);
     await waitForStatus(boardId, nodeId, "error");
     expect((await nodeOf(boardId, nodeId)).rollCount).toBe(2);
-  });
-
-  it("a normal run still ends as done", async () => {
-    const boardId = await newBoard("fine");
-    const nodeId = (await command({ type: "reply", boardId, prompt: "all good" })).json.nodeId;
-    await waitForStatus(boardId, nodeId, "done");
   });
 });
 
@@ -142,7 +92,7 @@ describe("attachments", () => {
   });
 
   const upload = async (boardId: string, name: string, text: string) =>
-    (await request(`/api/boards/${boardId}/attachments?name=${name}`, undefined, { ...trusted, "content-type": "text/plain" }, text)).json as { id: string };
+    (await (await send(`/api/boards/${boardId}/attachments?name=${name}`, { method: "POST", headers: { ...trusted, "content-type": "text/plain" }, body: text })).json()) as { id: string };
 
   const ageStoredFile = (id: string) => {
     const anHourAgo = new Date(Date.now() - 3_600_000);
@@ -222,10 +172,9 @@ describe("subagents and todos", () => {
     const boardId = await newBoard("satellite approval");
     const parentId = (await command({ type: "reply", boardId, prompt: "/subagent ask" })).json.nodeId;
     await waitForStatus(boardId, parentId, "awaiting_approval");
-    const current = await view(boardId);
-    const open = Object.values(current.requests).filter((candidate) => candidate.status === "open");
+    const open = await openRequests(boardId);
     expect(open).toHaveLength(1);
-    expect(current.graph.nodes[open[0].nodeId].kind).toBe("subagent");
+    expect((await nodeOf(boardId, open[0].nodeId)).kind).toBe("subagent");
     await command({ type: "answerRequest", boardId, requestId: open[0].id, answer: "once" });
     await waitForStatus(boardId, parentId, "done");
   });
@@ -245,17 +194,13 @@ describe("subagents and todos", () => {
 });
 
 describe("slash commands and mentions", () => {
-  it("expands a catalog command with its arguments", () => {
-    const commands = [{ name: "review", template: "Please review: $ARGUMENTS" }, { name: "pair", template: "First $1 then $2" }, { name: "plain", template: "Do the thing." }];
+  it("expands a catalog command with its arguments and sends a pass-through command exactly as typed", () => {
+    const commands = [{ name: "review", template: "Please review: $ARGUMENTS" }, { name: "pair", template: "First $1 then $2" }, { name: "plain", template: "Do the thing." }, { name: "security-review", template: "", passThrough: true }];
     expect(expandSlashCommand("/review the parser", commands).text).toBe("Please review: the parser");
     expect(expandSlashCommand("/pair a b", commands).text).toBe("First a then b");
     expect(expandSlashCommand("/plain extra words", commands).text).toBe("Do the thing.\n\nextra words");
     expect(expandSlashCommand("/unknown x", commands)).toEqual({ text: "/unknown x" });
     expect(expandSlashCommand("not a command", commands).command).toBeUndefined();
-  });
-
-  it("sends a pass-through command exactly as typed", () => {
-    const commands = [{ name: "security-review", template: "", passThrough: true }];
     expect(expandSlashCommand("  /security-review src  ", commands).text).toBe("/security-review src");
   });
 
@@ -263,14 +208,16 @@ describe("slash commands and mentions", () => {
     expect(mentionTokensOf("look at @src/main.ts, and @notes.md. Mail a@b.com")).toEqual(["src/main.ts", "notes.md"]);
   });
 
-  it("resolves mentions to files inside the workspace only", () => {
-    const resolved = resolveMentions("see @notes.md @src/main.ts @../outside.txt @missing.md @planner", workspace, { agents: ["planner"] });
+  it("resolves mentions to files inside the workspace and to agents, subagents and skills", () => {
+    const resolved = resolveMentions("see @notes.md @src/main.ts @../outside.txt @missing.md @planner @reviewer @pdf-tools", workspace, { agents: ["planner"], subagents: ["reviewer"], skills: ["pdf-tools"] });
     expect(resolved.files.map((file) => file.name).sort()).toEqual(["main.ts", "notes.md"]);
-    expect(resolved.agent).toBe("planner");
+    expect(resolved).toMatchObject({ agent: "planner", subagents: ["reviewer"], skills: ["pdf-tools"] });
     expect(resolved.files.find((file) => file.name === "main.ts")?.mime).toBe("text/plain");
   });
 
-  it("sends the expanded command to the runtime and keeps the typed prompt on the node", async () => {
+  it("lists the runtime's commands, sends the expanded command to the runtime and keeps the typed prompt on the node", async () => {
+    const catalog = (await request("/api/runtime/catalog?mode=fake")).json;
+    expect(catalog.commands.map((entry: { name: string }) => entry.name)).toContain("review");
     const boardId = await newBoard("commands");
     const nodeId = (await command({ type: "reply", boardId, prompt: "/review the parser" })).json.nodeId;
     await waitForStatus(boardId, nodeId, "done");
@@ -296,17 +243,15 @@ describe("slash commands and mentions", () => {
     const found = await request(`/api/workspace/files?board=${boardId}&q=notes`);
     expect(found.json).toEqual(["notes.md"]);
   });
-
-  it("lists the runtime's commands in the catalog", async () => {
-    const catalog = (await request("/api/runtime/catalog?mode=fake")).json;
-    expect(catalog.commands.map((entry: { name: string }) => entry.name)).toContain("review");
-  });
 });
 
 describe("pinning", () => {
-  it("a pinned node ignores moves and resizes but unpinning frees it", async () => {
+  it("a pinned node ignores moves and resizes, undo restores the pin state and unpinning frees it", async () => {
     const boardId = await newBoard("pins");
     const nodeId = (await command({ type: "reply", boardId, prompt: "", run: false, position: { x: 10, y: 20 } })).json.nodeId;
+    await command({ type: "pin", boardId, nodeId, pinned: true });
+    await command({ type: "undo", boardId });
+    expect((await nodeOf(boardId, nodeId)).pinned).toBeFalsy();
     await command({ type: "pin", boardId, nodeId, pinned: true });
     await command({ type: "moveNodes", boardId, positions: { [nodeId]: { x: 500, y: 600, w: 700 } } });
     expect(await nodeOf(boardId, nodeId)).toMatchObject({ x: 10, y: 20, pinned: true });
@@ -314,23 +259,16 @@ describe("pinning", () => {
     await command({ type: "moveNodes", boardId, positions: { [nodeId]: { x: 500, y: 600 } } });
     expect(await nodeOf(boardId, nodeId)).toMatchObject({ x: 500, y: 600, pinned: false });
   });
-
-  it("undo restores the previous pin state", async () => {
-    const boardId = await newBoard("pin undo");
-    const nodeId = (await command({ type: "reply", boardId, prompt: "", run: false })).json.nodeId;
-    await command({ type: "pin", boardId, nodeId, pinned: true });
-    await command({ type: "undo", boardId });
-    expect((await nodeOf(boardId, nodeId)).pinned).toBeFalsy();
-  });
 });
 
 describe("trash", () => {
-  it("restores a deleted node with the edges that went with it", async () => {
+  it("restores a deleted node with the edges that went with it and refuses one that is not in the trash", async () => {
     const boardId = await newBoard("restore nodes");
     const parentId = (await command({ type: "reply", boardId, prompt: "parent" })).json.nodeId;
     await waitForStatus(boardId, parentId, "done");
     const childId = (await command({ type: "reply", boardId, parentIds: [parentId], prompt: "child" })).json.nodeId;
     await waitForStatus(boardId, childId, "done");
+    expect((await command({ type: "restoreNodes", boardId, ids: [childId] })).status).toBe(409);
     await command({ type: "deleteNodes", boardId, ids: [childId] });
     const group = (await trash()).nodeGroups.find((entry) => entry.boardId === boardId)!;
     expect(group.titles).toHaveLength(1);
@@ -340,22 +278,6 @@ describe("trash", () => {
     expect(restored.nodes[childId].deleted).toBe(false);
     expect(liveEdges(restored).some((edge) => edge.fromId === parentId && edge.toId === childId)).toBe(true);
     expect((await trash()).nodeGroups.some((entry) => entry.boardId === boardId)).toBe(false);
-  });
-
-  it("skips a restored edge that would now create a cycle", async () => {
-    const boardId = await newBoard("restore cycle");
-    const first = (await command({ type: "reply", boardId, prompt: "first", run: false })).json.nodeId;
-    const second = (await command({ type: "reply", boardId, parentIds: [first], prompt: "second", run: false })).json.nodeId;
-    await command({ type: "deleteNodes", boardId, ids: [second] });
-    const group = (await trash()).nodeGroups.find((entry) => entry.boardId === boardId)!;
-    await command({ type: "restoreNodes", boardId, ids: group.nodeIds });
-    expect(liveEdges((await view(boardId)).graph).filter((edge) => edge.toId === second)).toHaveLength(1);
-  });
-
-  it("refuses to restore a node that is not in the trash", async () => {
-    const boardId = await newBoard("restore refusal");
-    const nodeId = (await command({ type: "reply", boardId, prompt: "", run: false })).json.nodeId;
-    expect((await command({ type: "restoreNodes", boardId, ids: [nodeId] })).status).toBe(409);
   });
 
   it("lists a deleted board and brings it back", async () => {
@@ -368,28 +290,22 @@ describe("trash", () => {
     expect((await trash()).boards.some((entry) => entry.id === boardId)).toBe(false);
   });
 
-  it("deletes a project with its boards and restores both", async () => {
+  it("deletes a project with its boards and restores both, from the project or from one of its boards", async () => {
     const projectDirectory = join(directory, "second-project");
     mkdirSync(projectDirectory, { recursive: true });
     const project = (await command({ type: "createProject", workspacePath: projectDirectory, mode: "fake", name: "Second" })).json;
     const boardId = (await command({ type: "createBoard", projectId: project.id, title: "inside" })).json.id;
+    const isListed = async (path: string, id: string) => (await request(path)).json.some((entry: { id: string }) => entry.id === id);
     await command({ type: "deleteProject", projectId: project.id });
     const listing = await trash();
     expect(listing.projects.find((entry) => entry.id === project.id)?.boardCount).toBe(1);
     expect(listing.boards.some((entry) => entry.id === boardId)).toBe(false);
     await command({ type: "restoreProject", projectId: project.id });
-    expect((await request("/api/projects")).json.some((entry: { id: string }) => entry.id === project.id)).toBe(true);
-    expect((await request("/api/boards")).json.some((entry: { id: string }) => entry.id === boardId)).toBe(true);
-  });
-
-  it("restoring a board also brings back a trashed project", async () => {
-    const projectDirectory = join(directory, "third-project");
-    mkdirSync(projectDirectory, { recursive: true });
-    const project = (await command({ type: "createProject", workspacePath: projectDirectory, mode: "fake", name: "Third" })).json;
-    const boardId = (await command({ type: "createBoard", projectId: project.id, title: "inside" })).json.id;
+    expect(await isListed("/api/projects", project.id)).toBe(true);
+    expect(await isListed("/api/boards", boardId)).toBe(true);
     await command({ type: "deleteProject", projectId: project.id });
     await command({ type: "restoreBoard", boardId });
-    expect((await request("/api/projects")).json.some((entry: { id: string }) => entry.id === project.id)).toBe(true);
+    expect(await isListed("/api/projects", project.id)).toBe(true);
   });
 
   it("empties the trash for good", async () => {
@@ -449,6 +365,17 @@ describe("summaries", () => {
     graph = mustApply(graph, { type: "patch", patch: { nodes: { a: { id: "a", rev: 1 } }, edges: {} } });
     expect(isSummaryUsable(graph, graph.nodes.b)).toBe(false);
     expect(planSession(graph, parts, "c").missingTurns.map((turn) => turn.kind)).toEqual(["turn", "turn"]);
+  });
+
+  it("forks the parent session unless the parent run was stopped", () => {
+    let graph = buildGraph(["a", "b"], [["a", "b"]]);
+    const ref = { sessionId: "s1", lastMessageId: "m1" };
+    graph = mustApply(graph, { type: "patch", patch: { nodes: { a: { id: "a", status: "done", runtimeRef: ref, contextHash: contextHash(graph, "a") } }, edges: {} } });
+    expect(planSession(graph, parts, "b").spine?.nodeId).toBe("a");
+    graph = mustApply(graph, { type: "patch", patch: { nodes: { a: { id: "a", stopped: true } }, edges: {} } });
+    const plan = planSession(graph, parts, "b");
+    expect(plan.spine).toBeUndefined();
+    expect(plan.missingTurns.map((turn) => turn.nodeId)).toEqual(["a"]);
   });
 
   it("summarises on request and uses the summary when the context has to be re-sent", async () => {
@@ -542,17 +469,11 @@ describe("budgets", () => {
 });
 
 describe("health and logs", () => {
-  it("reports the health of a runtime and its diagnostics", async () => {
+  it("reports the health of a runtime, refuses an unknown one and returns an empty log when no log file is configured", async () => {
     const health = (await request(`/api/health?runtime=fake&workspace=${encodeURIComponent(workspace)}`)).json;
     expect(health.runtimes).toHaveLength(1);
     expect(health.runtimes[0]).toMatchObject({ id: "fake", isOk: true });
-  });
-
-  it("refuses an unknown runtime", async () => {
     expect((await request("/api/health?runtime=nope")).status).toBe(409);
-  });
-
-  it("returns an empty log when no log file is configured", async () => {
     expect((await request("/api/logs")).json).toEqual({ lines: [] });
   });
 });

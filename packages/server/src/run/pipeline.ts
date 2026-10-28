@@ -240,7 +240,10 @@ export const createRunService = (
       activeRuns.get(nodeId)?.controller.abort();
     }
     if (event.type === "context.compacted") patchNode(boardId, nodeId, { compactedAt: now() });
-    if (event.type === "usage") outcome.usage = event.usage;
+    if (event.type === "usage") {
+      outcome.usage = event.usage;
+      trackCost(boardId, nodeId, event.usage);
+    }
     if (event.type === "done") outcome.stopped = event.stopped ?? false;
     if (event.type === "error") return recordFailure(boardId, nodeId, outcome, event.message, event.recovery);
     if (event.type === "part.delta" && event.partType === "text") outcome.answerChars += event.text.length;
@@ -523,6 +526,7 @@ export const createRunService = (
       }
     } finally {
       try {
+        recordCost(boardId, nodeId, outcome);
         closeOpenRequests(boardId, nodeId, "reject");
         finishOpenSatellites(boardId, outcome, status === "error" ? "error" : "done");
         await recordFileHashes(boardId, nodeId, roll, scope.workspacePath, runtime, outcome.runtimeRef);
@@ -539,7 +543,6 @@ export const createRunService = (
           recovery: outcome.firstRecovery,
           isRegeneration: roll > 1,
         });
-        recordCost(boardId, nodeId, outcome);
         log.info("run", `Node ${nodeId} finished as ${status}${outcome.stopped ? " (stopped)" : ""} in ${now() - started}ms`);
         flagUsageLimit(boardId, status, outcome);
         flagUnseenResult(boardId, outcome.stopped);
@@ -574,10 +577,19 @@ export const createRunService = (
     }
   };
 
+  const costEntryOf = (boardId: Id, nodeId: Id, usage: Usage | undefined) =>
+    usage?.costUsd === undefined ? undefined : { at: now(), boardId, nodeId, costUsd: usage.costUsd, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
+
+  const trackCost = (boardId: Id, nodeId: Id, usage: Usage) => {
+    const entry = costEntryOf(boardId, nodeId, usage);
+    if (costs && entry) costs.track(entry);
+  };
+
   const recordCost = (boardId: Id, nodeId: Id, outcome: RunOutcome) => {
-    const usage = outcome.usage;
-    if (!costs || usage?.costUsd === undefined) return;
-    costs.record({ at: now(), boardId, nodeId, costUsd: usage.costUsd, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens });
+    const entry = costEntryOf(boardId, nodeId, outcome.usage);
+    if (!costs) return;
+    if (entry) costs.record(entry);
+    else costs.release(nodeId);
   };
 
   const flagUsageLimit = (boardId: Id, status: NodeStatus, outcome: RunOutcome) => {

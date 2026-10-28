@@ -17,16 +17,13 @@ test.beforeEach(async ({ appPage, instance, demo }) => {
   await expect(appPage.locator(".telemetry-dialog")).toBeVisible({ timeout: 15000 });
 });
 
-test("the dialog shows the counts and stays open on Escape", async ({ appPage }) => {
+test("the dialog shows the counts and the opt-in status, stays open on Escape and closes with the close button", async ({ appPage }) => {
   await expect(appPage.locator(".telemetry-dialog")).toContainText("Runs today");
   await expect(appPage.locator(".telemetry-dialog")).toContainText("Share these usage statistics?");
+  await expect(appPage.locator(".telemetry-header .key-status")).toHaveText("No choice made yet");
   await appPage.keyboard.press("Escape");
   await expect(appPage.locator(".telemetry-dialog")).toBeVisible();
   await expect(appPage.locator(".telemetry-actions button.primary")).toHaveCount(0);
-});
-
-test("the dialog shows the opt-in status and closes with the close button", async ({ appPage }) => {
-  await expect(appPage.locator(".telemetry-header .key-status")).toHaveText("No choice made yet");
   await appPage.locator(".telemetry-header").getByRole("button", { name: "Close" }).click();
   await expect(appPage.locator(".telemetry-dialog")).toBeHidden();
 });

@@ -5,9 +5,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isDailyPayload, type DailyPayload } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
 import { createUsage } from "../packages/server/src/usage";
+import { appClient, waitFor } from "./support";
 
 const PORT = 47193;
-const trusted = { host: `127.0.0.1:${PORT}`, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/json" };
 
 const directory = mkdtempSync(join(tmpdir(), "branchboard-telemetry-"));
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
@@ -25,15 +25,6 @@ interface Harness {
   dataDirectory: string;
   restart: () => Promise<void>;
 }
-
-const waitFor = async (check: () => boolean | Promise<boolean>) => {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error("Timed out");
-};
 
 const harness = async (name: string, startDay = "2026-10-10"): Promise<Harness> => {
   const dataDirectory = join(directory, name);
@@ -53,10 +44,8 @@ const harness = async (name: string, startDay = "2026-10-10"): Promise<Harness> 
     });
   mkdirSync(dataDirectory, { recursive: true });
   const state = { server: open() };
-  const request = async (path: string, body?: unknown) => {
-    const response = await state.server.app.request(`http://127.0.0.1:${PORT}${path}`, { method: body ? "POST" : "GET", headers: trusted, body: body ? JSON.stringify(body) : undefined });
-    return response.json();
-  };
+  const client = appClient(() => state.server, PORT);
+  const request = async (path: string, body?: unknown) => (await client.request(path, body)).json;
   const result: Harness = {
     get server() {
       return state.server;
@@ -93,7 +82,7 @@ describe("usage counting", () => {
   });
   afterAll(() => h.server.close());
 
-  it("records runs, node kinds, boards and undo steps in the day ledger", async () => {
+  it("records runs, node kinds, boards and undo steps in the day ledger and counts only successful runs in telemetry.json", async () => {
     await finishRun(h, "hello");
     await finishRun(h, "/fail");
     await h.command({ type: "note", boardId: h.boardId, prompt: "a note" });
@@ -104,9 +93,6 @@ describe("usage counting", () => {
     expect(day.boardsCreated).toBe(1);
     expect(day.undo).toBe(1);
     expect(day.activeBoardIds).toEqual([h.boardId]);
-  });
-
-  it("counts successful runs in telemetry.json and leaves stopped or failed runs out", () => {
     expect(telemetryFile(h).successfulRuns).toBe(1);
   });
 
@@ -138,21 +124,14 @@ describe("consent", () => {
     h.server.close();
   });
 
-  it("stores the choice with its time and version and stops asking", async () => {
+  it("stores the choice with its time and version across a restart", async () => {
     const h = await harness("deciding");
     await h.command({ type: "setTelemetryConsent", granted: true });
     expect(telemetryFile(h)).toMatchObject({ consent: "granted", decidedAt: atNoon("2026-10-10"), decidedInVersion: expect.any(String) });
+    await h.restart();
     expect((await h.get("/api/telemetry")).consent).toBe("granted");
     await h.command({ type: "setTelemetryConsent", granted: false });
     expect((await h.get("/api/telemetry")).consent).toBe("declined");
-    h.server.close();
-  });
-
-  it("survives a server restart", async () => {
-    const h = await harness("restart");
-    await h.command({ type: "setTelemetryConsent", granted: true });
-    await h.restart();
-    expect((await h.get("/api/telemetry")).consent).toBe("granted");
     h.server.close();
   });
 });

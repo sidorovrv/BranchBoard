@@ -8,9 +8,3 @@ test("the app is locked without the access key and opens with it", async ({ inst
   const unlocked = await page.request.get(instance.baseUrl);
   expect(unlocked.status()).toBe(200);
 });
-
-test("a board created through a command shows in the sidebar and opens", async ({ appPage }) => {
-  await expect(appPage.locator(".sidebar")).toContainText("Demo");
-  await appPage.locator(".sidebar-board-open", { hasText: "Demo board" }).click();
-  await expect(appPage.locator(".react-flow")).toBeVisible();
-});

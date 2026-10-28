@@ -52,7 +52,7 @@ describe("engine install", () => {
     expect(installer.locate(VERSION)).toBe(binary);
   });
 
-  it("uses npm.cmd and no libc flag on Windows", () => {
+  it("passes no libc flag on Windows", () => {
     const windows: EnginePlatform = { os: "win32", arch: "arm64", isMusl: false };
     const args = npmArguments("prefix", VERSION, windows);
     expect(args).toContain("--os=win32");
@@ -162,11 +162,8 @@ describe("engine provider presets", () => {
   };
   const listModels = async () => ["gpt-x", "gpt-y"];
 
-  it("adds no provider for default addresses", async () => {
+  it("adds no provider for default addresses and routes a changed Anthropic address through settings.baseURL", async () => {
     expect(await buildProviderConfig(storeWith({}), listModels)).toEqual({ providers: {} });
-  });
-
-  it("routes a changed Anthropic address through settings.baseURL", async () => {
     const config = await buildProviderConfig(storeWith({ anthropic: { key: "k", baseUrl: "https://proxy.example.com" } }), listModels);
     expect(config.providers.anthropic).toEqual({ settings: { baseURL: "https://proxy.example.com" } });
   });
@@ -179,16 +176,13 @@ describe("engine provider presets", () => {
     expect(JSON.stringify(custom)).not.toContain('"k"');
   });
 
-  it("repeats the key connect while a starting engine still answers 404", async () => {
+  it("repeats the key connect while a starting engine still answers 404, but not for other failures or without end", async () => {
     let calls = 0;
     await connectKeyWhenReady(async () => {
       if (++calls < 3) throw new Error("POST /api/integration/openai/connect/key failed with 404");
     }, 1);
     expect(calls).toBe(3);
-  });
-
-  it("does not repeat the key connect for other failures or without end", async () => {
-    let calls = 0;
+    calls = 0;
     const failWith = (message: string) => async () => {
       calls++;
       throw new Error(message);

@@ -3,14 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { BoardView, GraphNode } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
 import { createLimiter } from "../packages/server/src/run/limiter";
 import { fakeRuntime } from "../packages/server/src/runtimes/fake";
 import type { RuntimeSteps } from "../packages/server/src/run/types";
+import { appClient, waitFor } from "./support";
 
 const PORT = 47124;
-const trusted = { host: `127.0.0.1:${PORT}`, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/json" };
 const directory = mkdtempSync(join(tmpdir(), "branchboard-pipeline-"));
 
 const slots = createLimiter(1);
@@ -61,26 +60,11 @@ const scripted: RuntimeSteps<any, any> = {
 let server: ReturnType<typeof createApp>;
 let boardId = "";
 
-const request = async (path: string, body?: unknown) => {
-  const response = await server.app.request(`http://127.0.0.1:${PORT}${path}`, { method: body ? "POST" : "GET", headers: trusted, body: body ? JSON.stringify(body) : undefined });
-  const text = await response.text();
-  return { status: response.status, json: text ? JSON.parse(text) : undefined };
-};
-
-const command = (body: Record<string, unknown>) => request("/api/commands", body);
-const view = async (): Promise<BoardView> => (await request(`/api/boards/${boardId}/graph`)).json;
-const nodeOf = async (nodeId: string): Promise<GraphNode> => (await view()).graph.nodes[nodeId];
-
-const waitFor = async (check: () => Promise<boolean>, timeoutMs = 5000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error("Timed out waiting for condition");
-};
-
-const waitForStatus = (nodeId: string, status: string) => waitFor(async () => (await nodeOf(nodeId)).status === status);
+const client = appClient(() => server, PORT);
+const { command } = client;
+const view = () => client.view(boardId);
+const nodeOf = (nodeId: string) => client.nodeOf(boardId, nodeId);
+const waitForStatus = (nodeId: string, status: string) => client.waitForStatus(boardId, nodeId, status);
 
 beforeAll(async () => {
   server = createApp({
@@ -139,7 +123,7 @@ describe("run failures", () => {
 describe("rejecting an approval", () => {
   it("closes the other open approvals of the run when the runtime asks for it", async () => {
     const nodeId = (await command({ type: "reply", boardId, prompt: "/two approvals" })).json.nodeId;
-    await waitFor(async () => Object.values((await view()).requests).filter((candidate) => candidate.status === "open").length === 2);
+    await waitFor(async () => (await client.openRequests(boardId)).length === 2);
     const [first] = Object.values((await view()).requests).filter((candidate) => candidate.title === "First approval");
     await command({ type: "answerRequest", boardId, requestId: first.id, answer: "reject" });
     await waitForStatus(nodeId, "done");

@@ -103,6 +103,7 @@ describe("branchboard update", () => {
 
   it("updates in the background only for npm installs that are online and opted in", () => {
     const run = { shouldAutoUpdate: true };
+    expect(shouldAutoUpdate(run, "npm")).toBe(true);
     expect(shouldAutoUpdate({ shouldAutoUpdate: false }, "npm")).toBe(false);
     expect(shouldAutoUpdate({ ...run, offline: true }, "npm")).toBe(false);
     expect(shouldAutoUpdate(run, "npx")).toBe(false);

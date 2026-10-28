@@ -125,6 +125,23 @@ test("a comment can be made while the answer streams and survives the end of the
   await expect.poll(() => highlightedTexts(appPage)).toEqual(["received"]);
 });
 
+test("reloading the page while an answer streams keeps the whole answer", async ({ appPage, instance, demo }) => {
+  const { nodeId } = await sendFrom(appPage, instance)({ type: "reply", boardId: demo.boardId, parentIds: [], prompt: "/slow stream this answer please" });
+  const answer = appPage.locator(`.react-flow__node[data-id="${nodeId}"] .answer`);
+  await expect(answer).toContainText("received");
+  await appPage.reload();
+  await appPage.locator(".sidebar-board-open", { hasText: "Demo board" }).click();
+  await expect(appPage.locator(`.react-flow__node[data-id="${nodeId}"] .node-card.status-done`)).toHaveCount(1, { timeout: 20000 });
+  const serverView = await (await appPage.request.get(`${instance.baseUrl}/api/boards/${demo.boardId}/graph`)).json();
+  const serverText = (serverView.parts[nodeId] as { type: string; text?: string }[]).filter((part) => part.type === "text").map((part) => part.text).join("");
+  const shownText = await answer.evaluate((element) => {
+    const copy = element.cloneNode(true) as HTMLElement;
+    copy.querySelectorAll(".reasoning").forEach((reasoning) => reasoning.remove());
+    return copy.textContent ?? "";
+  });
+  expect(shownText.replace(/\s+/g, "")).toBe(serverText.replace(/\s+/g, ""));
+});
+
 test("a comment can be made inside a tool card and inside a grouped tool run", async ({ appPage, instance, demo }) => {
   await appPage.evaluate(() => localStorage.setItem("branchboard.settingsOverride",JSON.stringify({ groupToolCalls: true })));
   await appPage.reload();

@@ -44,7 +44,7 @@ export const isStale = (graph: BoardGraph, node: GraphNode): boolean =>
   node.kind === "turn" && node.status === "done" && node.contextHash !== undefined && node.contextHash !== contextHash(graph, node.id);
 
 const isSessionReusable = (graph: BoardGraph, parent: GraphNode): boolean =>
-  parent.status === "done" && parent.runtimeRef !== undefined && parent.contextHash === contextHash(graph, parent.id);
+  parent.status === "done" && !parent.stopped && parent.runtimeRef !== undefined && parent.contextHash === contextHash(graph, parent.id);
 
 export const isSummaryUsable = (graph: BoardGraph, node: GraphNode): boolean =>
   Boolean(node.summary?.text) && node.status === "done" && node.summary!.rev === node.rev && node.summary!.contextHash === contextHash(graph, node.id);

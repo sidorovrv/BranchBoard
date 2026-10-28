@@ -1,81 +1,50 @@
 import { describe, expect, it } from "vitest";
-import { createChannel } from "../packages/server/src/run/channel";
 import { startJsonRpcProcess } from "../packages/server/src/runtimes/jsonRpcProcess";
-import type { ProcessExit, RunningProcess } from "../packages/server/src/runtimes/spawnProcess";
+import { ScriptedProcess } from "./support";
 
-class LineProcess implements RunningProcess {
+class LineProcess extends ScriptedProcess {
   written: any[] = [];
-  wasKilled = false;
-  private readonly channel = createChannel<string>();
-  private finishExit!: (exit: ProcessExit) => void;
-  readonly lines = this.channel.iterator;
-  readonly exit = new Promise<ProcessExit>((resolve) => (this.finishExit = resolve));
 
   writeInput(text: string) {
     text.split("\n").filter(Boolean).forEach((line) => this.written.push(JSON.parse(line)));
-  }
-  endInput() {}
-  send(message: unknown) {
-    this.channel.push(JSON.stringify(message));
-  }
-  sendLine(line: string) {
-    this.channel.push(line);
-  }
-  finish(code: number | null, stderrTail = "") {
-    this.channel.close();
-    this.finishExit({ code, stderrTail });
-  }
-  kill() {
-    this.wasKilled = true;
-    this.finish(null);
   }
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("JSON-RPC line process", () => {
-  it("writes one message per line without a jsonrpc field and matches interleaved responses", async () => {
+  it("writes one message per line without a jsonrpc field, matches interleaved responses and rejects error responses", async () => {
     const process = new LineProcess();
     const rpc = startJsonRpcProcess(process, "codex");
     const first = rpc.request("thread/start", { cwd: "/w" });
     const second = rpc.request("model/list");
-    expect(process.written).toEqual([{ id: 1, method: "thread/start", params: { cwd: "/w" } }, { id: 2, method: "model/list" }]);
-    process.send({ id: 2, result: { data: [] } });
-    process.send({ id: 1, result: { thread: { id: "t1" } } });
+    const forked = rpc.request("thread/fork", { threadId: "gone" });
+    expect(process.written).toEqual([{ id: 1, method: "thread/start", params: { cwd: "/w" } }, { id: 2, method: "model/list" }, { id: 3, method: "thread/fork", params: { threadId: "gone" } }]);
+    process.emit({ id: 2, result: { data: [] } });
+    process.emit({ id: 1, result: { thread: { id: "t1" } } });
+    process.emit({ id: 3, error: { code: -32600, message: "no rollout found for thread id gone" } });
     await expect(first).resolves.toEqual({ thread: { id: "t1" } });
     await expect(second).resolves.toEqual({ data: [] });
-  });
-
-  it("rejects a request whose response carries an error", async () => {
-    const process = new LineProcess();
-    const rpc = startJsonRpcProcess(process, "codex");
-    const forked = rpc.request("thread/fork", { threadId: "gone" });
-    process.send({ id: 1, error: { code: -32600, message: "no rollout found for thread id gone" } });
     await expect(forked).rejects.toThrow("no rollout found for thread id gone");
   });
 
-  it("answers server requests with the handler's result or its error", async () => {
+  it("refuses server requests until a handler is set, then answers with the handler's result or its error", async () => {
     const process = new LineProcess();
     const rpc = startJsonRpcProcess(process, "codex");
+    process.emit({ id: 3, method: "attestation/generate", params: {} });
+    await settle();
     rpc.onServerRequest(async (method, params) => {
       if (method === "item/tool/call") throw new Error("item/tool/call is not supported by Branchboard");
       return { decision: params.ok ? "accept" : "decline" };
     });
-    process.send({ id: 0, method: "item/commandExecution/requestApproval", params: { ok: true } });
-    process.send({ id: "x", method: "item/tool/call", params: {} });
+    process.emit({ id: 0, method: "item/commandExecution/requestApproval", params: { ok: true } });
+    process.emit({ id: "x", method: "item/tool/call", params: {} });
     await settle();
     expect(process.written).toEqual([
+      { id: 3, error: { code: -32603, message: "attestation/generate is not supported by Branchboard" } },
       { id: 0, result: { decision: "accept" } },
       { id: "x", error: { code: -32603, message: "item/tool/call is not supported by Branchboard" } },
     ]);
-  });
-
-  it("refuses server requests until a handler is set", async () => {
-    const process = new LineProcess();
-    startJsonRpcProcess(process, "codex");
-    process.send({ id: 3, method: "attestation/generate", params: {} });
-    await settle();
-    expect(process.written[0]).toMatchObject({ id: 3, error: { message: "attestation/generate is not supported by Branchboard" } });
   });
 
   it("streams the notification lines a filter accepts and skips lines that are not JSON", async () => {
@@ -84,10 +53,10 @@ describe("JSON-RPC line process", () => {
     const seen: string[] = [];
     rpc.onNotification((message) => seen.push(String(message.method)));
     const subscription = rpc.lines((message) => message.params?.threadId === "t1");
-    process.send({ method: "turn/started", params: { threadId: "t1" } });
-    process.sendLine("warning: not json");
-    process.send({ method: "turn/started", params: { threadId: "t2" } });
-    process.send({ method: "turn/completed", params: { threadId: "t1" } });
+    process.emit({ method: "turn/started", params: { threadId: "t1" } });
+    process.emitLine("warning: not json");
+    process.emit({ method: "turn/started", params: { threadId: "t2" } });
+    process.emit({ method: "turn/completed", params: { threadId: "t1" } });
     await settle();
     subscription.close();
     const received: string[] = [];

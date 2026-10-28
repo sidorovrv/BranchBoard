@@ -8,11 +8,8 @@ import { parseArguments } from "../packages/cli/src/args";
 import { browserLaunchOf } from "../packages/cli/src/browser";
 
 describe("command line arguments", () => {
-  it("runs with defaults and opens the browser", () => {
+  it("runs with defaults that open the browser and reads each option", () => {
     expect(parseArguments([])).toEqual({ kind: "run", shouldOpenBrowser: true, shouldAutoUpdate: true });
-  });
-
-  it("reads each option", () => {
     expect(parseArguments(["--port", "5000", "--data-dir", "D:\\boards", "--no-open"])).toEqual({
       kind: "run",
       port: 5000,
@@ -23,6 +20,7 @@ describe("command line arguments", () => {
     expect(parseArguments(["--no-auto-update"])).toEqual({ kind: "run", shouldOpenBrowser: true, shouldAutoUpdate: false });
     expect(parseArguments(["--host"])).toEqual({ kind: "run", shouldOpenBrowser: true, shouldAutoUpdate: true, isOnNetwork: true });
     expect(parseArguments(["--no-key"])).toEqual({ kind: "run", shouldOpenBrowser: true, shouldAutoUpdate: true, isKeyless: true });
+    expect(parseArguments(["--offline"])).toMatchObject({ kind: "run", offline: true });
     expect(parseArguments(["--host", "--no-key"]).kind).toBe("error");
     expect(parseArguments(["--enable-claude"]).kind).toBe("error");
   });
@@ -51,19 +49,13 @@ describe("opening the browser", () => {
 describe("default data folder", () => {
   const nothingExists = () => false;
 
-  it("follows the conventions of each system", () => {
+  it("follows the conventions of each system, keeps a folder from the previous product name and lets BRANCHBOARD_DATA_DIR win", () => {
     expect(defaultDataDirectory({ platform: "win32", env: { LOCALAPPDATA: "C:\\L" }, home: "C:\\H", exists: nothingExists })).toBe(join("C:\\L", "Branchboard"));
     expect(defaultDataDirectory({ platform: "darwin", env: {}, home: "/Users/a", exists: nothingExists })).toBe(join("/Users/a", "Library", "Application Support", "Branchboard"));
     expect(defaultDataDirectory({ platform: "linux", env: { XDG_DATA_HOME: "/x" }, home: "/home/a", exists: nothingExists })).toBe(join("/x", "branchboard"));
     expect(defaultDataDirectory({ platform: "linux", env: {}, home: "/home/a", exists: nothingExists })).toBe(join("/home/a", ".local", "share", "branchboard"));
-  });
-
-  it("keeps using a folder from the previous product name when it exists", () => {
     const legacy = join("C:\\L", "WanderBoard");
     expect(defaultDataDirectory({ platform: "win32", env: { LOCALAPPDATA: "C:\\L" }, home: "C:\\H", exists: (path) => path === legacy })).toBe(legacy);
-  });
-
-  it("lets BRANCHBOARD_DATA_DIR win", () => {
     expect(defaultDataDirectory({ platform: "linux", env: { BRANCHBOARD_DATA_DIR: "/custom" }, home: "/home/a", exists: nothingExists })).toBe("/custom");
   });
 });

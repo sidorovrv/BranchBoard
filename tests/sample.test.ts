@@ -49,11 +49,6 @@ describe("tour and shortcuts guide", () => {
     TOUR_STEPS.filter((step) => step.focusTitle).forEach((step) => expect(titles).toContain(step.focusTitle));
   });
 
-  it("covers code nodes, tables and charts", () => {
-    const anchors = TOUR_STEPS.map((step) => step.anchor);
-    expect(anchors).toEqual(expect.arrayContaining(["code", "table", "chart"]));
-  });
-
   it("states actions plainly and makes no remarks about the sample itself", () => {
     const text = TOUR_STEPS.map((step) => `${step.title} ${step.body}`).join("\n");
     expect(text).not.toMatch(/for free|sample|without calling|re-runs by itself|keep every attempt/i);

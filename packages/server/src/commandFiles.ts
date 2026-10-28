@@ -8,14 +8,24 @@ const MAX_FOLDER_DEPTH = 6;
 
 const unquoted = (value: string): string => value.trim().replace(/^["']|["']$/g, "");
 
-const frontMatterFields = (block: string): Record<string, string> =>
-  Object.fromEntries(
-    block
-      .split(/\r?\n/)
-      .map((line) => /^([A-Za-z_-]+):\s*(.*)$/.exec(line))
-      .filter((match): match is RegExpExecArray => match !== null)
-      .map((match) => [match[1], unquoted(match[2])]),
-  );
+const BLOCK_SCALAR_PATTERN = /^[>|][+-]?$/;
+
+const frontMatterFields = (block: string): Record<string, string> => {
+  const lines = block.split(/\r?\n/);
+  const fields: Record<string, string> = {};
+  lines.forEach((line, index) => {
+    const match = /^([A-Za-z_-]+):\s*(.*)$/.exec(line);
+    if (!match) return;
+    if (!BLOCK_SCALAR_PATTERN.test(match[2].trim())) {
+      fields[match[1]] = unquoted(match[2]);
+      return;
+    }
+    const continuation = [];
+    for (let next = index + 1; next < lines.length && /^\s+\S|^\s*$/.test(lines[next]); next++) continuation.push(lines[next].trim());
+    fields[match[1]] = continuation.join(" ").trim();
+  });
+  return fields;
+};
 
 export const commandOfMarkdown = (name: string, raw: string): CatalogCommand => {
   const match = FRONTMATTER_PATTERN.exec(raw);
@@ -28,7 +38,26 @@ export const commandOfMarkdown = (name: string, raw: string): CatalogCommand => 
   return command;
 };
 
-export const commandsFromConfig = (config: unknown): CatalogCommand[] => {
+const skillCommandOf = (directory: string, folderName: string): CatalogCommand[] => {
+  try {
+    const raw = readFileSync(join(directory, folderName, "SKILL.md"), "utf8");
+    const fields = frontMatterFields(FRONTMATTER_PATTERN.exec(raw)?.[1] ?? "");
+    if (fields["user-invocable"] === "false") return [];
+    return [{ name: fields.name || folderName, template: "", passThrough: true, ...(fields.description ? { description: fields.description } : {}) }];
+  } catch {
+    return [];
+  }
+};
+
+export const readSkillFolder = (directory: string): CatalogCommand[] => {
+  try {
+    return readdirSync(directory).flatMap((folderName) => skillCommandOf(directory, folderName));
+  } catch {
+    return [];
+  }
+};
+
+export const commandsFromConfig =(config: unknown): CatalogCommand[] => {
   const entries = (config as { commands?: unknown } | undefined)?.commands;
   if (!entries || typeof entries !== "object") return [];
   return Object.entries(entries as Record<string, any>)

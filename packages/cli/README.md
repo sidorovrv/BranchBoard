@@ -37,6 +37,17 @@ To install it globally, run `npm install -g branchboard` and start it with `bran
 
 BranchBoard opens the browser with a link that contains an access key. Do not share the link.
 
+## Using it
+
+- **Create nodes** with the bottom toolbar or by right-clicking empty board space. Double-click empty space for a chat node. Pick a model and agent, write the prompt and press Enter.
+- **Connect nodes:** drag from a node's handle onto another node to feed it, or onto empty canvas to create a child. Connected nodes run in order and unconnected nodes run in parallel. Select a node to see its context in the right panel.
+- **Manage context:** a node shows **context changed** when its inputs differ from the ones it ran with. Regenerate the node to update its answer, and switch between earlier answers with the arrows.
+- **Attachments:** use the paperclip, or drop files on a node or on empty canvas.
+- **Composer:** type `/` for slash commands and `@` for workspace files and agents. The `v` next to Send opens **Schedule Run**.
+- **Code nodes** show a workspace file with git changes and a Diff view. **Revert** undoes the files an agent edited.
+- **Comments:** select text in an AI answer, code or doc and add a comment. Comments go with the next prompt, or use **Ask now** to send one right away.
+- **Top bar:** Search (`Ctrl+F`), Active jobs, Trash and Help.
+
 ## Options
 
 ```

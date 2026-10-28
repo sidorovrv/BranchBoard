@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { applyBoardEvent, describeSensitiveFiles, emptyView, liveNodes, preferredModelId, preferredPermissionMode, sameMembers, unique, type Board, type BoardEvent, type BoardView, type Catalog, type Id, type Project, type RunInfo } from "@branchboard/core";
+import { applyBoardEvent, describeSensitiveFiles, emptyView, liveNodes, preferredModelId, preferredPermissionMode, sameMembers, unique, type Board, type BoardEvent, type BoardView, type Catalog, type Id, type Project, type RunInfo, type SequencedBoardEvent } from "@branchboard/core";
 import { useSettings } from "./settings";
 import { recordBoardOpen } from "./boardOpenTiming";
 import { CommandRefused, fetchBoards, fetchProjects, fetchTimedBoardView, fetchCatalog, fetchFinishedRuns, fetchRuns, sendCommand, subscribeToBoard } from "./api";
@@ -63,10 +63,13 @@ const sendAfterConfirmation = async (command: Record<string, unknown>, files: st
 interface KeptBoard {
   board: Board;
   view: BoardView;
+  seq: number;
   expiry: ReturnType<typeof setTimeout>;
 }
 
 let pendingEvents: BoardEvent[] = [];
+let appliedSeq = 0;
+let loadBuffer: SequencedBoardEvent[] | undefined;
 let isFlushScheduled = false;
 let shownBoardId: Id | undefined;
 const subscriptions = new Map<Id, () => void>();
@@ -87,7 +90,7 @@ const forgetKeptBoard = (boardId: Id) => {
 const keepBoard = (board: Board, view: BoardView) => {
   const minutes = useSettings.getState().settings.boardMemoryMinutes;
   if (minutes <= 0 || !subscriptions.has(board.id)) return forgetKeptBoard(board.id);
-  keptBoards.set(board.id, { board, view, expiry: setTimeout(() => forgetKeptBoard(board.id), minutes * 60_000) });
+  keptBoards.set(board.id, { board, view, seq: appliedSeq, expiry: setTimeout(() => forgetKeptBoard(board.id), minutes * 60_000) });
 };
 
 const takeKeptBoard = (boardId: Id): KeptBoard | undefined => {
@@ -98,7 +101,8 @@ const takeKeptBoard = (boardId: Id): KeptBoard | undefined => {
   return kept;
 };
 
-const applyToKeptBoard = (kept: KeptBoard, event: BoardEvent) => {
+const applyToKeptBoard = (kept: KeptBoard, event: SequencedBoardEvent) => {
+  kept.seq = event.seq;
   kept.view = applyBoardEvent(kept.view, event);
   if (event.type === "board") kept.board = event.board;
 };
@@ -116,7 +120,9 @@ export const useBoard = create<BoardStore>((set, get) => {
     if ((renamed?.hasUnseenResult || renamed?.hitUsageLimit) && get().board?.id === renamed.id) void get().send({ type: "markBoardSeen", boardId: renamed.id });
   };
 
-  const queueEvent = (event: BoardEvent) => {
+  const queueEvent = (event: SequencedBoardEvent) => {
+    if (event.seq <= appliedSeq) return;
+    appliedSeq = event.seq;
     pendingEvents.push(event);
     if (!isFlushScheduled) {
       isFlushScheduled = true;
@@ -124,8 +130,9 @@ export const useBoard = create<BoardStore>((set, get) => {
     }
   };
 
-  const showBoard = (board: Board, view: BoardView, startedAt: number, fetchMs = 0, parseMs = 0) => {
+  const showBoard = (board: Board, view: BoardView, seq: number, startedAt: number, fetchMs = 0, parseMs = 0) => {
     pendingEvents = [];
+    appliedSeq = seq;
     const renderStartedAt = performance.now();
     set({ board, view });
     void afterNextPaint().then(() => {
@@ -136,16 +143,26 @@ export const useBoard = create<BoardStore>((set, get) => {
 
   const reload = async (boardId: Id) => {
     const startedAt = performance.now();
-    const { body, fetchMs, parseMs } = await fetchTimedBoardView(boardId);
-    if (boardId !== shownBoardId) return;
-    const { board, ...view } = body;
-    showBoard(board, view, startedAt, fetchMs, parseMs);
+    const buffer: SequencedBoardEvent[] = [];
+    loadBuffer = buffer;
+    try {
+      const { body, fetchMs, parseMs } = await fetchTimedBoardView(boardId);
+      if (boardId !== shownBoardId || loadBuffer !== buffer) return;
+      loadBuffer = undefined;
+      const { board, seq, ...view } = body;
+      showBoard(board, view, seq, startedAt, fetchMs, parseMs);
+      buffer.forEach(queueEvent);
+    } finally {
+      if (loadBuffer === buffer) loadBuffer = undefined;
+    }
   };
 
-  const routeEvent = (boardId: Id) => (event: BoardEvent) => {
+  const routeEvent = (boardId: Id) => (event: SequencedBoardEvent) => {
     const kept = keptBoards.get(boardId);
     if (kept) applyToKeptBoard(kept, event);
-    else if (boardId === shownBoardId) queueEvent(event);
+    else if (boardId !== shownBoardId) return;
+    else if (loadBuffer) loadBuffer.push(event);
+    else queueEvent(event);
   };
 
   const subscribeAndLoad = (boardId: Id) =>
@@ -239,7 +256,7 @@ export const useBoard = create<BoardStore>((set, get) => {
       set({ selectedIds: [], catalog: undefined, isBoardLoading: true });
       try {
         const kept = takeKeptBoard(boardId);
-        if (kept) showBoard(kept.board, kept.view, startedAt);
+        if (kept) showBoard(kept.board, kept.view, kept.seq, startedAt);
         else await subscribeAndLoad(boardId);
       } catch (error) {
         get().notify(error instanceof Error ? error.message : String(error));

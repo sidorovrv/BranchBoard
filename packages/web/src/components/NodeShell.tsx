@@ -9,7 +9,7 @@ import { useCommentHighlights } from "../commentAnchors";
 import { clearGuides, isGuideHeld, snapResize } from "../dragSnap";
 import { SEEN_DWELL_MS, useIsUnseenResult, usePageVisible, useSeenResults } from "../seenResults";
 import { useGraphWithLiveMoves, useLiveMoves } from "../liveMoves";
-import { useSubagentDetached } from "../detachedSubagents";
+import { useDetachedSubagentIds, useSubagentDetached } from "../detachedSubagents";
 import { useSettings, type NodeTagId } from "../settings";
 import { tintStyleOf } from "../tint";
 import { sendBoardCommand, useBoard } from "../store";
@@ -87,7 +87,8 @@ const Composer = ({ node }: { node: GraphNode }) => {
     event.preventDefault();
     return true;
   };
-  const efforts = catalog?.models.find((candidate) => candidate.id === model)?.efforts ?? [];
+  const effortModel = isChosen(model) ? model : catalog?.defaultModel;
+  const efforts = catalog?.models.find((candidate) => candidate.id === effortModel)?.efforts ?? [];
   const permissionModes = catalog?.permissionModes ?? [];
   const chosenEffort = efforts.includes(effort) ? effort : UNSET_CHOICE;
   const preferredMode = preferredPermissionMode(permissionModes, useSettings((state) => state.settings.defaultPermissionMode));
@@ -228,7 +229,6 @@ const SubagentToolCard = ({ part, satellite }: { part: Part; satellite: GraphNod
         <span className="tool-status">{STATUS_LABELS[satellite.status]} <Elapsed node={satellite} /></span>
       </summary>
       <div className="subagent-inline-body">
-        <NodeRequests nodeId={satellite.id} />
         {parts.map((inner, index) => <PartView key={inner.id} part={inner} isFinished={isFinished} isLast={index === parts.length - 1} />)}
       </div>
     </details>
@@ -244,10 +244,18 @@ const useRenderSubagentPart = () => {
   };
 };
 
+const useRequestNodeIds = (node: GraphNode, parts: Part[]): string[] => {
+  const isInline = useSettings((state) => state.settings.subagentDisplay) === "inline";
+  const detachedIds = useDetachedSubagentIds();
+  const inlineIds = isInline ? parts.flatMap(subagentIdsOf).filter((id) => !detachedIds.includes(id)) : [];
+  return [node.id, ...inlineIds];
+};
+
 const ChatBody = ({ node, parts, roll }: { node: GraphNode; parts: Part[]; roll: number }) => {
   const isFinished = SETTLED_STATUSES.includes(node.status) || roll !== activeRollOf(node);
   const answer = useRef<HTMLDivElement>(null);
   const renderSubagentPart = useRenderSubagentPart();
+  const requestNodeIds = useRequestNodeIds(node, parts);
   const isGrouping = useSettings((state) => state.settings.groupToolCalls);
   const isFollowing = useSettings((state) => state.settings.followScroll);
   const revert = useNodeRevert(node);
@@ -269,7 +277,7 @@ const ChatBody = ({ node, parts, roll }: { node: GraphNode; parts: Part[]; roll:
         <>
           {node.quoteText && <div className="quote-chip"><Selectable>Regarding: {node.quoteText}</Selectable></div>}
           <NodePrompt node={node} />
-          <NodeRequests nodeId={node.id} />
+          <NodeRequests nodeIds={requestNodeIds} />
         </>
       }
       renderPart={renderSubagentPart}
@@ -557,9 +565,9 @@ const NodeShellComponent = ({ data, selected }: NodeProps<BranchNode>) => {
   useEffect(() => {
     if (!isUnseen || isLowDetail || !isPageVisible || node?.completedAt === undefined) return;
     const { completedAt } = node;
-    const timer = setTimeout(() => useSeenResults.getState().markSeen(data.nodeId, completedAt), SEEN_DWELL_MS);
+    const timer = setTimeout(() => useSeenResults.getState().markSeen(data.nodeId, completedAt), selected ? 0 : SEEN_DWELL_MS);
     return () => clearTimeout(timer);
-  }, [isUnseen, isLowDetail, isPageVisible, data.nodeId, node?.completedAt]);
+  }, [isUnseen, isLowDetail, isPageVisible, selected, data.nodeId, node?.completedAt]);
   if (!node) return null;
   const isBlocked = !isInFlight(node) && lockedNodeIds(graph).has(node.id);
   const summaryState = !node.summary?.text ? "none" : isSummaryUsable(graph, node) ? "fresh" : "stale";

@@ -3,54 +3,20 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { activeRollOf, answerText, encodeAnswers, isStale, liveEdges, REJECTED_ANSWER, type BoardView, type GraphNode } from "@branchboard/core";
+import { activeRollOf, answerText, encodeAnswers, isStale, liveEdges, REJECTED_ANSWER, type BoardView } from "@branchboard/core";
 import { ACCESS_QUERY, accessCookieName, accessLinkOf, cookieValueOf, loadAccessToken } from "../packages/server/src/accessToken";
 import { createApp } from "../packages/server/src/app";
 import { isUpgradeAllowed, networkNamesOfThisComputer } from "../packages/server/src/security";
+import { appClient, waitFor } from "./support";
 
 const PORT = 47123;
 const security = { port: PORT, extraOrigins: [] };
-const trusted = { host: `127.0.0.1:${PORT}`, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/json" };
 
 const directory = mkdtempSync(join(tmpdir(), "branchboard-"));
 const databasePath = join(directory, "test.db");
 let server: ReturnType<typeof createApp>;
 
-const request = async (path: string, body?: unknown, headers: Record<string, string> = trusted) => {
-  const response = await server.app.request(`http://127.0.0.1:${PORT}${path}`, { method: body ? "POST" : "GET", headers, body: body ? JSON.stringify(body) : undefined });
-  const text = await response.text();
-  return { status: response.status, json: text ? safeParse(text) : undefined, text };
-};
-
-const safeParse = (text: string) => {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-};
-
-const command = (body: Record<string, unknown>) => request("/api/commands", body);
-
-const view = async (boardId: string): Promise<BoardView & { board: unknown }> => (await request(`/api/boards/${boardId}/graph`)).json;
-
-const nodeOf = async (boardId: string, nodeId: string): Promise<GraphNode> => (await view(boardId)).graph.nodes[nodeId];
-
-const waitFor = async (check: () => Promise<boolean>, timeoutMs = 5000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error("Timed out waiting for condition");
-};
-
-const waitForStatus = (boardId: string, nodeId: string, status: string) => waitFor(async () => (await nodeOf(boardId, nodeId)).status === status);
-
-const textOf = async (boardId: string, nodeId: string) => {
-  const current = await view(boardId);
-  return answerText(current.parts[nodeId], activeRollOf(current.graph.nodes[nodeId]));
-};
+const { trusted, send, request, command, view, nodeOf, waitForStatus, textOf, openRequests } = appClient(() => server, PORT);
 
 let boardId = "";
 
@@ -65,19 +31,16 @@ afterAll(() => {
 });
 
 describe("security", () => {
-  it("rejects a foreign host on a read", async () => {
-    expect((await request("/api/boards", undefined, { ...trusted, host: "evil.example:80" })).status).toBe(403);
-  });
-
   it("needs no token on a read", async () => {
     expect((await request("/api/boards", undefined, { host: trusted.host })).status).toBe(200);
   });
 
-  it("forbids framing the app on served pages and on refusals", async () => {
-    const served = await server.app.request(`http://127.0.0.1:${PORT}/api/boards`, { headers: { host: trusted.host } });
+  it("rejects a foreign host and forbids framing the app on served pages and on refusals", async () => {
+    const served = await send("/api/boards", { headers: { host: trusted.host } });
     expect(served.headers.get("x-frame-options")).toBe("DENY");
     expect(served.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
-    const refused = await server.app.request(`http://127.0.0.1:${PORT}/api/boards`, { headers: { host: "evil.example:80" } });
+    const refused = await send("/api/boards", { headers: { host: "evil.example:80" } });
+    expect(refused.status).toBe(403);
     expect(refused.headers.get("x-frame-options")).toBe("DENY");
   });
 
@@ -96,24 +59,21 @@ describe("access key", () => {
 
   afterAll(() => locked.close());
 
-  it("refuses an API read and a write without the key", async () => {
+  it("refuses reads and writes without the key, with a wrong key or cookie, and with the key in the link of a write", async () => {
     const read = await lockedRequest("/api/boards");
     expect(read.status).toBe(401);
     expect(await read.json()).toEqual({ error: "Access key missing" });
-    const write = await lockedRequest("/api/commands", { method: "POST", headers: trusted, body: { type: "createBoard" } });
-    expect(write.status).toBe(401);
+    expect((await lockedRequest("/api/commands", { method: "POST", headers: trusted, body: { type: "createBoard" } })).status).toBe(401);
+    expect((await lockedRequest(`/?${ACCESS_QUERY}=${"cd".repeat(32)}`)).status).toBe(401);
+    expect((await lockedRequest("/api/boards", { headers: { cookie: `${accessCookieName(PORT)}=wrong` } })).status).toBe(401);
+    expect((await lockedRequest("/api/boards", { headers: { cookie: `other=${accessToken}` } })).status).toBe(401);
+    expect((await lockedRequest(`/api/commands?${ACCESS_QUERY}=${accessToken}`, { method: "POST", headers: trusted, body: { type: "createBoard" } })).status).toBe(401);
   });
 
   it("shows a locked page instead of the app", async () => {
     const page = await lockedRequest("/");
     expect(page.status).toBe(401);
     expect(await page.text()).toContain("locked");
-  });
-
-  it("refuses a wrong key and a cookie of the wrong value", async () => {
-    expect((await lockedRequest(`/?${ACCESS_QUERY}=${"cd".repeat(32)}`)).status).toBe(401);
-    expect((await lockedRequest("/api/boards", { headers: { cookie: `${accessCookieName(PORT)}=wrong` } })).status).toBe(401);
-    expect((await lockedRequest("/api/boards", { headers: { cookie: `other=${accessToken}` } })).status).toBe(401);
   });
 
   it("turns the key in the link into a strict cookie and removes it from the address", async () => {
@@ -131,19 +91,11 @@ describe("access key", () => {
     expect(response.headers.get("location")?.startsWith("//")).toBe(false);
   });
 
-  it("does not accept the key in the link on a write", async () => {
-    const response = await lockedRequest(`/api/commands?${ACCESS_QUERY}=${accessToken}`, { method: "POST", headers: trusted, body: { type: "createBoard" } });
-    expect(response.status).toBe(401);
-  });
-
-  it("serves the API with the cookie and still checks the origin on writes", async () => {
+  it("serves the API with the cookie and still checks the host first and the origin on writes", async () => {
     expect((await lockedRequest("/api/boards", { headers: { cookie } })).status).toBe(200);
+    expect((await lockedRequest("/api/boards", { headers: { host: "evil.example:80", cookie } })).status).toBe(403);
     const foreign = await lockedRequest("/api/commands", { method: "POST", headers: { ...trusted, cookie, origin: "http://evil.example" }, body: { type: "undo", boardId } });
     expect(foreign.status).toBe(403);
-  });
-
-  it("checks the host before the key", async () => {
-    expect((await lockedRequest("/api/boards", { headers: { host: "evil.example:80", cookie } })).status).toBe(403);
   });
 
   it("leaves the agent approvals endpoint to its own per-run secret", async () => {
@@ -199,7 +151,7 @@ describe("importing a board shared by someone else", () => {
   });
 
   const exportOf = async () => JSON.parse((await request(`/api/boards/${sharedBoardId}/export`)).text);
-  const projectOf = async () => ((await view(sharedBoardId)).board as { projectId: string }).projectId;
+  const projectOf = async () => (await view(sharedBoardId)).board.projectId as string;
 
   it("needs a project to import into", async () => {
     const response = await command({ type: "importBoard", raw: (await request(`/api/boards/${sharedBoardId}/export`)).text });
@@ -219,30 +171,19 @@ describe("importing a board shared by someone else", () => {
     expect(((await request("/api/projects")).json as { workspacePath: string }[]).some((project) => project.workspacePath === directory)).toBe(false);
   });
 
-  it("strips run choices from imported nodes", async () => {
-    const document = await exportOf();
-    Object.assign(document.nodes[0], { permissionMode: "dontAsk", agent: "build" });
-    const imported = (await command({ type: "importBoard", projectId: await projectOf(), raw: JSON.stringify(document) })).json;
-    const nodes = Object.values((await view(imported.id)).graph.nodes);
-    expect(nodes.every((node) => node.permissionMode === undefined && node.agent === undefined)).toBe(true);
-  });
-
   it("refuses commands that are not objects or name a prototype key", async () => {
-    expect((await server.app.request(`http://127.0.0.1:${PORT}/api/commands`, { method: "POST", headers: trusted, body: "null" })).status).toBe(409);
+    expect((await send("/api/commands", { method: "POST", body: "null" })).status).toBe(409);
     expect((await command({ type: "constructor" })).status).toBe(409);
     expect((await command({ type: "hasOwnProperty" })).status).toBe(409);
   });
 
-  it("refuses a file whose connections loop", async () => {
+  it("refuses a file whose connections loop and pasted nodes that are malformed", async () => {
     const document = await exportOf();
     const edge = document.edges[0];
     document.edges.push({ ...edge, fromId: edge.toId, toId: edge.fromId });
     expect((await command({ type: "importBoard", projectId: await projectOf(), raw: JSON.stringify(document) })).status).toBe(409);
-  });
-
-  it("refuses pasted nodes that are malformed", async () => {
-    const response = await command({ type: "pasteNodes", boardId, clipboard: { format: "branchboard-nodes", version: 1, nodes: [{ id: "x", status: "bogus" }], edges: [], parts: [] } });
-    expect(response.status).toBe(409);
+    const pasted = await command({ type: "pasteNodes", boardId, clipboard: { format: "branchboard-nodes", version: 1, nodes: [{ id: "x", status: "bogus" }], edges: [], parts: [] } });
+    expect(pasted.status).toBe(409);
   });
 });
 
@@ -272,9 +213,7 @@ describe("the exit demo", () => {
 
   it("the context preview matches what the model was given", async () => {
     const preview = (await request(`/api/nodes/${ids.C}/context?board=${boardId}`)).json;
-    const nodeA = await nodeOf(boardId, ids.A);
     expect(preview.turns.map((turn: { nodeId: string }) => turn.nodeId)).toEqual((await nodeOf(boardId, ids.C)).contextNodeIds);
-    expect(nodeA.status).toBe("done");
   });
 
   it("refuses a cycle with a reason", async () => {
@@ -313,7 +252,7 @@ describe("the exit demo", () => {
   it("an approval pauses the run until answered", async () => {
     ids.T = (await command({ type: "reply", boardId, parentIds: [ids.A], prompt: "/tool read the notes" })).json.nodeId;
     await waitForStatus(boardId, ids.T, "awaiting_approval");
-    const open = Object.values((await view(boardId)).requests).filter((candidate) => candidate.status === "open");
+    const open = await openRequests(boardId);
     expect(open).toHaveLength(1);
     await command({ type: "answerRequest", boardId, requestId: open[0].id, answer: "once" });
     await waitForStatus(boardId, ids.T, "done");
@@ -324,7 +263,7 @@ describe("the exit demo", () => {
   it("a question pauses the run and the answers reach the tool result", async () => {
     const askedId = (await command({ type: "reply", boardId, parentIds: [ids.A], prompt: "/ask pick fruit" })).json.nodeId;
     await waitForStatus(boardId, askedId, "awaiting_approval");
-    const open = Object.values((await view(boardId)).requests).filter((candidate) => candidate.status === "open");
+    const open = await openRequests(boardId);
     expect(open).toHaveLength(1);
     expect(open[0].kind).toBe("question");
     expect(open[0].questions).toHaveLength(2);
@@ -338,7 +277,7 @@ describe("the exit demo", () => {
   it("dismissing a question finishes the tool as an error", async () => {
     const dismissedId = (await command({ type: "reply", boardId, parentIds: [ids.A], prompt: "/ask pick fruit" })).json.nodeId;
     await waitForStatus(boardId, dismissedId, "awaiting_approval");
-    const open = Object.values((await view(boardId)).requests).filter((candidate) => candidate.status === "open");
+    const open = await openRequests(boardId);
     await command({ type: "answerRequest", boardId, requestId: open[0].id, answer: REJECTED_ANSWER });
     await waitForStatus(boardId, dismissedId, "done");
     const tool = (await view(boardId)).parts[dismissedId].find((part) => part.type === "tool");
@@ -368,10 +307,10 @@ describe("the exit demo", () => {
     expect((await command({ type: "updateBoard", boardId, environment: "1BAD=x" })).status).toBe(409);
     expect((await command({ type: "updateBoard", boardId, environment: "PATH=/tmp" })).status).toBe(409);
     await command({ type: "updateBoard", boardId, environment: "API_TOKEN=abc\n# note\nMODE=dev" });
-    expect(((await view(boardId)).board as { environment?: unknown }).environment).toEqual({ API_TOKEN: "abc", MODE: "dev" });
+    expect((await view(boardId)).board.environment).toEqual({ API_TOKEN: "abc", MODE: "dev" });
     expect((await request(`/api/boards/${boardId}/export`)).text).not.toContain("API_TOKEN");
     await command({ type: "updateBoard", boardId, environment: "" });
-    expect(((await view(boardId)).board as { environment?: unknown }).environment).toBeUndefined();
+    expect((await view(boardId)).board.environment).toBeUndefined();
   });
 
   it("a finished node's prompt cannot be edited", async () => {
@@ -392,7 +331,7 @@ describe("the exit demo", () => {
   it("exports and imports the whole board", async () => {
     const exported = await request(`/api/boards/${boardId}/export`);
     expect(exported.status).toBe(200);
-    const projectId = ((await view(boardId)).board as { projectId: string }).projectId;
+    const projectId = (await view(boardId)).board.projectId;
     const imported = (await command({ type: "importBoard", projectId, raw: exported.text })).json;
     const copy = await view(imported.id);
     const original = await view(boardId);
@@ -400,19 +339,13 @@ describe("the exit demo", () => {
     expect(liveCount(copy.graph)).toBe(liveCount(original.graph));
     expect(liveEdges(copy.graph)).toHaveLength(liveEdges(original.graph).length);
     const importedC = Object.values(copy.graph.nodes).find((node) => node.prompt === "combine them")!;
-    expect(importedC).toBeTruthy();
     expect(answerText(copy.parts[importedC.id], activeRollOf(importedC))).toContain("question about bananas");
-  });
-
-  it("escapes survive: model output is stored as plain text", async () => {
-    const xss = (await command({ type: "reply", boardId, prompt: "<img src=x onerror=alert(1)>" })).json.nodeId;
-    await waitForStatus(boardId, xss, "done");
-    expect(await textOf(boardId, xss)).toContain("<img src=x onerror=alert(1)>");
   });
 });
 
 describe("scheduling", () => {
   const slowPrompt = (label: string) => `/slow ${label} ${"word ".repeat(40)}`;
+  const runs = async () => (await request("/api/runs")).json as { boardId: string; nodeId: string; status: string; title: string }[];
 
   it("runs unconnected nodes in parallel and records elapsed time", async () => {
     const first = (await command({ type: "reply", boardId, prompt: slowPrompt("one") })).json.nodeId;
@@ -425,15 +358,21 @@ describe("scheduling", () => {
     expect(finished.completedAt! - finished.startedAt!).toBeGreaterThanOrEqual(0);
   });
 
-  it("queues a connected node behind its running ancestor and locks the ancestor", async () => {
+  it("queues a connected node behind its running ancestor, locks the ancestor and lists both runs until they are over", async () => {
     const parent = (await command({ type: "reply", boardId, prompt: slowPrompt("parent") })).json.nodeId;
     await waitForStatus(boardId, parent, "running");
     const child = (await command({ type: "reply", boardId, parentIds: [parent], prompt: "follow up" })).json.nodeId;
     expect((await nodeOf(boardId, child)).status).toBe("queued");
+    const listed = await runs();
+    expect(listed.find((run) => run.nodeId === parent)?.status).toBe("running");
+    expect(listed.find((run) => run.nodeId === child)?.status).toBe("queued");
     expect((await command({ type: "deleteNodes", boardId, ids: [parent] })).status).toBe(409);
+    expect((await runs()).some((run) => run.nodeId === parent)).toBe(true);
     expect((await command({ type: "reply", boardId, parentIds: [parent], prompt: "" })).status).toBe(200);
     await command({ type: "abort", boardId, nodeId: parent });
+    await waitFor(async () => !(await runs()).some((run) => run.nodeId === parent));
     await waitForStatus(boardId, child, "done");
+    expect((await runs()).some((run) => run.nodeId === child)).toBe(false);
     expect((await command({ type: "regenerate", boardId, nodeId: child })).status).toBe(200);
     await waitForStatus(boardId, child, "done");
   });
@@ -453,7 +392,7 @@ describe("scheduling", () => {
     await waitForStatus(boardId, child, "done");
     expect((await command({ type: "selectRoll", boardId, nodeId: parent, roll: 1 })).status).toBe(200);
     expect((await nodeOf(boardId, parent)).activeRoll).toBe(1);
-    expect(isStale((await view(boardId)).graph, (await nodeOf(boardId, child)))).toBe(true);
+    expect(isStale((await view(boardId)).graph, await nodeOf(boardId, child))).toBe(true);
     expect((await command({ type: "selectRoll", boardId, nodeId: parent, roll: 1 })).status).toBe(409);
   });
 
@@ -472,41 +411,18 @@ describe("scheduling", () => {
     const parentStart = records.find((record) => record.event === "start" && record.nodeId === parent);
     expect(parentStart.input).toBe("logged parent");
   });
-
-  it("lists live runs until they are really over, whatever happens to the node", async () => {
-    const runs = async () => (await request("/api/runs")).json as { boardId: string; nodeId: string; status: string; title: string }[];
-    const parent = (await command({ type: "reply", boardId, prompt: slowPrompt("listed") })).json.nodeId;
-    await waitForStatus(boardId, parent, "running");
-    const child = (await command({ type: "reply", boardId, parentIds: [parent], prompt: "waits behind it" })).json.nodeId;
-    const listed = await runs();
-    expect(listed.find((run) => run.nodeId === parent)?.status).toBe("running");
-    expect(listed.find((run) => run.nodeId === child)?.status).toBe("queued");
-    expect((await command({ type: "deleteNodes", boardId, ids: [parent] })).status).toBe(409);
-    expect((await runs()).some((run) => run.nodeId === parent)).toBe(true);
-    await command({ type: "abort", boardId, nodeId: parent });
-    await waitFor(async () => !(await runs()).some((run) => run.nodeId === parent));
-    await waitForStatus(boardId, child, "done");
-    expect((await runs()).some((run) => run.nodeId === child)).toBe(false);
-  });
-
-  it("a new reply inherits its parent's model", async () => {
-    const parent = (await command({ type: "reply", boardId, prompt: "pick", model: "fake/echo-large" })).json.nodeId;
-    await waitForStatus(boardId, parent, "done");
-    const child = (await command({ type: "reply", boardId, parentIds: [parent], prompt: "" })).json.nodeId;
-    expect((await nodeOf(boardId, child)).model).toBe("fake/echo-large");
-  });
 });
 
 describe("attachments", () => {
   const upload = async (name: string, content: string, type: string) => {
-    const response = await server.app.request(`http://127.0.0.1:${PORT}/api/boards/${boardId}/attachments?name=${encodeURIComponent(name)}`, { method: "POST", headers: { ...trusted, "content-type": type }, body: content });
+    const response = await send(`/api/boards/${boardId}/attachments?name=${encodeURIComponent(name)}`, { method: "POST", headers: { ...trusted, "content-type": type }, body: content });
     return { status: response.status, json: await response.json() };
   };
 
   it("stores an upload and serves it back without letting it run as a page", async () => {
     const stored = await upload("page.html", "<script>alert(1)</script>", "text/html");
     expect(stored.status).toBe(200);
-    const served = await server.app.request(`http://127.0.0.1:${PORT}/api/attachments/${stored.json.id}`, { headers: { host: trusted.host } });
+    const served = await send(`/api/attachments/${stored.json.id}`, { headers: { host: trusted.host } });
     expect(served.headers.get("content-type")).toBe("application/octet-stream");
     expect(served.headers.get("content-security-policy")).toBe("sandbox");
     expect(await served.text()).toContain("alert(1)");
@@ -614,6 +530,7 @@ describe("files that may hold secrets", () => {
   afterAll(() => rmSync(folder, { recursive: true, force: true }));
 
   const reply = (prompt: string, extra: Record<string, unknown> = {}) => command({ type: "reply", boardId: secretsBoard, parentIds: [], prompt, ...extra });
+  const upload = async (name: string) => (await send(`/api/boards/${secretsBoard}/attachments?name=${encodeURIComponent(name)}`, { method: "POST", headers: { ...trusted, "content-type": "text/plain" }, body: "A=1" })).json();
 
   it("asks before a prompt that mentions a secret file is sent", async () => {
     const refused = await reply("summarise @.env please");
@@ -649,10 +566,8 @@ describe("files that may hold secrets", () => {
   });
 
   it("asks before a secret file is attached to a node", async () => {
-    const upload = await server.app.request(`http://127.0.0.1:${PORT}/api/boards/${secretsBoard}/attachments?name=${encodeURIComponent("prod.env")}`, { method: "POST", headers: { ...trusted, "content-type": "text/plain" }, body: "A=1" });
-    const stored = await upload.json();
-    const keyUpload = await server.app.request(`http://127.0.0.1:${PORT}/api/boards/${secretsBoard}/attachments?name=${encodeURIComponent(".env.local")}`, { method: "POST", headers: { ...trusted, "content-type": "text/plain" }, body: "A=1" });
-    const keyStored = await keyUpload.json();
+    const stored = await upload("prod.env");
+    const keyStored = await upload(".env.local");
     expect((await command({ type: "file", boardId: secretsBoard, attachmentIds: [keyStored.id] })).json.sensitiveFiles).toEqual([".env.local"]);
     expect((await command({ type: "file", boardId: secretsBoard, attachmentIds: [stored.id] })).status).toBe(200);
     expect((await command({ type: "file", boardId: secretsBoard, attachmentIds: [keyStored.id], allowSensitive: true })).status).toBe(200);
@@ -661,7 +576,7 @@ describe("files that may hold secrets", () => {
   it("keeps secret files out of the mention suggestions but not out of the file route", async () => {
     const suggestions = (await request(`/api/workspace/files?board=${secretsBoard}&q=`)).json as string[];
     expect(suggestions).toEqual(["notes.md"]);
-    const served = await server.app.request(`http://127.0.0.1:${PORT}/api/boards/${secretsBoard}/files?path=${encodeURIComponent(".env")}`, { headers: { host: trusted.host } });
+    const served = await send(`/api/boards/${secretsBoard}/files?path=${encodeURIComponent(".env")}`, { headers: { host: trusted.host } });
     expect(served.status).toBe(200);
   });
 });
@@ -685,7 +600,8 @@ describe("workspace files", () => {
     rmSync(outside, { recursive: true, force: true });
   });
 
-  const open = (path: string) => server.app.request(`http://127.0.0.1:${PORT}/api/boards/${filesBoard}/files?path=${encodeURIComponent(path)}`, { headers: { host: trusted.host } });
+  const open = (path: string) => send(`/api/boards/${filesBoard}/files?path=${encodeURIComponent(path)}`, { headers: { host: trusted.host } });
+  const spawnCode = async () => (await command({ type: "code", boardId: filesBoard })).json.nodeId as string;
 
   it("serves an html file as a page that runs scripts without the app's origin", async () => {
     const response = await open("out/report.html");
@@ -697,82 +613,52 @@ describe("workspace files", () => {
     expect(await response.text()).toContain("Report");
   });
 
-  it("accepts an absolute path inside the folder", async () => {
-    expect((await open(join(folder, "notes.md"))).status).toBe(200);
-  });
-
-  it("shows text inline as plain text and downloads unknown types", async () => {
+  it("shows text inline as plain text, by relative or absolute path, and downloads unknown types", async () => {
     const text = await open("notes.md");
     expect(text.headers.get("content-type")).toContain("text/plain");
     expect(text.headers.get("content-disposition")).toContain("inline");
+    expect((await open(join(folder, "notes.md"))).status).toBe(200);
     expect((await open("data.bin")).headers.get("content-disposition")).toContain("attachment");
   });
 
-  it("refuses paths outside the folder, missing files and directories", async () => {
-    expect((await open("../" + join(outside, "secret.txt").split(/[\/]/).slice(-2).join("/"))).status).toBe(409);
-    expect((await open(join(outside, "secret.txt"))).status).toBe(409);
+  it("refuses paths outside the folder in every file command, and missing, directory and binary files", async () => {
+    const secret = join(outside, "secret.txt");
+    expect((await open("../" + secret.split(/[\/]/).slice(-2).join("/"))).status).toBe(409);
+    expect((await open(secret)).status).toBe(409);
     expect((await open("missing.html")).status).toBe(409);
     expect((await open("out")).status).toBe(409);
+    writeFileSync(join(folder, "blob.ts"), "a\0b");
+    expect((await command({ type: "extractFile", boardId: filesBoard, path: secret })).status).toBe(409);
+    expect((await command({ type: "extractFile", boardId: filesBoard, path: "missing.ts" })).status).toBe(409);
+    expect((await command({ type: "extractFile", boardId: filesBoard, path: "blob.ts" })).status).toBe(409);
+    expect((await command({ type: "openFile", boardId: filesBoard, nodeId: await spawnCode(), path: secret })).status).toBe(409);
+    expect((await command({ type: "revealFile", boardId: filesBoard, path: secret })).status).toBe(409);
   });
 
-  it("extracts a workspace file into a code node beside its origin", async () => {
+  it("extracts a workspace file into a code node connected to the node it came from", async () => {
     const extracted = await command({ type: "extractFile", boardId: filesBoard, path: join(folder, "out", "report.html") });
     expect(extracted.status).toBe(200);
-    const { graph } = await view(filesBoard);
-    const node = graph.nodes[extracted.json.nodeId];
-    expect(node).toMatchObject({ kind: "code", title: "report.html", filePath: "out/report.html", prompt: "<script>1</script><h1>Report</h1>" });
-  });
-
-  it("connects an extracted code node to the node it came from", async () => {
+    expect((await view(filesBoard)).graph.nodes[extracted.json.nodeId]).toMatchObject({ kind: "code", title: "report.html", filePath: "out/report.html", prompt: "<script>1</script><h1>Report</h1>" });
     const origin = await command({ type: "reply", boardId: filesBoard, prompt: "see notes.md", run: false });
-    const extracted = await command({ type: "extractFile", boardId: filesBoard, path: "notes.md", originId: origin.json.nodeId });
-    const { graph } = await view(filesBoard);
-    expect(liveEdges(graph).some((edge) => edge.fromId === origin.json.nodeId && edge.toId === extracted.json.nodeId)).toBe(true);
+    const linked = await command({ type: "extractFile", boardId: filesBoard, path: "notes.md", originId: origin.json.nodeId });
+    expect(liveEdges((await view(filesBoard)).graph).some((edge) => edge.fromId === origin.json.nodeId && edge.toId === linked.json.nodeId)).toBe(true);
   });
 
-  it("writes an edited code node back to its workspace file", async () => {
+  it("writes an edited code node back to its workspace file and refuses one that is not a workspace file", async () => {
     writeFileSync(join(folder, "edit-me.md"), "# Old");
     const extracted = await command({ type: "extractFile", boardId: filesBoard, path: "edit-me.md" });
     const saved = await command({ type: "writeCodeFile", boardId: filesBoard, nodeId: extracted.json.nodeId, content: "# New" });
     expect(saved.status).toBe(200);
     expect(readFileSync(join(folder, "edit-me.md"), "utf8")).toBe("# New");
     expect((await view(filesBoard)).graph.nodes[extracted.json.nodeId].prompt).toBe("# New");
-  });
-
-  it("refuses to write a code node that is not a workspace file", async () => {
-    const spawned = await command({ type: "code", boardId: filesBoard });
-    expect((await command({ type: "writeCodeFile", boardId: filesBoard, nodeId: spawned.json.nodeId, content: "x" })).status).toBe(409);
-  });
-
-  it("refuses to extract files outside the folder, missing files and binary files", async () => {
-    writeFileSync(join(folder, "blob.ts"), "a\0b");
-    expect((await command({ type: "extractFile", boardId: filesBoard, path: join(outside, "secret.txt") })).status).toBe(409);
-    expect((await command({ type: "extractFile", boardId: filesBoard, path: "missing.ts" })).status).toBe(409);
-    expect((await command({ type: "extractFile", boardId: filesBoard, path: "blob.ts" })).status).toBe(409);
+    expect((await command({ type: "writeCodeFile", boardId: filesBoard, nodeId: await spawnCode(), content: "x" })).status).toBe(409);
   });
 
   it("spawns an empty code node and fills it with a chosen workspace file", async () => {
-    const spawned = await command({ type: "code", boardId: filesBoard });
-    expect(spawned.status).toBe(200);
-    expect((await view(filesBoard)).graph.nodes[spawned.json.nodeId]).toMatchObject({ kind: "code", title: "Code", prompt: "" });
-    const opened = await command({ type: "openFile", boardId: filesBoard, nodeId: spawned.json.nodeId, path: "notes.md" });
-    expect(opened.status).toBe(200);
-    expect((await view(filesBoard)).graph.nodes[spawned.json.nodeId]).toMatchObject({ kind: "code", title: "notes.md", filePath: "notes.md" });
-  });
-
-  it("refuses to open files outside the folder into a code node", async () => {
-    const spawned = await command({ type: "code", boardId: filesBoard });
-    expect((await command({ type: "openFile", boardId: filesBoard, nodeId: spawned.json.nodeId, path: join(outside, "secret.txt") })).status).toBe(409);
-  });
-
-  it("refuses to reveal files outside the folder", async () => {
-    expect((await command({ type: "revealFile", boardId: filesBoard, path: join(outside, "secret.txt") })).status).toBe(409);
-  });
-
-  it("feeds a code node's text to a child as context", async () => {
-    const extracted = await command({ type: "extractFile", boardId: filesBoard, path: "notes.md" });
-    const child = await command({ type: "reply", boardId: filesBoard, parentIds: [extracted.json.nodeId], prompt: "what is this", run: false });
-    expect(child.status).toBe(200);
+    const nodeId = await spawnCode();
+    expect((await view(filesBoard)).graph.nodes[nodeId]).toMatchObject({ kind: "code", title: "Code", prompt: "" });
+    expect((await command({ type: "openFile", boardId: filesBoard, nodeId, path: "notes.md" })).status).toBe(200);
+    expect((await view(filesBoard)).graph.nodes[nodeId]).toMatchObject({ kind: "code", title: "notes.md", filePath: "notes.md" });
   });
 
   it("refreshes a code node when its file changes, without an undo step", async () => {

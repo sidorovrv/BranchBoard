@@ -68,16 +68,13 @@ describe("daily payload", () => {
     },
   };
 
-  it("leaves zero entries out and carries no model counts", () => {
+  it("leaves zero entries out, carries no model counts and computes retention from the ledger", () => {
     const payload = buildDailyPayload("2026-10-16", ledger, facts);
     expect(payload.runs).not.toHaveProperty("byModel");
     expect(payload.nodesCreated).toEqual({ reply: 1 });
     expect(payload.runs.failuresByRecovery).toEqual({});
     expect(payload.boards).toEqual({ total: 3, created: 1, active: 2 });
-  });
-
-  it("computes retention from the ledger", () => {
-    expect(buildDailyPayload("2026-10-16", ledger, facts).retention).toEqual({ installAgeDays: 15, daysActiveLast7: 2, daysActiveLast28: 3 });
+    expect(payload.retention).toEqual({ installAgeDays: 15, daysActiveLast7: 2, daysActiveLast28: 3 });
   });
 
   it("builds a valid payload for a day without activity", () => {
@@ -143,13 +140,9 @@ describe("consent and sending days", () => {
 });
 
 describe("branching", () => {
-  it("reports the longest ancestor chain and the widest fan-out", () => {
-    const graph = buildGraph(["a", "b", "c", "d", "e"], [["a", "b"], ["b", "c"], ["a", "d"], ["a", "e"]]);
-    expect(branchingOf(graph)).toEqual({ maxDepth: 2, maxChildren: 3, parentNodes: 2, childLinks: 4 });
-  });
-
-  it("averages children over the nodes that have children, across boards", () => {
+  it("reports the longest ancestor chain and the widest fan-out and averages children over the nodes that have children, across boards", () => {
     const first = branchingOf(buildGraph(["a", "b", "c", "d", "e"], [["a", "b"], ["b", "c"], ["a", "d"], ["a", "e"]]));
+    expect(first).toEqual({ maxDepth: 2, maxChildren: 3, parentNodes: 2, childLinks: 4 });
     const second = branchingOf(buildGraph(["a", "b"], [["a", "b"]]));
     expect(mergeBranching([first, second])).toEqual({ maxDepth: 2, maxChildren: 3, avgChildren: 1.67 });
   });

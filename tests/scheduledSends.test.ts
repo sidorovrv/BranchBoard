@@ -4,29 +4,20 @@ import { cancelScheduledSend, formatRunCountdown, nextOccurrence, scheduleSend, 
 const localTime = (hour: number, minute: number) => new Date(2026, 9, 16, hour, minute, 0, 0).getTime();
 
 describe("nextOccurrence", () => {
-  it("returns today's time when it is still ahead", () => {
+  it("returns today's time while it is ahead and tomorrow's once it has passed or is now", () => {
     expect(nextOccurrence(14, 30, localTime(9, 0))).toBe(localTime(14, 30));
-  });
-
-  it("moves to tomorrow when the time has passed or is now", () => {
     expect(nextOccurrence(9, 0, localTime(9, 0))).toBe(new Date(2026, 9, 17, 9, 0).getTime());
     expect(nextOccurrence(8, 59, localTime(9, 0))).toBe(new Date(2026, 9, 17, 8, 59).getTime());
   });
 });
 
 describe("formatRunCountdown", () => {
-  it("shows minutes and seconds under an hour", () => {
+  it("shows minutes and seconds under an hour, hours and minutes from one hour on, and never goes below zero", () => {
     expect(formatRunCountdown(59_000)).toBe("00:59");
     expect(formatRunCountdown(4 * 60_000 + 5_000)).toBe("04:05");
     expect(formatRunCountdown(59 * 60_000 + 59_000)).toBe("59:59");
-  });
-
-  it("shows hours and minutes from one hour on", () => {
     expect(formatRunCountdown(3600_000)).toBe("1h00m");
     expect(formatRunCountdown(2 * 3600_000 + 5 * 60_000)).toBe("2h05m");
-  });
-
-  it("never goes below zero", () => {
     expect(formatRunCountdown(-5_000)).toBe("00:00");
   });
 });
@@ -51,12 +42,16 @@ describe("scheduleSend", () => {
     expect(useScheduledSends.getState().runAt["node-a"]).toBeUndefined();
   });
 
-  it("keeps the details of a schedule until it runs or is cancelled", () => {
+  it("keeps the details of a schedule until it is cancelled and does not run it afterwards", () => {
+    const send = vi.fn();
     const details = { boardId: "board-a", title: "Nightly", prompt: "Summarise" };
-    scheduleSend("node-a", Date.now() + 60_000, vi.fn(), details);
+    scheduleSend("node-a", Date.now() + 60_000, send, details);
     expect(useScheduledSends.getState().details["node-a"]).toEqual(details);
     cancelScheduledSend("node-a");
     expect(useScheduledSends.getState().details["node-a"]).toBeUndefined();
+    vi.advanceTimersByTime(120_000);
+    expect(send).not.toHaveBeenCalled();
+    expect(useScheduledSends.getState().runAt["node-a"]).toBeUndefined();
   });
 
   it("replaces an earlier schedule of the same node", () => {
@@ -67,14 +62,5 @@ describe("scheduleSend", () => {
     vi.advanceTimersByTime(120_000);
     expect(first).not.toHaveBeenCalled();
     expect(second).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not run after it is cancelled", () => {
-    const send = vi.fn();
-    scheduleSend("node-a", Date.now() + 60_000, send);
-    cancelScheduledSend("node-a");
-    vi.advanceTimersByTime(120_000);
-    expect(send).not.toHaveBeenCalled();
-    expect(useScheduledSends.getState().runAt["node-a"]).toBeUndefined();
   });
 });

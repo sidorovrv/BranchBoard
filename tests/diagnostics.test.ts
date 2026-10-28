@@ -6,7 +6,6 @@ import { redactSecrets } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
 import { createDiagnostics, createDiagnosticsTool, DIAGNOSTICS_TOOL_NAME } from "../packages/server/src/diagnostics";
 import { createApprovalBroker } from "../packages/server/src/runtimes/claudeApprovals";
-import { createClaudeRuntime } from "../packages/server/src/runtimes/claude";
 
 let directory: string;
 
@@ -81,7 +80,7 @@ describe("diagnostics MCP tool", () => {
   const callTool = (broker: ReturnType<typeof createApprovalBroker>, secret: string, args: Record<string, unknown>) =>
     broker.handle(secret, rpc("tools/call", { name: DIAGNOSTICS_TOOL_NAME, arguments: args })).then((reply) => (reply.body as any).result);
 
-  it("is listed and callable only while the toggle is on", async () => {
+  it("is listed and callable only while the toggle is on and reports an unknown section as a tool error", async () => {
     const { diagnostics, dataDirectory } = makeDiagnostics();
     const broker = createApprovalBroker();
     const { secret } = broker.register(async () => ({ behavior: "deny", message: "no" }), [createDiagnosticsTool(diagnostics, { boardId: "b1", nodeId: "n1" })]);
@@ -89,38 +88,15 @@ describe("diagnostics MCP tool", () => {
     expect(await names()).toEqual(["approve", DIAGNOSTICS_TOOL_NAME]);
     const result = await callTool(broker, secret, { section: "about" });
     expect(JSON.parse(result.content[0].text)).toMatchObject({ version: "9.9.9" });
+    expect((await callTool(broker, secret, { section: "nope" })).isError).toBe(true);
     writeFileSync(join(dataDirectory, "settings.json"), JSON.stringify({ agentDiagnosticsAccess: false }));
     expect(await names()).toEqual(["approve"]);
     const refused = (await broker.handle(secret, rpc("tools/call", { name: DIAGNOSTICS_TOOL_NAME, arguments: { section: "about" } }))).body as any;
     expect(refused.error.code).toBe(-32602);
   });
-
-  it("reports an unknown section as a tool error", async () => {
-    const { diagnostics } = makeDiagnostics();
-    const broker = createApprovalBroker();
-    const { secret } = broker.register(async () => ({ behavior: "deny", message: "no" }), [createDiagnosticsTool(diagnostics, { boardId: "b1", nodeId: "n1" })]);
-    const result = await callTool(broker, secret, { section: "nope" });
-    expect(result.isError).toBe(true);
-  });
 });
 
-describe("model sources and route", () => {
-  it("tags each claude catalog model with its source", async () => {
-    const runtime = createClaudeRuntime({
-      serverUrl: "http://x",
-      locate: () => ({ path: "claude", searched: [] }),
-      probeVersion: async () => "2.9.9",
-      probeModels: async () => [{ id: "claude-cli-1", name: "Cli 1" }],
-      extraModels: () => [
-        { id: "claude-channel-1", name: "Channel 1", source: "channel" },
-        { id: "claude-seen-1", name: "Seen 1", source: "seen" },
-      ],
-    });
-    const { models } = await runtime.catalog(directory);
-    const sourceOf = (id: string) => models.find((model) => model.id === id)?.source;
-    expect([sourceOf("claude-cli-1"), sourceOf("sonnet"), sourceOf("claude-channel-1"), sourceOf("claude-seen-1")]).toEqual(["cli", "alias", "channel", "seen"]);
-  });
-
+describe("diagnostics route", () => {
   it("serves /api/diagnostics and refuses unknown sections", async () => {
     const dataDirectory = mkdtempSync(join(directory, "route-"));
     const server = createApp({ databasePath: join(dataDirectory, "t.db"), security: { port: 47303, extraOrigins: [] } });

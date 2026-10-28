@@ -21,3 +21,10 @@ playwright-report/
 
 .DS_Store
 Thumbs.db
+
+out/
+.claude/agents/impeccable-*
+.claude/skills/impeccable/
+.github/agents/
+.github/skills/
+.github/hooks/

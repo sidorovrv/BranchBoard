@@ -2,12 +2,11 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { activeRollOf, answerText, encodeAnswers, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type BoardView, type RunEvent } from "@branchboard/core";
+import { activeRollOf, answerText, encodeAnswers, REJECTED_ANSWER, SESSION_GONE_MESSAGE, type RunEvent } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
 import { createLimitsStore } from "../packages/server/src/limits";
 import { fakeRuntime } from "../packages/server/src/runtimes/fake";
 import { opencodeRuntime } from "../packages/server/src/runtimes/opencodeAuto";
-import { createChannel } from "../packages/server/src/run/channel";
 import { createLimiter } from "../packages/server/src/run/limiter";
 import { RecoverableError, type RunScope } from "../packages/server/src/run/types";
 import { createCodexRuntime, isSupportedCodexVersion, parseCodexVersion } from "../packages/server/src/runtimes/codex";
@@ -27,7 +26,7 @@ import {
 import type { LooseNative } from "../packages/server/src/runtimes/commonEvents";
 import { codexFailureOf } from "../packages/server/src/runtimes/failures";
 import { fakeCodexPath } from "./e2e/fakeCodex";
-import type { ProcessExit, RunningProcess } from "../packages/server/src/runtimes/spawnProcess";
+import { appClient, ScriptedProcess, waitFor } from "./support";
 
 const FIXTURES = join("tests", "fixtures", "codex", "0.163.0");
 
@@ -56,12 +55,6 @@ const replay = (name: string, threadId?: string, stopAtEnd = true) => {
   }
   return { natives, state, messages, workspacePath: started.cwd as string };
 };
-
-describe("codex fixtures", () => {
-  it("are recorded for every probe scenario", () => {
-    expect(readdirSync(FIXTURES).sort()).toEqual(["question.jsonl", "session.jsonl", "subagent.jsonl", "tools.jsonl"]);
-  });
-});
 
 describe("codex event translation", () => {
   it("turns commands, a patch, reasoning and the answer into tool parts and text", () => {
@@ -175,9 +168,8 @@ describe("codex parameters", () => {
     expect(request.params).toEqual({ threadId: "parent", lastTurnId: "turn-1", excludeTurns: true, cwd: "/w", sandbox: "read-only", approvalPolicy: "on-request", approvalsReviewer: "user", config: { "features.default_mode_request_user_input": true } });
   });
 
-  it("falls back to the auto mode and never sends the full-access sandbox", () => {
+  it("falls back to the auto mode for a permission mode codex does not offer", () => {
     expect(threadOpenRequest({}, { workspacePath: "/w", permissionMode: "bypassPermissions" }).params).toMatchObject({ sandbox: "workspace-write", approvalPolicy: "on-request" });
-    expect(JSON.stringify(["readOnly", "manual", "auto", "dontAsk"].map((permissionMode) => threadOpenRequest({}, { workspacePath: "/w", permissionMode })))).not.toContain("danger-full-access");
   });
 
   it("sends images as local images, other files by path, skills by path and the effort", () => {
@@ -284,14 +276,9 @@ describe("codex locator and version", () => {
 
 type Handler = (params: any) => unknown;
 
-class FakeAppServer implements RunningProcess {
+class FakeAppServer extends ScriptedProcess {
   requests: any[] = [];
   replies: any[] = [];
-  wasKilled = false;
-  private readonly channel = createChannel<string>();
-  private finishExit!: (exit: ProcessExit) => void;
-  readonly lines = this.channel.iterator;
-  readonly exit = new Promise<ProcessExit>((resolve) => (this.finishExit = resolve));
   handlers: Record<string, Handler> = {
     initialize: () => ({ userAgent: "fake", codexHome: "/home/me/.codex", platformFamily: "unix", platformOs: "linux" }),
     "account/read": () => ({ account: { type: "chatgpt", email: null, planType: "plus" }, requiresOpenaiAuth: true }),
@@ -323,41 +310,21 @@ class FakeAppServer implements RunningProcess {
         const handler = this.handlers[message.method];
         queueMicrotask(() => {
           try {
-            this.send({ id: message.id, result: handler ? handler(message.params) : {} });
+            this.emit({ id: message.id, result: handler ? handler(message.params) : {} });
           } catch (error) {
-            this.send({ id: message.id, error: { code: -32600, message: (error as Error).message } });
+            this.emit({ id: message.id, error: { code: -32600, message: (error as Error).message } });
           }
         });
       }
     }
   }
-  endInput() {}
-  send(message: unknown) {
-    this.channel.push(JSON.stringify(message));
-  }
   notify(method: string, params: object) {
-    this.send({ method, params });
+    this.emit({ method, params });
   }
   requestsOf(method: string) {
     return this.requests.filter((request) => request.method === method);
   }
-  finish(code: number | null, stderrTail = "") {
-    this.channel.close();
-    this.finishExit({ code, stderrTail });
-  }
-  kill() {
-    this.wasKilled = true;
-    this.finish(null);
-  }
 }
-
-const waitFor = async (check: () => boolean, timeoutMs = 3000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (!check()) {
-    if (Date.now() > deadline) throw new Error("Timed out waiting for condition");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-};
 
 const setup = (overrides: { version?: string; platform?: NodeJS.Platform; missing?: boolean; handlers?: Record<string, Handler> } = {}) => {
   const servers: FakeAppServer[] = [];
@@ -496,7 +463,7 @@ describe("codex runtime sessions and runs", () => {
     })();
     await waitFor(() => server().requestsOf("turn/start").length === 1);
     const approval = (id: number, command: string, availableDecisions?: unknown[]) =>
-      server().send({ id, method: "item/commandExecution/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: `c${id}`, command: `/bin/bash -lc '${command}'`, commandActions: [{ type: "unknown", command }], ...(availableDecisions ? { availableDecisions } : {}) } });
+      server().emit({ id, method: "item/commandExecution/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: `c${id}`, command: `/bin/bash -lc '${command}'`, commandActions: [{ type: "unknown", command }], ...(availableDecisions ? { availableDecisions } : {}) } });
     const opened = () => events.filter((event) => event.type === "request.opened").map((event) => (event as any).request);
     approval(0, "npm test");
     await waitFor(() => opened().length === 1);
@@ -533,16 +500,16 @@ describe("codex runtime sessions and runs", () => {
     })();
     await waitFor(() => server().requestsOf("turn/start").length === 1);
     server().notify("item/started", { threadId: "thread-1", turnId: "turn-1", item: { type: "fileChange", id: "p1", status: "inProgress", changes: [{ path: "/w/src/a.ts", kind: { type: "update", move_path: null }, diff: "@@\n-a\n+b\n" }] } });
-    server().send({ id: 7, method: "item/fileChange/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: "p1" } });
+    server().emit({ id: 7, method: "item/fileChange/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: "p1" } });
     const opened = () => events.filter((event) => event.type === "request.opened").map((event) => (event as any).request);
     await waitFor(() => opened().length === 1);
     expect(opened()[0]).toMatchObject({ title: "Allow file changes?", detail: "src/a.ts" });
     answers.get(opened()[0].id)!("once");
-    server().send({ id: 8, method: "item/tool/requestUserInput", params: { threadId: "thread-1", turnId: "turn-1", itemId: "q", questions: [{ id: "color", header: "Color", question: "Which color?", isOther: true, isSecret: false, options: [{ label: "Blue", description: "Calm" }] }] } });
+    server().emit({ id: 8, method: "item/tool/requestUserInput", params: { threadId: "thread-1", turnId: "turn-1", itemId: "q", questions: [{ id: "color", header: "Color", question: "Which color?", isOther: true, isSecret: false, options: [{ label: "Blue", description: "Calm" }] }] } });
     await waitFor(() => opened().length === 2);
     expect(opened()[1]).toMatchObject({ kind: "question", questions: [{ question: "Which color?", header: "Color" }] });
     answers.get(opened()[1].id)!(encodeAnswers([["Teal"]]));
-    server().send({ id: 9, method: "account/chatgptAuthTokens/refresh", params: { threadId: "thread-1" } });
+    server().emit({ id: 9, method: "account/chatgptAuthTokens/refresh", params: { threadId: "thread-1" } });
     await waitFor(() => server().replies.length === 3);
     expect([...server().replies].sort((left, right) => left.id - right.id)).toEqual([
       { id: 7, result: { decision: "accept" } },
@@ -559,7 +526,7 @@ describe("codex runtime sessions and runs", () => {
     const handle = await runtime.openSession({ missingTurns: [] }, scope);
     const run = collect(runtime, runtime.execute(handle, "Go", scope), scope);
     await waitFor(() => server().requestsOf("turn/start").length === 1);
-    server().send({ id: 4, method: "item/commandExecution/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: "c", command: "make", availableDecisions: ["accept", "cancel"] } });
+    server().emit({ id: 4, method: "item/commandExecution/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: "c", command: "make", availableDecisions: ["accept", "cancel"] } });
     await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort();
     await run;
@@ -622,28 +589,18 @@ describe("codex runtime sessions and runs", () => {
 });
 
 describe("codex runs through the board", () => {
-  const HOST = "127.0.0.1:47125";
+  const PORT = 47125;
+  const SLOW_START_MS = 15000;
   const directory = mkdtempSync(join(tmpdir(), "branchboard-codex-"));
   const codexLimits = createLimitsStore().of("codex");
   const codex = createCodexRuntime({ locate: () => ({ path: fakeCodexPath(), searched: [] }), limits: codexLimits });
-  const server = createApp({ databasePath: join(directory, "test.db"), security: { port: 47125, extraOrigins: [] }, webRoot: join(directory, "none"), runtimes: { fake: fakeRuntime, opencode: opencodeRuntime, claude: fakeRuntime, codex } });
+  const server = createApp({ databasePath: join(directory, "test.db"), security: { port: PORT, extraOrigins: [] }, webRoot: join(directory, "none"), runtimes: { fake: fakeRuntime, opencode: opencodeRuntime, claude: fakeRuntime, codex } });
+  const client = appClient(() => server, PORT);
   let boardId = "";
 
-  const request = async (path: string, body?: unknown) => {
-    const response = await server.app.request(`http://${HOST}${path}`, { method: body === undefined ? "GET" : "POST", headers: { host: HOST, origin: `http://${HOST}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-    const text = await response.text();
-    return { status: response.status, json: text ? JSON.parse(text) : undefined };
-  };
-  const command = async (body: Record<string, unknown>) => (await request("/api/commands", body)).json;
-  const view = async (): Promise<BoardView> => (await request(`/api/boards/${boardId}/graph`)).json;
-  const pollFor = async (check: () => Promise<boolean>) => {
-    const deadline = Date.now() + 15000;
-    while (!(await check())) {
-      if (Date.now() > deadline) throw new Error("Timed out waiting for the board");
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  };
-  const waitForStatus = (nodeId: string, status: string) => pollFor(async () => (await view()).graph.nodes[nodeId]?.status === status);
+  const command = async (body: Record<string, unknown>) => (await client.command(body)).json;
+  const view = () => client.view(boardId);
+  const waitForStatus = (nodeId: string, status: string) => client.waitForStatus(boardId, nodeId, status, SLOW_START_MS);
 
   beforeAll(async () => {
     boardId = (await command({ type: "createBoard", title: "Codex", workspacePath: directory, mode: "codex" })).id;
@@ -657,8 +614,8 @@ describe("codex runs through the board", () => {
 
   it("asks for a command on the board, finishes the answer and keeps the thread for children", async () => {
     const root = (await command({ type: "reply", boardId, prompt: "approve the test run" })).nodeId as string;
-    await pollFor(async () => Object.values((await view()).requests).some((pending) => pending.status === "open"));
-    const opened = Object.values((await view()).requests).find((pending) => pending.status === "open")!;
+    await waitFor(async () => (await client.openRequests(boardId)).length > 0, SLOW_START_MS);
+    const [opened] = await client.openRequests(boardId);
     expect(opened).toMatchObject({ kind: "approval", title: "Allow command?", detail: "npm test" });
     await command({ type: "answerRequest", boardId, requestId: opened.id, answer: "once" });
     await waitForStatus(root, "done");

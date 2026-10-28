@@ -18,7 +18,7 @@ span.icon { --icon: none; flex: none; display: block; width: 16px; height: 16px;
 .prompt-files { border-top: 1px solid var(--border); padding: 2px 8px; }
 .prompt-block > .prompt-files:first-child { border-top: 0; }
 .prompt-files .attachment-list { margin: 4px 0; background: none; }
-.answer { flex: 1; min-height: 0; overflow: auto; overflow-wrap: anywhere; scrollbar-gutter: stable; padding-right: 6px; }
+.answer { flex: 1; min-height: 0; overflow: auto; overflow-wrap: anywhere; }
 .thinking-note { color: var(--muted); font-size: 12px; margin: 4px 0; animation: thinking-fade 1.4s ease-in-out infinite; }
 @keyframes thinking-fade { 50% { opacity: 0.4; } }
 .answer p { margin: 0 0 8px; }
@@ -118,10 +118,6 @@ span.icon { --icon: none; flex: none; display: block; width: 16px; height: 16px;
 .edits-more { border: 0; border-radius: 0; background: none; color: var(--muted); cursor: pointer; }
 .edits-more:hover { background: var(--hover-strong); color: var(--text); }
 .edits-more.is-open .icon { transform: rotate(90deg); }
-:root[data-theme="dark"] .tool-card { background: none; border-color: transparent; padding: 2px 0; color: var(--muted); }
-:root[data-theme="dark"] .tool-card[open] { background: var(--subtle); border-color: var(--border); padding: 4px 8px; }
-:root[data-theme="dark"] .tool-card .tool-name { font-weight: 500; }
-:root[data-theme="dark"] .tool-card.tool-error { color: var(--danger); }
 :root[data-theme="dark"] .code-block { background: transparent; }
 .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag, .hljs-name { color: var(--hl-keyword); }
 .hljs-string, .hljs-regexp, .hljs-addition, .hljs-symbol, .hljs-bullet { color: var(--hl-string); }

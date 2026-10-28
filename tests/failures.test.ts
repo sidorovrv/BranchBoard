@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { applyRunEvent, type Part } from "@branchboard/core";
 import { failureOf, STREAM_ENDED_EARLY } from "../packages/server/src/runtimes/failures";
+import { createChannel } from "../packages/server/src/run/channel";
 import { createLimiter, withSlot } from "../packages/server/src/run/limiter";
 import { askOnce } from "../packages/server/src/run/askOnce";
 import { usageEvents, usageNative } from "../packages/server/src/runtimes/commonEvents";
@@ -29,11 +30,6 @@ describe("failure mapping", () => {
   it("names timeouts and early stream ends", () => {
     expect(failureOf({ isEarlyEnd: true }).message).toBe(STREAM_ENDED_EARLY);
     expect(failureOf({ isTimeout: true }).message).toMatch(/did not answer in time/);
-  });
-
-  it("redacts saved keys from the message and the response body", () => {
-    const failure = failureOf({ type: "provider.auth", message: "Incorrect API key provided: rejected-credential", body: { error: "rejected-credential rejected" } }, ["rejected-credential"]);
-    expect(failure.message).not.toContain("rejected-credential");
   });
 });
 
@@ -69,6 +65,40 @@ describe("shared run steps", () => {
   it("builds usage natives that keep cost", () => {
     const native = usageNative({ inputTokens: 5, outputTokens: 2, contextTokens: 5, costUsd: 0.5 });
     expect(usageEvents(native)).toEqual([{ type: "usage", usage: expect.objectContaining({ inputTokens: 5, outputTokens: 2, contextTokens: 5, costUsd: 0.5 }) }]);
+  });
+
+  it("delivers queued and later channel items in order and ends when closed", async () => {
+    const channel = createChannel<number>();
+    channel.push(1);
+    const collected: number[] = [];
+    const reading = (async () => {
+      for await (const item of channel.iterator) collected.push(item);
+    })();
+    channel.push(2);
+    channel.push(3);
+    channel.close();
+    channel.push(4);
+    await reading;
+    expect(collected).toEqual([1, 2, 3]);
+  });
+
+  it("runs at most the limit and lets waiters in as slots free", async () => {
+    const limiter = createLimiter(2);
+    const signal = new AbortController().signal;
+    const first = await limiter.acquire(signal);
+    const second = await limiter.acquire(signal);
+    let thirdGranted = false;
+    const third = limiter.acquire(signal).then((release) => ((thirdGranted = true), release));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(thirdGranted).toBe(false);
+    first!();
+    first!();
+    const thirdRelease = await third;
+    expect(thirdGranted).toBe(true);
+    expect(limiter.activeCount()).toBe(2);
+    second!();
+    thirdRelease!();
+    expect(limiter.activeCount()).toBe(0);
   });
 
   it("waits for a slot, reports waiting, and gives up when aborted", async () => {

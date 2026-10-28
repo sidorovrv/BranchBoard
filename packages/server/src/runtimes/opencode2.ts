@@ -227,9 +227,15 @@ const sameModel =(current: ModelRef | undefined, wanted: ModelRef): boolean =>
 
 const sessionPath = (handle: Opencode2Handle, suffix = "") => `/api/session/${handle.sessionId}${suffix}`;
 
+const wantedModelOf = (handle: Opencode2Handle, scope: RunScope): ModelRef | undefined => {
+  const chosen = modelRefOf(scope.model, scope.effort);
+  if (chosen || !handle.model) return chosen;
+  return { id: handle.model.id, providerID: handle.model.providerID, ...(isChosen(scope.effort) ? { variant: scope.effort } : {}) };
+};
+
 const applyRunChoices = async (handle: Opencode2Handle, scope: RunScope) => {
   const { server, directory } = handle;
-  const model = modelRefOf(scope.model, scope.effort);
+  const model = wantedModelOf(handle, scope);
   if (model && !sameModel(handle.model, model)) await post(server, directory, sessionPath(handle, "/model"), { model });
   if (isChosen(scope.agent) && scope.agent !== handle.agent) await post(server, directory, sessionPath(handle, "/agent"), { agent: scope.agent });
   if (scope.environment || handle.isFork) await call(server, directory, sessionPath(handle, "/environment"), { method: "PUT", body: JSON.stringify({ variables: scope.environment ?? {} }) });

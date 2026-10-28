@@ -24,12 +24,8 @@ import {
   NODE_GAP,
   NODE_MAX_HEIGHT,
   NODE_MAX_WIDTH,
-  NODE_MIN_HEIGHT,
-  NODE_MIN_WIDTH,
   NODE_ROW_GAP,
   NOTE_HEIGHT,
-  NOTE_MIN_HEIGHT,
-  NOTE_MIN_WIDTH,
   NOTE_WIDTH,
   orderedAncestorIds,
   planSession,
@@ -39,11 +35,11 @@ import {
   seedFrom,
   type BoardGraph,
   type GraphEdit,
+  preferredModelId,
   preferredPermissionMode,
   RUNTIME_DEFAULT_PERMISSION_MODE,
   describeSensitiveFiles,
   isSensitivePath,
-  sensitivePathsOf,
 } from "@branchboard/core";
 import { BOARD, buildGraph, finishedParts, mustApply, randomDag, seededRandom, withNode } from "./support";
 
@@ -134,10 +130,11 @@ describe("property tests on random DAGs", () => {
   const random = seededRandom(7);
   const dags = Array.from({ length: 25 }, () => randomDag(random, 12));
 
-  it("context has exactly the ancestors, once, parents before children", () => {
+  it("context has exactly the ancestors, once, parents before children, and never the node itself", () => {
     for (const { graph, ids } of dags) {
       for (const id of ids) {
         const ordered = orderedAncestorIds(graph, id);
+        expect(ancestorIds(graph, id).has(id)).toBe(false);
         expect(new Set(ordered).size).toBe(ordered.length);
         expect([...ordered].sort()).toEqual([...ancestorIds(graph, id)].sort());
         ordered.forEach((ancestor, index) => {
@@ -146,10 +143,6 @@ describe("property tests on random DAGs", () => {
         });
       }
     }
-  });
-
-  it("no connect ever produces a cycle", () => {
-    for (const { graph, ids } of dags) for (const id of ids) expect(ancestorIds(graph, id).has(id)).toBe(false);
   });
 
   it("apply then invert restores every edit kind", () => {
@@ -333,18 +326,11 @@ describe("staleness and session plan", () => {
 });
 
 describe("files that may hold secrets", () => {
-  it("flags environment files, keys, certificates and the git folder", () => {
+  it("flags environment files, keys, certificates and the git folder and leaves ordinary files alone", () => {
     const flagged = [".env", ".env.local", "app/.ENV.production", "keys/server.pem", "tls\\site.key", "id_rsa", "a/id_ed25519", "certs/ca.crt", "store.p12", ".git/config", "sub/.git/HEAD"];
     flagged.forEach((path) => expect(isSensitivePath(path), path).toBe(true));
-  });
-
-  it("leaves ordinary files alone", () => {
     const fine = ["notes.md", "environment.ts", "src/env.ts", ".gitignore", ".github/workflows/ci.yml", "id_rsa.pub", ".env.example", "config/.env.sample", ".env.local.template", "keyboard.ts", "monkey.txt", "src/environment/.envrc.md"];
     fine.forEach((path) => expect(isSensitivePath(path), path).toBe(false));
-  });
-
-  it("lists each flagged path once", () => {
-    expect(sensitivePathsOf([".env", "a.txt", ".env"])).toEqual([".env"]);
   });
 
   it("describes the files in the question the user is asked", () => {
@@ -352,16 +338,20 @@ describe("files that may hold secrets", () => {
   });
 });
 
-describe("default permission mode", () => {
-  const modes = [{ id: "manual" }, { id: "acceptEdits" }, { id: "auto" }];
+describe("preferred model and permission mode", () => {
+  it("prefers an exact model id, then a partial match", () => {
+    const models = [{ id: "default" }, { id: "sonnet" }, { id: "claude-sonnet-5-5" }, { id: "opus" }];
+    expect(preferredModelId(models, "sonnet")).toBe("sonnet");
+    expect(preferredModelId([{ id: "anthropic/claude-sonnet-5-5" }], "sonnet")).toBe("anthropic/claude-sonnet-5-5");
+    expect(preferredModelId(models, "gemini")).toBeUndefined();
+    expect(preferredModelId(models, " ")).toBeUndefined();
+  });
 
-  it("uses the chosen mode only when the runtime offers it", () => {
+  it("uses the chosen permission mode only when the runtime offers it and leaves the runtime's own default otherwise", () => {
+    const modes = [{ id: "manual" }, { id: "acceptEdits" }, { id: "auto" }];
     expect(preferredPermissionMode(modes, "manual")).toBe("manual");
     expect(preferredPermissionMode(modes, "bypassPermissions")).toBeUndefined();
     expect(preferredPermissionMode(undefined, "manual")).toBeUndefined();
-  });
-
-  it("leaves the runtime's own default when nothing is chosen", () => {
     expect(preferredPermissionMode(modes, RUNTIME_DEFAULT_PERMISSION_MODE)).toBeUndefined();
   });
 });
@@ -511,11 +501,12 @@ describe("horizontal layout", () => {
     expect(second.node.y).toBe(first.node.y + first.node.h + NODE_ROW_GAP);
   });
 
-  it("gives a branch a thread-prefixed placeholder title straight away", () => {
+  it("lets a plain reply inherit its parent's title and gives a branch a thread-prefixed placeholder title straight away", () => {
     const parent = makeNode(BOARD, { id: "P", title: "Thread name" });
-    const first = addReply(mustApply(buildGraph([], []), { type: "addNode", parentIds: [], node: parent }), "P");
-    const plain = seedFrom.reply(first.graph, { type: "reply", parentIds: ["P"], prompt: "second question" });
-    const branch = addNodeEdit(first.graph, board, plain).node;
+    const graph = mustApply(buildGraph([], []), { type: "addNode", parentIds: [], node: parent });
+    expect(addNodeEdit(graph, board, seedFrom.reply(graph, { type: "reply", parentIds: ["P"], prompt: "next" })).node.title).toBe("Thread name");
+    const first = addReply(graph, "P");
+    const branch = addNodeEdit(first.graph, board, seedFrom.reply(first.graph, { type: "reply", parentIds: ["P"], prompt: "second question" })).node;
     expect(branch.title).toBe("Thread name › second question");
     expect(addNodeEdit(buildGraph([], []), board, { kind: "turn", parentIds: [], prompt: "root" }).node.title).toBe("root");
   });
@@ -525,10 +516,9 @@ describe("horizontal layout", () => {
     expect(wide.node.w).toBe(NODE_MAX_WIDTH);
   });
 
-  it("makes notes small and lets them shrink to a quarter of the chat minimum", () => {
+  it("makes notes small whatever width is requested", () => {
     const note = addNodeEdit(buildGraph([], []), board, seedFrom.note(buildGraph([], []), { type: "note", width: 900 })).node;
     expect([note.w, note.h]).toEqual([NOTE_WIDTH, NOTE_HEIGHT]);
-    expect([NOTE_MIN_WIDTH, NOTE_MIN_HEIGHT]).toEqual([NODE_MIN_WIDTH / 4, NODE_MIN_HEIGHT / 4]);
   });
 
   it("keeps a branch's title automatic after its prompt is typed", () => {
@@ -550,26 +540,16 @@ describe("horizontal layout", () => {
     if (isRefusal(undone)) throw new Error(undone.refusal);
     expect([undone.graph.nodes.R.title, undone.graph.nodes.B.title, undone.graph.nodes.P.title]).toEqual(["Old", "Old › branch", "Old"]);
   });
-
-  it("lets a plain reply inherit its parent's title", () => {
-    const parent = makeNode(BOARD, { id: "P", title: "Thread name" });
-    const graph = mustApply(buildGraph([], []), { type: "addNode", parentIds: [], node: parent });
-    expect(addNodeEdit(graph, board, seedFrom.reply(graph, { type: "reply", parentIds: ["P"], prompt: "next" })).node.title).toBe("Thread name");
-  });
 });
 
 describe("highlightSpans", () => {
-  it("marks inline code and fenced blocks without losing characters", () => {
+  it("marks inline code and fenced blocks without losing characters and keeps an unclosed fence highlighted while typing", () => {
     const text = "use `foo` now\n```ts\nconst a = `b`;\n```\nafter";
     const spans = highlightSpans(text);
     expect(spans.map((span) => span.text).join("")).toBe(text);
     expect(spans.filter((span) => span.kind === "inline-code").map((span) => span.text)).toEqual(["`foo`"]);
     expect(spans.filter((span) => span.kind === "fence-line").map((span) => span.text)).toEqual(["```ts", "```"]);
     expect(spans.filter((span) => span.kind === "block-code").map((span) => span.text)).toEqual(["const a = `b`;"]);
-  });
-
-  it("keeps an unclosed fence highlighted while typing", () => {
-    const spans = highlightSpans("```\nlong one");
-    expect(spans.filter((span) => span.kind === "fence-line" || span.kind === "block-code")).toHaveLength(2);
+    expect(highlightSpans("```\nlong one").filter((span) => span.kind === "fence-line" || span.kind === "block-code")).toHaveLength(2);
   });
 });

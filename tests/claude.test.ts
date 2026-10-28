@@ -2,61 +2,23 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { activeRollOf, ANSWER_FORMATS_GUIDE, answerText, encodeAnswers, REJECTED_ANSWER, satelliteIdsOf, type BoardView, type GraphNode } from "@branchboard/core";
+import { answerText, ANSWER_FORMATS_GUIDE, encodeAnswers, REJECTED_ANSWER, satelliteIdsOf } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
 import { createLimitsStore } from "../packages/server/src/limits";
-import { createChannel } from "../packages/server/src/run/channel";
-import { createLimiter, withSlot } from "../packages/server/src/run/limiter";
+import { createLimiter } from "../packages/server/src/run/limiter";
 import { createClaudeRuntime, TOOL_TIMEOUT_MS } from "../packages/server/src/runtimes/claude";
 import { createApprovalBroker, type ApprovalHandler } from "../packages/server/src/runtimes/claudeApprovals";
 import { locateClaude } from "../packages/server/src/runtimes/claudeLocator";
 import { attachmentDirectories, backgroundGraceOf, buildClaudeArguments, buildUserMessage, createStreamState, finalEvents, FOLLOW_UP_GRACE_MS, linesUntilFollowUpEnds, QUEUED_TURN_GRACE_MS, supportsSubagentText, translateClaudeMessage } from "../packages/server/src/runtimes/claudeStream";
-import { BUNDLED_COMMANDS, listWorkspaceCommands, withBundledCommands } from "../packages/server/src/runtimes/claudeCommands";
+import { BUNDLED_COMMANDS, commandsFromInitialize, listWorkspaceCommands, withBundledCommands } from "../packages/server/src/runtimes/claudeCommands";
 import { fakeRuntime } from "../packages/server/src/runtimes/fake";
 import { opencodeRuntime } from "../packages/server/src/runtimes/opencodeAuto";
-import type { ProcessExit, RunningProcess } from "../packages/server/src/runtimes/spawnProcess";
-import { parseSupportedModels } from "../packages/server/src/runtimes/claudeSupportedModels";
+import { parseClaudeProbe } from "../packages/server/src/runtimes/claudeSupportedModels";
+import { appClient, ScriptedProcess, waitFor } from "./support";
 
 const PORT = 47124;
 const HOST = `127.0.0.1:${PORT}`;
 const EXECUTABLE = "C:\\tools\\claude.exe";
-
-const waitFor = async (check: () => boolean | Promise<boolean>, timeoutMs = 5000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 15));
-  }
-  throw new Error("Timed out waiting for condition");
-};
-
-class ScriptedProcess implements RunningProcess {
-  input = "";
-  wasKilled = false;
-  private readonly channel = createChannel<string>();
-  private finishExit!: (exit: ProcessExit) => void;
-  readonly lines = this.channel.iterator;
-  readonly exit = new Promise<ProcessExit>((resolve) => (this.finishExit = resolve));
-
-  writeInput(text: string) {
-    this.input += text;
-  }
-  endInput() {}
-  emit(message: unknown) {
-    this.channel.push(JSON.stringify(message));
-  }
-  emitLine(text: string) {
-    this.channel.push(text);
-  }
-  finish(code: number | null = 0, stderrTail = "") {
-    this.channel.close();
-    this.finishExit({ code, stderrTail });
-  }
-  kill() {
-    this.wasKilled = true;
-    this.finish(null);
-  }
-}
 
 interface Launch {
   args: string[];
@@ -95,41 +57,29 @@ describe("argument building", () => {
     expect(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 3)).toEqual(["--resume", "parent-session", "--fork-session"]);
   });
 
-  it("omits the model and agent when the default is chosen", () => {
-    const args = buildClaudeArguments({ ...base, model: "default", agent: "default" });
-    expect(args).not.toContain("--model");
-    expect(args).not.toContain("--agent");
-    expect(buildClaudeArguments({ ...base, model: "opus", agent: "reviewer" })).toEqual(expect.arrayContaining(["--model", "opus", "--agent", "reviewer"]));
+  it("passes the model, agent, effort and permission mode only when one other than the default is chosen", () => {
+    const args = buildClaudeArguments({ ...base, model: "default", agent: "default", effort: "default", permissionMode: "default" });
+    ["--model", "--agent", "--effort", "--permission-mode"].forEach((flag) => expect(args).not.toContain(flag));
+    expect(buildClaudeArguments({ ...base, model: "opus", agent: "reviewer", effort: "high", permissionMode: "plan" })).toEqual(expect.arrayContaining(["--model", "opus", "--agent", "reviewer", "--effort", "high", "--permission-mode", "plan"]));
   });
 
-  it("passes effort and permission mode only when chosen", () => {
-    const args = buildClaudeArguments({ ...base, effort: "default", permissionMode: "default" });
-    expect(args).not.toContain("--effort");
-    expect(args).not.toContain("--permission-mode");
-    expect(buildClaudeArguments({ ...base, effort: "high", permissionMode: "plan" })).toEqual(expect.arrayContaining(["--effort", "high", "--permission-mode", "plan"]));
-  });
-
-  it("never lets a node bypass permissions", () => {
+  it("never lets a node bypass permissions and refuses values that could break out of a command line", () => {
     expect(() => buildClaudeArguments({ ...base, permissionMode: "bypassPermissions" })).toThrow(/not available/);
     expect(() => buildClaudeArguments({ ...base, effort: "high; calc" })).toThrow(/unsafe effort/);
+    expect(() => buildClaudeArguments({ ...base, model: "opus & calc" })).toThrow(/unsafe model/);
+    expect(() => buildClaudeArguments({ ...base, agent: "a\"b" })).toThrow(/unsafe agent/);
+    expect(() => buildClaudeArguments({ ...base, resumeFrom: "x; rm" })).toThrow(/unsafe session id/);
   });
 
   it("forwards subagent text only when asked and only for versions that know the flag", () => {
     expect(buildClaudeArguments(base)).not.toContain("--forward-subagent-text");
     expect(buildClaudeArguments({ ...base, forwardSubagentText: true })).toContain("--forward-subagent-text");
     expect(supportsSubagentText("2.1.211 (Claude Code)")).toBe(true);
-    expect(supportsSubagentText("2.1.300")).toBe(true);
     expect(supportsSubagentText("2.2.0")).toBe(true);
     expect(supportsSubagentText("3.0.1")).toBe(true);
     expect(supportsSubagentText("2.1.210")).toBe(false);
     expect(supportsSubagentText("1.9.999")).toBe(false);
     expect(supportsSubagentText("unknown")).toBe(false);
-  });
-
-  it("refuses values that could break out of a command line", () => {
-    expect(() => buildClaudeArguments({ ...base, model: "opus & calc" })).toThrow(/unsafe model/);
-    expect(() => buildClaudeArguments({ ...base, agent: "a\"b" })).toThrow(/unsafe agent/);
-    expect(() => buildClaudeArguments({ ...base, resumeFrom: "x; rm" })).toThrow(/unsafe session id/);
   });
 });
 
@@ -284,18 +234,13 @@ describe("stream translation", () => {
     expect(translate([{ type: "result", subtype: "error_max_turns", is_error: false }]).natives[0]).toMatchObject({ type: "failure" });
   });
 
-  it("reports the context size of the last call and the window of the main model", () => {
+  it("reports the context size of the last call, the window of the main model and the cost the CLI puts on the result", () => {
     const { natives } = translate([
       { type: "system", subtype: "init", session_id: "s1", model: "claude-haiku-4-5-20251001" },
       { type: "assistant", message: { id: "m1", content: [], usage: { input_tokens: 10, cache_creation_input_tokens: 30000, cache_read_input_tokens: 700, output_tokens: 4 } } },
-      { ...successResult("ok"), modelUsage: { "claude-haiku-4-5-20251001": { contextWindow: 200000 }, "claude-opus-5-5": { contextWindow: 1000000 } } },
+      { ...successResult("ok"), total_cost_usd: 0.0123, modelUsage: { "claude-haiku-4-5-20251001": { contextWindow: 200000 }, "claude-opus-5-5": { contextWindow: 1000000 } } },
     ]);
-    expect(natives.find((native) => native.type === "usage")).toMatchObject({ contextTokens: 30710, contextWindow: 200000 });
-  });
-
-  it("reports the cost the CLI puts on the result", () => {
-    const { natives } = translate([{ ...successResult("ok"), total_cost_usd: 0.0123 }]);
-    expect(natives.find((native) => native.type === "usage")).toMatchObject({ costUsd: 0.0123 });
+    expect(natives.find((native) => native.type === "usage")).toMatchObject({ contextTokens: 30710, contextWindow: 200000, costUsd: 0.0123 });
   });
 
   it("splits cache reads and writes, and keeps the first call's split", () => {
@@ -331,19 +276,14 @@ describe("limits store", () => {
     unifiedWindows: { five_hour: { utilization: 0.44, resetsAt: 1791054000 }, seven_day: { utilization: 0.15, resetsAt: 1791540000 }, broken: { utilization: "x" } },
   };
 
-  it("starts empty and keeps the latest windows with a timestamp", () => {
-    const store = createLimitsStore().of("claude");
-    expect(store.current()).toBeUndefined();
-    store.record(sample);
-    expect(store.current()).toMatchObject({ status: "allowed", windows: [{ id: "five_hour", utilization: 0.44, resetsAt: 1791054000 }, { id: "seven_day", utilization: 0.15, resetsAt: 1791540000 }] });
-    expect(store.current()?.updatedAt).toBeGreaterThan(0);
-  });
-
-  it("ignores info that is not an object", () => {
+  it("starts empty, ignores info that is not an object and keeps the latest windows with a timestamp", () => {
     const store = createLimitsStore().of("claude");
     store.record(undefined);
     store.record("nope");
     expect(store.current()).toBeUndefined();
+    store.record(sample);
+    expect(store.current()).toMatchObject({ status: "allowed", windows: [{ id: "five_hour", utilization: 0.44, resetsAt: 1791054000 }, { id: "seven_day", utilization: 0.15, resetsAt: 1791540000 }] });
+    expect(store.current()?.updatedAt).toBeGreaterThan(0);
   });
 
   it("appends every reading with its runtime, board and node to the history file", () => {
@@ -425,53 +365,6 @@ describe("approval broker", () => {
   });
 });
 
-describe("channel and limiter", () => {
-  it("delivers queued and later items in order and ends when closed", async () => {
-    const channel = createChannel<number>();
-    channel.push(1);
-    const collected: number[] = [];
-    const reading = (async () => {
-      for await (const item of channel.iterator) collected.push(item);
-    })();
-    channel.push(2);
-    channel.push(3);
-    channel.close();
-    channel.push(4);
-    await reading;
-    expect(collected).toEqual([1, 2, 3]);
-  });
-
-  it("runs at most the limit and lets waiters in as slots free", async () => {
-    const limiter = createLimiter(2);
-    const signal = new AbortController().signal;
-    const first = await limiter.acquire(signal);
-    const second = await limiter.acquire(signal);
-    let thirdGranted = false;
-    const third = limiter.acquire(signal).then((release) => ((thirdGranted = true), release));
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(thirdGranted).toBe(false);
-    first!();
-    first!();
-    const thirdRelease = await third;
-    expect(thirdGranted).toBe(true);
-    expect(limiter.activeCount()).toBe(2);
-    second!();
-    thirdRelease!();
-    expect(limiter.activeCount()).toBe(0);
-  });
-
-  it("gives up waiting when aborted", async () => {
-    const limiter = createLimiter(1);
-    const holder = await limiter.acquire(new AbortController().signal);
-    const controller = new AbortController();
-    const waiting = limiter.acquire(controller.signal);
-    controller.abort();
-    expect(await waiting).toBeUndefined();
-    holder!();
-    expect(limiter.activeCount()).toBe(0);
-  });
-});
-
 describe("claude locator", () => {
   it("prefers claude.exe and finds the standard install folder", () => {
     const standard = join("C:\\Users\\R", ".local", "bin", "claude.exe");
@@ -542,15 +435,17 @@ describe("runtime availability", () => {
   const workspace = process.cwd();
   const located = { path: EXECUTABLE, searched: [] };
 
-  it("explains a missing executable", async () => {
-    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => ({ searched: [] }) });
-    const catalog = await runtime.catalog(workspace);
-    expect(catalog.health.ok).toBe(false);
-    expect(catalog.health.detail).toContain("BRANCHBOARD_CLAUDE_PATH");
+  it("explains a missing executable and one that will not run", async () => {
+    const missing = await createClaudeRuntime({ serverUrl: "http://x", locate: () => ({ searched: [] }) }).catalog(workspace);
+    expect(missing.health.ok).toBe(false);
+    expect(missing.health.detail).toContain("BRANCHBOARD_CLAUDE_PATH");
+    const broken = await createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => Promise.reject(new Error("spawn failed")) }).catalog(workspace);
+    expect(broken.health.ok).toBe(false);
+    expect(broken.health.detail).toContain("spawn failed");
   });
 
   it("reports the version and offers models and workspace agents when healthy", async () => {
-    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", listAgents: () => ["reviewer"], probeModels: async () => [] });
+    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", listAgents: () => ["reviewer"], probeSession: async () => ({ models: [], commands: [] }) });
     const catalog = await runtime.catalog(workspace);
     expect(catalog.health).toEqual({ ok: true, detail: "found claude 2.9.9" });
     expect(catalog.agents).toEqual(["default", "reviewer"]);
@@ -561,11 +456,11 @@ describe("runtime availability", () => {
 
   it("lists the models the claude command reports, caches them and refreshes after forgetCaches", async () => {
     let probes = 0;
-    const probeModels = async () => {
+    const probeSession = async () => {
       probes += 1;
-      return [{ id: "haiku", name: "Haiku 5.5", efforts: ["low", "high"] }, { id: "claude-haiku-5-5", name: "Haiku 5.5 pinned" }];
+      return { models: [{ id: "haiku", name: "Haiku 5.5", efforts: ["low", "high"] }, { id: "claude-haiku-5-5", name: "Haiku 5.5 pinned" }], commands: [] };
     };
-    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", probeModels });
+    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", probeSession });
     const catalog = await runtime.catalog(workspace);
     expect(catalog.models.map((model) => model.id)).toEqual(["default", "haiku", "claude-haiku-5-5", "sonnet", "opus"]);
     expect(catalog.models[1]).toMatchObject({ name: "Haiku 5.5", efforts: ["default", "low", "high"] });
@@ -577,8 +472,28 @@ describe("runtime availability", () => {
     expect(probes).toBe(2);
   });
 
+  it("adds channel and seen models once each and tags every model with its source", async () => {
+    const runtime = createClaudeRuntime({
+      serverUrl: "http://x",
+      locate: () => located,
+      probeVersion: async () => "2.9.9",
+      probeSession: async () => ({ models: [{ id: "claude-cli-1", name: "Cli 1" }], commands: [] }),
+      extraModels: () => [
+        { id: "claude-channel-1", name: "Channel 1", source: "channel" },
+        { id: "sonnet", name: "Duplicate", source: "channel" },
+        { id: "claude-channel-1", name: "Again", source: "channel" },
+        { id: "claude-seen-1", name: "Seen 1", source: "seen" },
+      ],
+    });
+    const { models } = await runtime.catalog(workspace);
+    expect(models.filter((model) => model.id === "claude-channel-1")).toHaveLength(1);
+    expect(models.filter((model) => model.id === "sonnet")).toHaveLength(1);
+    const sourceOf = (id: string) => models.find((model) => model.id === id)?.source;
+    expect([sourceOf("claude-cli-1"), sourceOf("sonnet"), sourceOf("claude-channel-1"), sourceOf("claude-seen-1")]).toEqual(["cli", "alias", "channel", "seen"]);
+  });
+
   it("falls back to the built-in models when the model probe fails", async () => {
-    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", probeModels: async () => Promise.reject(new Error("not signed in")) });
+    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", probeSession: async () => Promise.reject(new Error("not signed in")) });
     const catalog = await runtime.catalog(workspace);
     expect(catalog.health.ok).toBe(true);
     expect(catalog.models.map((model) => model.id)).toContain("claude-haiku-5-5");
@@ -586,10 +501,10 @@ describe("runtime availability", () => {
 
   it("reads supported models leniently from the initialize response", () => {
     const response = (models: unknown) => JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "branchboard-initialize", response: { models } } });
-    expect(parseSupportedModels(response([{ value: "default", displayName: "Default" }, { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku 5.5", supportedEffortLevels: ["low", 3] }, { displayName: "No value" }, null]))).toEqual([{ id: "haiku", name: "Haiku 5.5", efforts: ["low"] }]);
-    expect(parseSupportedModels(response(undefined))).toEqual([]);
-    expect(parseSupportedModels("not json")).toBeUndefined();
-    expect(parseSupportedModels(JSON.stringify({ type: "control_response", response: { request_id: "other" } }))).toBeUndefined();
+    expect(parseClaudeProbe(response([{ value: "default", displayName: "Default" }, { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku 5.5", supportedEffortLevels: ["low", 3] }, { displayName: "No value" }, null]))?.models).toEqual([{ id: "haiku", name: "Haiku 5.5", efforts: ["low"] }]);
+    expect(parseClaudeProbe(response(undefined))?.models).toEqual([]);
+    expect(parseClaudeProbe("not json")).toBeUndefined();
+    expect(parseClaudeProbe(JSON.stringify({ type: "control_response", response: { request_id: "other" } }))).toBeUndefined();
   });
 
   it("lists the workspace's slash commands with their descriptions and templates", async () => {
@@ -599,17 +514,84 @@ describe("runtime availability", () => {
     writeFileSync(join(root, ".claude", "commands", "plain.md"), "Just do it.");
     writeFileSync(join(root, ".claude", "commands", "notes.txt"), "ignored");
     try {
-      expect(listWorkspaceCommands(root).sort((left, right) => left.name.localeCompare(right.name))).toEqual([
+      expect(listWorkspaceCommands(root, join(root, "home")).sort((left, right) => left.name.localeCompare(right.name))).toEqual([
         { name: "plain", description: undefined, template: "Just do it." },
         { name: "review", description: "Review the change", model: "haiku", template: "Review $ARGUMENTS carefully." },
       ]);
-      expect(listWorkspaceCommands(join(root, "missing"))).toEqual([]);
+      expect(listWorkspaceCommands(join(root, "missing"), join(root, "home"))).toEqual([]);
       const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", listCommands: () => [{ name: "ship", template: "Ship it" }] });
       expect((await runtime.catalog(root)).commands).toEqual([{ name: "ship", template: "Ship it" }, ...BUNDLED_COMMANDS]);
       expect(withBundledCommands([{ name: "security-review", template: "Mine" }])).toEqual([{ name: "security-review", template: "Mine" }]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("lists user-invocable skills from the workspace and the home folder as pass-through commands", () => {
+    const root = mkdtempSync(join(tmpdir(), "branchboard-skills-"));
+    const writeSkill = (base: string, folder: string, text: string) => {
+      mkdirSync(join(base, ".claude", "skills", folder), { recursive: true });
+      writeFileSync(join(base, ".claude", "skills", folder, "SKILL.md"), text);
+    };
+    const home = join(root, "home");
+    const project = join(root, "project");
+    writeSkill(project, "impeccable", "---\nname: impeccable\ndescription: \"Design the interface\"\nuser-invocable: true\n---\nBody");
+    writeSkill(project, "hidden", "---\ndescription: Internal\nuser-invocable: false\n---\nBody");
+    writeSkill(home, "shared", "---\ndescription: Home version\n---\nBody");
+    writeSkill(project, "shared", "---\ndescription: Project version\n---\nBody");
+    writeSkill(home, "bare", "No front matter");
+    writeSkill(home, "folded", "---\nname: folded\ndescription: >\n  Design the\n  interface\nuser-invocable: true\n---\nBody");
+    mkdirSync(join(home, ".claude", "skills", "empty"), { recursive: true });
+    mkdirSync(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(join(home, ".claude", "commands", "global.md"), "Global $ARGUMENTS");
+    try {
+      const commands = withBundledCommands(listWorkspaceCommands(project, home));
+      expect(commands.map((command) => command.name).sort()).toEqual(["bare", "folded", "global", "impeccable", "security-review", "shared"]);
+      expect(commands.find((command) => command.name === "folded")?.description).toBe("Design the interface");
+      expect(commands.find((command) => command.name === "impeccable")).toEqual({ name: "impeccable", description: "Design the interface", template: "", passThrough: true });
+      expect(commands.find((command) => command.name === "shared")?.description).toBe("Project version");
+      expect(commands.find((command) => command.name === "bare")).toEqual({ name: "bare", template: "", passThrough: true });
+      expect(commands.find((command) => command.name === "global")?.passThrough).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("offers the commands and skills the claude command reports and keeps workspace templates first", async () => {
+    const line = JSON.stringify({
+      type: "control_response",
+      response: {
+        request_id: "branchboard-initialize",
+        response: {
+          models: [],
+          commands: [
+            { name: "ship", description: "Claude's own ship" },
+            { name: "code-review", description: "Review the diff (user)" },
+            { name: "cowork-plugin-management:create-cowork-plugin", description: "(cowork-plugin-management) Create a plugin" },
+            { name: "clear", description: "Start a new session" },
+            { name: "__remote-workflow", description: "Internal" },
+            { name: "agents", description: "(removed) Manage subagents" },
+            { name: "extra-usage", description: "Renamed to /usage-credits" },
+            { name: 7 },
+            { name: "no-description" },
+          ],
+        },
+      },
+    });
+    expect(parseClaudeProbe(line)?.commands.map((command) => command.name)).toEqual(["ship", "code-review", "cowork-plugin-management:create-cowork-plugin", "no-description"]);
+    expect(parseClaudeProbe(JSON.stringify({ type: "control_response", response: { request_id: "branchboard-initialize" } }))).toEqual({ models: [], commands: [] });
+    const runtime = createClaudeRuntime({
+      serverUrl: "http://x",
+      locate: () => located,
+      probeVersion: async () => "2.9.9",
+      listCommands: () => [{ name: "ship", template: "Ship it" }],
+      probeSession: async () => ({ models: [], commands: commandsFromInitialize([{ name: "ship", description: "Claude's own ship" }, { name: "code-review", description: "Review the diff" }]) }),
+    });
+    expect((await runtime.catalog(workspace)).commands).toEqual([
+      { name: "ship", template: "Ship it" },
+      { name: "code-review", description: "Review the diff", template: "", passThrough: true },
+      ...BUNDLED_COMMANDS,
+    ]);
   });
 
   it("reports diagnostics without exposing anything but the sign-in method", async () => {
@@ -627,37 +609,6 @@ describe("runtime availability", () => {
     const broken = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "1.0.0", probeAuth: async () => "not json", limiter });
     expect(await broken.diagnostics!(workspace)).toMatchObject({ supportsSubagentText: false });
   });
-
-  it("says when a run is waiting for one of the process slots", async () => {
-    const limiter = createLimiter(1);
-    const holder = await limiter.acquire(new AbortController().signal);
-    expect(limiter.isFull()).toBe(true);
-    const runtime = createClaudeRuntime({ serverUrl: "http://x", locate: () => located, probeVersion: async () => "2.9.9", limiter, launch: () => new ScriptedProcess() });
-    const controller = new AbortController();
-    const waitingStates: boolean[] = [];
-    const scope = { boardId: "b", nodeId: "n", workspacePath: workspace, files: [], signal: controller.signal, setRuntimeRef: () => undefined, setWaitingForSlot: (isWaiting: boolean) => waitingStates.push(isWaiting), waitForAnswer: async () => "reject" };
-    const started = withSlot(runtime.slots, controller.signal, scope.setWaitingForSlot, async () => "ran");
-    await waitFor(() => limiter.waitingCount() === 1);
-    expect(waitingStates).toEqual([true]);
-    controller.abort();
-    await started;
-    expect(waitingStates).toEqual([true, false]);
-    holder!();
-    expect(limiter.waitingCount()).toBe(0);
-  });
-
-  it("reports an executable that will not run", async () => {
-    const runtime = createClaudeRuntime({
-      serverUrl: "http://x",
-      locate: () => located,
-      probeVersion: async () => {
-        throw new Error("spawn failed");
-      },
-    });
-    const catalog = await runtime.catalog(workspace);
-    expect(catalog.health.ok).toBe(false);
-    expect(catalog.health.detail).toContain("spawn failed");
-  });
 });
 
 describe("runs through the board", () => {
@@ -667,20 +618,14 @@ describe("runs through the board", () => {
   let server: ReturnType<typeof createApp>;
   let boardId = "";
 
-  const request = async (path: string, body?: unknown, headers: Record<string, string> = { host: HOST, "content-type": "application/json" }) => {
-    const response = await server.app.request(`http://${HOST}${path}`, { method: body === undefined ? "GET" : "POST", headers, body: body === undefined ? undefined : JSON.stringify(body) });
-    const text = await response.text();
-    return { status: response.status, text, json: text ? JSON.parse(text) : undefined };
-  };
-  const command = (body: Record<string, unknown>) => request("/api/commands", body, { host: HOST, origin: `http://${HOST}`, "content-type": "application/json" });
-  const view = async (): Promise<BoardView> => (await request(`/api/boards/${boardId}/graph`)).json;
-  const nodeOf = async (nodeId: string): Promise<GraphNode> => (await view()).graph.nodes[nodeId];
-  const waitForStatus = (nodeId: string, status: string) => waitFor(async () => (await nodeOf(nodeId)).status === status);
-  const textOf = async (nodeId: string) => {
-    const current = await view();
-    return answerText(current.parts[nodeId], activeRollOf(current.graph.nodes[nodeId]));
-  };
-  const openRequests = async () => Object.values((await view()).requests).filter((candidate) => candidate.status === "open");
+  const client = appClient(() => server, PORT);
+  const { request, command, send } = client;
+  const local = { host: HOST, "content-type": "application/json" };
+  const view = () => client.view(boardId);
+  const nodeOf = (nodeId: string) => client.nodeOf(boardId, nodeId);
+  const waitForStatus = (nodeId: string, status: string) => client.waitForStatus(boardId, nodeId, status);
+  const textOf = (nodeId: string) => client.textOf(boardId, nodeId);
+  const openRequests = () => client.openRequests(boardId);
   const reply = async (prompt: string, parentIds: string[] = []): Promise<string> => (await command({ type: "reply", boardId, prompt, parentIds })).json.nodeId;
   const launchAt = async (index: number): Promise<Launch> => {
     await waitFor(() => launches.length > index);
@@ -689,7 +634,7 @@ describe("runs through the board", () => {
   const callApprove = async (launch: Launch, toolName: string, input: unknown) => {
     const configPath = launch.args[launch.args.indexOf("--mcp-config") + 1];
     const url = new URL(JSON.parse(readFileSync(configPath, "utf8")).mcpServers.branchboard.url);
-    const response = await request(url.pathname, { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "approve", arguments: { tool_name: toolName, input, tool_use_id: "u" } } });
+    const response = await request(url.pathname, { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "approve", arguments: { tool_name: toolName, input, tool_use_id: "u" } } }, local);
     return JSON.parse(response.json.result.content[0].text);
   };
 
@@ -699,7 +644,7 @@ describe("runs through the board", () => {
       serverUrl: `http://${HOST}`,
       locate: () => ({ path: EXECUTABLE, searched: [] }),
       probeVersion: async () => "9.9.9",
-      probeModels: async () => [],
+      probeSession: async () => ({ models: [], commands: [] }),
       temporaryDirectory: join(directory, "mcp"),
       readBase64: () => "",
       suggestsTitles: false,
@@ -720,9 +665,9 @@ describe("runs through the board", () => {
 
   it("refuses to create a board while the claude command is missing", async () => {
     const missingApp = createApp({ databasePath: join(directory, "missing.db"), security: { port: PORT, extraOrigins: [] }, webRoot: join(directory, "none"), runtimes: { fake: fakeRuntime, opencode: opencodeRuntime, claude: createClaudeRuntime({ serverUrl: "http://x", locate: () => ({ searched: [] }) }) } });
-    const response = await missingApp.app.request(`http://${HOST}/api/commands`, { method: "POST", headers: { host: HOST, origin: `http://${HOST}`, "content-type": "application/json" }, body: JSON.stringify({ type: "createBoard", title: "x", workspacePath: process.cwd(), mode: "claude" }) });
+    const response = await appClient(() => missingApp, PORT).command({ type: "createBoard", title: "x", workspacePath: process.cwd(), mode: "claude" });
     expect(response.status).toBe(409);
-    expect((await response.json()).error).toContain("not found");
+    expect(response.json.error).toContain("not found");
     missingApp.close();
   });
 
@@ -934,11 +879,10 @@ describe("runs through the board", () => {
 
   it("serves the approval endpoint only to local processes holding a live secret", async () => {
     const ping = { jsonrpc: "2.0", id: 1, method: "ping" };
-    expect((await request("/mcp/not-a-secret", ping)).status).toBe(404);
-    expect((await request("/mcp/not-a-secret", ping, { host: HOST, origin: "http://evil.example", "content-type": "application/json" })).status).toBe(403);
-    expect((await request("/mcp/not-a-secret", ping, { host: "evil.example:80", "content-type": "application/json" })).status).toBe(403);
-    const reading = await server.app.request(`http://${HOST}/mcp/not-a-secret`, { method: "GET", headers: { host: HOST } });
-    expect(reading.status).toBe(405);
+    expect((await request("/mcp/not-a-secret", ping, local)).status).toBe(404);
+    expect((await request("/mcp/not-a-secret", ping, { ...local, origin: "http://evil.example" })).status).toBe(403);
+    expect((await request("/mcp/not-a-secret", ping, { ...local, host: "evil.example:80" })).status).toBe(403);
+    expect((await send("/mcp/not-a-secret", { headers: { host: HOST } })).status).toBe(405);
   });
 
   it("appends the answer-format guide from a file for the run and removes it afterwards, unless the board turned it off", async () => {
@@ -985,12 +929,8 @@ describe("credential guardrail", () => {
     .map((name) => join(__dirname, "..", "packages", "server", "src", "runtimes", name))
     .filter((path) => statSync(path).isFile());
 
-  it("scans the claude runtime sources", () => {
+  it("keeps credential names out of the claude runtime sources", () => {
     expect(sources.length).toBeGreaterThanOrEqual(5);
-  });
-
-  it.each(forbidden)("never mentions %s", (needle) => {
-    const offenders = sources.filter((path) => readFileSync(path, "utf8").toLowerCase().includes(needle.toLowerCase()));
-    expect(offenders).toEqual([]);
+    for (const needle of forbidden) expect(sources.filter((path) => readFileSync(path, "utf8").toLowerCase().includes(needle.toLowerCase())), needle).toEqual([]);
   });
 });

@@ -222,6 +222,25 @@ const clearOfOtherNodes = (graph: BoardGraph, wanted: { x: number; y: number }, 
   return { x: wanted.x, y };
 };
 
+const NEAREST_BLOCKERS_CONSIDERED = 40;
+
+const nearestFreeSpot = (graph: BoardGraph, wanted: { x: number; y: number }, size: PlacementSize): { x: number; y: number } => {
+  const others = liveNodes(graph);
+  const isFree = (spot: { x: number; y: number }) => !others.some((node) => overlapsWithClearance({ ...spot, ...size }, node));
+  if (isFree(wanted)) return wanted;
+  const distanceToWanted = (spot: { x: number; y: number }) => Math.hypot(spot.x - wanted.x, spot.y - wanted.y);
+  const closest = others
+    .map((node) => ({ node, distance: Math.hypot(node.x + node.w / 2 - wanted.x - size.w / 2, node.y + node.h / 2 - wanted.y - size.h / 2) }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, NEAREST_BLOCKERS_CONSIDERED)
+    .map(({ node }) => node);
+  const xs = closest.flatMap((node) => [node.x + node.w + NODE_GAP, node.x - size.w - NODE_GAP]);
+  const ys = closest.flatMap((node) => [node.y + node.h + NODE_ROW_GAP, node.y - size.h - NODE_ROW_GAP]);
+  const candidates = [...xs.map((x) => ({ x, y: wanted.y })), ...ys.map((y) => ({ x: wanted.x, y })), ...xs.flatMap((x) => ys.map((y) => ({ x, y })))];
+  const nearest = candidates.sort((a, b) => distanceToWanted(a) - distanceToWanted(b)).find(isFree);
+  return nearest ?? clearOfOtherNodes(graph, wanted, size);
+};
+
 const placeNextToAnchor = (graph: BoardGraph, anchor: PlacementAnchor, size: PlacementSize): { x: number; y: number } | undefined => {
   const origin = graph.nodes[anchor.id];
   if (!origin || origin.deleted) return undefined;
@@ -255,7 +274,7 @@ export const placeNode = (graph: BoardGraph, parentIds: Id[], size: PlacementSiz
   const anchored = anchor && placeNextToAnchor(graph, anchor, size);
   if (anchored) return anchored;
   const parent = graph.nodes[parentIds[0]];
-  if (!parent && near) return clearOfOtherNodes(graph, { x: Math.round(near.x - size.w / 2), y: Math.round(near.y - size.h / 2) }, size);
+  if (!parent && near) return nearestFreeSpot(graph, { x: Math.round(near.x - size.w / 2), y: Math.round(near.y - size.h / 2) }, size);
   if (!parent) {
     const nodes = liveNodes(graph);
     if (nodes.length === 0) return { x: 0, y: 0 };

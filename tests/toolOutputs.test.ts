@@ -2,20 +2,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildNodeClipboard, INLINE_TOOL_OUTPUT_CHARS, type BoardView, type Part } from "@branchboard/core";
+import { buildNodeClipboard, INLINE_TOOL_OUTPUT_CHARS, type Part } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
+import { appClient } from "./support";
 
 const PORT = 47131;
-const trusted = { host: `127.0.0.1:${PORT}`, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/json" };
 const directory = mkdtempSync(join(tmpdir(), "branchboard-tool-outputs-"));
 const server = createApp({ databasePath: join(directory, "test.db"), security: { port: PORT, extraOrigins: [] }, webRoot: join(directory, "none") });
 
-const request = async (path: string, body?: unknown) => {
-  const response = await server.app.request(`http://127.0.0.1:${PORT}${path}`, { method: body ? "POST" : "GET", headers: trusted, body: body ? JSON.stringify(body) : undefined });
-  return { status: response.status, json: await response.json() };
-};
-
-const view = async (): Promise<BoardView> => (await request(`/api/boards/${boardId}/graph`)).json;
+const client = appClient(() => server, PORT);
+const { request } = client;
+const view = () => client.view(boardId);
 
 const toolPartOf = (parts: Part[] | undefined): Part => parts!.find((part) => part.type === "tool")!;
 
@@ -27,7 +24,7 @@ let nodeId = "";
 beforeAll(async () => {
   boardId = (await request("/api/commands", { type: "createBoard", title: "Tools", workspacePath: process.cwd(), mode: "fake" })).json.id;
   nodeId = (await request("/api/commands", { type: "reply", boardId, prompt: "hello" })).json.nodeId;
-  while ((await view()).graph.nodes[nodeId].status !== "done") await new Promise((resolve) => setTimeout(resolve, 25));
+  await client.waitForStatus(boardId, nodeId, "done");
   server.boards.recordRunEvent(boardId, nodeId, { type: "tool.started", partKey: "long", tool: "bash", description: "ls", input: { command: "ls" } });
   server.boards.recordRunEvent(boardId, nodeId, { type: "tool.done", partKey: "long", output: LONG_OUTPUT, isError: false });
   server.boards.flushParts(boardId, nodeId);

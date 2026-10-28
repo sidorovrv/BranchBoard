@@ -20,7 +20,7 @@ import {
 } from "@xyflow/react";
 import { ancestorEdgeIds, hiddenByCollapse, liveEdges, liveNodes, satelliteLinksOf, wireSidesByEdge } from "@branchboard/core";
 import { copySelectedNodes, isTextField, pasteCopiedNodes } from "../nodeClipboard";
-import { commitGraphEdit, createAndFocus, handleSidePointer, isBoundSidePointer, isFocusClick } from "../actions";
+import { actionById, commitGraphEdit, createAndFocus, handleSidePointer, isBoundSidePointer, isFocusClick } from "../actions";
 import { createFileNode, droppedFiles, hasFiles, pastedFiles, pasteFiles } from "../attachments";
 import { AlignmentGuides, useDragSnap } from "../dragSnap";
 import { useGraphWithLiveMoves, useLiveMoves } from "../liveMoves";
@@ -31,9 +31,10 @@ import { useKeyboardPan } from "../keyboardPan";
 import { loadViewport, saveViewport } from "../savedViewport";
 import { hasScrollableAncestor, wheelPixels } from "../wheelPan";
 import { boardId, registerViewCentre, sendBoardCommand, useBoard } from "../store";
+import { useContextMenu, type MenuItem } from "./ContextMenu";
 import { MiniMapNode } from "./MiniMapNode";
 import { NodeShell } from "./NodeShell";
-import { WireEdge } from "./WireEdge";
+import { WireConnectionLine, WireEdge } from "./WireEdge";
 
 const nodeTypes = { bb: NodeShell };
 const edgeTypes = { wire: WireEdge };
@@ -42,6 +43,7 @@ const FOCUS_DURATION_MS = 400;
 const FOCUS_MAX_ZOOM = 1;
 const FOCUS_WAIT_FRAMES = 30;
 const MAX_ZOOM = 12;
+const PANE_MENU_ACTIONS = ["newChat", "newNote", "newCode", "newFile"];
 
 const ZoomReadout = () => {
   const { zoom } = useViewport();
@@ -290,9 +292,7 @@ export const Canvas = () => {
       const files = pastedFiles(event);
       if (files.length > 0) {
         event.preventDefault();
-        const { defaultNodeWidth, defaultNodeHeight } = useSettings.getState().settings;
-        const centre = viewportCentre();
-        void pasteFiles(files, { x: centre.x - defaultNodeWidth / 2, y: centre.y - defaultNodeHeight / 2 });
+        void pasteFiles(files, viewportCentre());
         return;
       }
       void pasteCopiedNodes(event, lastPointer.current ?? viewportCentre());
@@ -333,9 +333,7 @@ export const Canvas = () => {
     (event: DragEvent) => {
       if (!hasFiles(event)) return;
       event.preventDefault();
-      const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-      const { defaultNodeWidth, defaultNodeHeight } = useSettings.getState().settings;
-      void createFileNode(droppedFiles(event), { x: position.x - defaultNodeWidth / 2, y: position.y - defaultNodeHeight / 2 });
+      void createFileNode(droppedFiles(event), screenToFlowPosition({ x: event.clientX, y: event.clientY }));
     },
     [screenToFlowPosition],
   );
@@ -343,14 +341,21 @@ export const Canvas = () => {
   const onBoardDoubleClick = useCallback(
     (event: React.MouseEvent) => {
       if (!(event.target as HTMLElement).classList.contains("react-flow__pane")) return;
-      const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-      const { defaultNodeWidth, defaultNodeHeight } = useSettings.getState().settings;
-      void sendBoardCommand<{ nodeId: string }>({ type: "reply", parentIds: [], position: { x: position.x - defaultNodeWidth / 2, y: position.y - defaultNodeHeight / 2 } }).then(
-        (created) => created && useBoard.getState().requestFocus(created.nodeId),
-      );
+      void actionById("newChat").run({ at: screenToFlowPosition({ x: event.clientX, y: event.clientY }) });
     },
     [screenToFlowPosition],
   );
+
+  const paneMenu = useContextMenu();
+
+  const onPaneContextMenu = (event: MouseEvent | React.MouseEvent) => {
+    const at = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    const items = PANE_MENU_ACTIONS.map((id): MenuItem => {
+      const action = actionById(id);
+      return { label: action.label({}), icons: action.icons({}), run: () => void action.run({ at }) };
+    });
+    paneMenu.open(items)(event as React.MouseEvent);
+  };
 
   const onConnectEnd: OnConnectEnd = useCallback(
     (event, state) => {
@@ -403,8 +408,10 @@ export const Canvas = () => {
       edges={edges}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
+      connectionLineComponent={WireConnectionLine}
       onNodesChange={onNodesChange}
       onDoubleClick={onBoardDoubleClick}
+      onPaneContextMenu={onPaneContextMenu}
       onMouseMove={(event) => (lastPointer.current = screenToFlowPosition({ x: event.clientX, y: event.clientY }))}
       onDragOver={onBoardDragOver}
       onDrop={onBoardDrop}
@@ -437,6 +444,7 @@ export const Canvas = () => {
       <Controls showInteractive={false} />
       <ZoomReadout />
       <AlignmentGuides guides={guides} />
+      {paneMenu.element}
     </ReactFlow>
   );
 };

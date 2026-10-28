@@ -82,15 +82,11 @@ describe("OpenCode 2 runtime panels", () => {
     expect(byId.stats.rows.map((row) => row.id)).toContain("p/m");
     expect(JSON.stringify(panels)).not.toContain("sk-secret-value");
     expect(requests.every((request) => request.method === "GET")).toBe(true);
+    const enginePanels = await runtimeOf(scriptedPool(respond).pool, { id: "openai", providerIds: ["openai"] }).panels!("/work");
+    expect(enginePanels.map((panel) => panel.id)).not.toContain("signIn");
   });
 
-  it("leaves out sign-in rows for the engine, which takes its keys from Branchboard", async () => {
-    const { pool } = scriptedPool(respond);
-    const panels = await runtimeOf(pool, { id: "openai", providerIds: ["openai"] }).panels!("/work");
-    expect(panels.map((panel) => panel.id)).not.toContain("signIn");
-  });
-
-  it("turns a row action into the matching engine request", async () => {
+  it("turns a row action into the matching engine request and refuses an action the row does not offer", async () => {
     const { pool, requests } = scriptedPool(respond);
     const runtime = runtimeOf(pool);
     await runtime.panelAction!("mcp", "docs", "disconnect", "/work");
@@ -106,12 +102,8 @@ describe("OpenCode 2 runtime panels", () => {
       { method: "POST", path: "/api/plugin/update", body: { targets: ["pkg-two@1"] } },
       { method: "DELETE", path: "/api/shell/sh_new", body: undefined },
     ]);
-  });
-
-  it("refuses an action the row does not offer", async () => {
-    const { pool } = scriptedPool(respond);
-    await expect(runtimeOf(pool).panelAction!("plugins", "builtin.one", "update", "/work")).rejects.toThrow("Unknown action");
-    await expect(runtimeOf(pool).panelAction!("mcp", "missing", "connect", "/work")).rejects.toThrow("Unknown action");
+    await expect(runtime.panelAction!("plugins", "builtin.one", "update", "/work")).rejects.toThrow("Unknown action");
+    await expect(runtime.panelAction!("mcp", "missing", "connect", "/work")).rejects.toThrow("Unknown action");
   });
 });
 
@@ -218,15 +210,18 @@ describe("OpenCode 2 stream resume", () => {
     ]);
   });
 
-  it("reports a failure when the session ended without succeeding", async () => {
-    const { pool, server } = scriptedPool((request) => {
-      if (request.path === "/api/event") return eventStream([]);
-      if (request.path === "/api/session/active") return { data: {} };
-      if (request.path === "/api/session/ses_1/context") return { data: [{ id: "msg_i", type: "idle", outcome: "failed" }] };
-      return {};
-    });
-    const events = await collect(runtimeOf(pool).execute(handleOf(server), "hi", scopeOf()));
-    expect(events.map((event) => event.type)).toEqual(["failure"]);
+  it("reports a failure when the session ended without succeeding or left the active list without an outcome", async () => {
+    const endedWith = async (context: object[]) => {
+      const { pool, server } = scriptedPool((request) => {
+        if (request.path === "/api/event") return eventStream([]);
+        if (request.path === "/api/session/active") return { data: {} };
+        if (request.path === "/api/session/ses_1/context") return { data: context };
+        return {};
+      });
+      return collect(runtimeOf(pool).execute(handleOf(server), "hi", scopeOf()));
+    };
+    expect((await endedWith([{ id: "msg_i", type: "idle", outcome: "failed" }])).map((event) => event.type)).toEqual(["failure"]);
+    expect(await endedWith([{ id: "msg_u", type: "user", text: "hi" }])).toEqual([{ type: "failure", message: expect.stringContaining("The connection closed before the answer finished"), recovery: undefined }]);
   });
 
   it("opens a new event stream when the session is still running", async () => {
@@ -266,16 +261,14 @@ describe("OpenCode 2 files", () => {
 });
 
 describe("OpenCode 2 session calls", () => {
-  it("tests a connection with one generate call on the first listed model", async () => {
-    const { pool, requests } = scriptedPool((request) => (request.path === "/api/model" ? { data: [{ providerID: "openai", modelID: "gpt", enabled: true }] } : { data: { text: "ok" } }));
+  it("tests a connection with one generate call on the first listed model and reports the message of a failed test", async () => {
+    const models = { data: [{ providerID: "openai", modelID: "gpt", enabled: true }] };
+    const { pool, requests } = scriptedPool((request) => (request.path === "/api/model" ? models : { data: { text: "ok" } }));
     expect(await runtimeOf(pool).testConnection!()).toEqual({ ok: true, detail: "Connected. 1 models available." });
     const generate = requests.find((request) => request.path === "/api/experimental/generate")!;
     expect(generate.body.model).toEqual({ id: "gpt", providerID: "openai" });
-  });
-
-  it("reports the message of a failed connection test", async () => {
-    const { pool } = scriptedPool((request) => (request.path === "/api/model" ? { data: [{ providerID: "openai", modelID: "gpt", enabled: true }] } : new Response(JSON.stringify({ message: "Invalid key" }), { status: 503 })));
-    const result = await runtimeOf(pool).testConnection!();
+    const failing = scriptedPool((request) => (request.path === "/api/model" ? models : new Response(JSON.stringify({ message: "Invalid key" }), { status: 503 })));
+    const result = await runtimeOf(failing.pool).testConnection!();
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("Invalid key");
   });
@@ -284,17 +277,6 @@ describe("OpenCode 2 session calls", () => {
     const { pool, requests } = scriptedPool(() => ({}));
     await runtimeOf(pool).dropSession!({ sessionId: "ses_old" }, "/work");
     expect(requests).toEqual([{ method: "DELETE", path: "/api/session/ses_old", body: undefined }]);
-  });
-
-  it("fails the run when the stream ends and the session is gone from the active list without an outcome", async () => {
-    const { pool, server } = scriptedPool((request) => {
-      if (request.path === "/api/event") return eventStream([]);
-      if (request.path === "/api/session/active") return { data: {} };
-      if (request.path === "/api/session/ses_1/context") return { data: [{ id: "msg_u", type: "user", text: "hi" }] };
-      return {};
-    });
-    const events = await collect(runtimeOf(pool).execute(handleOf(server), "hi", scopeOf()));
-    expect(events).toEqual([{ type: "failure", message: expect.stringContaining("The connection closed before the answer finished"), recovery: undefined }]);
   });
 });
 

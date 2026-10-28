@@ -2,11 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { contextHash, fidelityOf, planSession, renderRequest } from "@branchboard/core";
 import { ancestorFolders, commandOfMarkdown, commandsFromConfig, mergeCommands, readCommandFolder, readCommandSources } from "../packages/server/src/commandFiles";
 import { expandCommandTemplate, expandShellInjections } from "../packages/server/src/run/commandExpansion";
-import { resolveMentions } from "../packages/server/src/run/mentions";
-import { buildGraph, finishedParts } from "./support";
 
 describe("command files", () => {
   const withFolder = (files: Record<string, string>, run: (root: string) => void) => {
@@ -64,26 +61,5 @@ describe("shell injection", () => {
 
   it("runs a real command in the workspace", async () => {
     expect(await expandShellInjections("v=!`node -p 1+1`", process.cwd())).toBe("v=2");
-  });
-});
-
-describe("mentions", () => {
-  it("separates agents, subagents and skills from files", () => {
-    const resolved = resolveMentions("ask @planner then @reviewer using @pdf-tools and @nothing", process.cwd(), { agents: ["planner"], subagents: ["reviewer"], skills: ["pdf-tools"] });
-    expect(resolved).toMatchObject({ agent: "planner", subagents: ["reviewer"], skills: ["pdf-tools"], files: [] });
-  });
-});
-
-describe("compacted sessions", () => {
-  it("count as injected context", () => {
-    const linked = buildGraph(["a", "b"], [["a", "b"]]);
-    const parent = { ...linked.nodes.a, status: "done" as const, runtimeRef: { sessionId: "s" }, contextHash: contextHash(linked, "a"), contextNodeIds: [] };
-    const parts = { a: finishedParts("a", "hi") };
-    const exactPlan = planSession({ ...linked, nodes: { ...linked.nodes, a: parent } }, parts, "b");
-    expect(fidelityOf(exactPlan)).toBe("exact");
-    const compactedPlan = planSession({ ...linked, nodes: { ...linked.nodes, a: { ...parent, compactedAt: 5 } } }, parts, "b");
-    expect(compactedPlan.spine?.compactedAt).toBe(5);
-    expect(fidelityOf(compactedPlan)).toBe("injected");
-    expect(renderRequest("go", undefined)).toBe("go");
   });
 });

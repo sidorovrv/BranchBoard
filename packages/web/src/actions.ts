@@ -24,7 +24,10 @@ import { sendBoardCommand, useBoard } from "./store";
 
 export interface ActionContext {
   node?: GraphNode;
+  at?: { x: number; y: number };
 }
+
+const placedAt = ({ at }: ActionContext) => (at ? { nearPosition: at } : {});
 
 export interface Action {
   id: string;
@@ -233,7 +236,7 @@ export const actions: Action[] = [
     icons: () => ["plus"],
     scope: "global",
     isAvailable: () => true,
-    run: () => createAndFocus({ type: "reply", parentIds: [] }),
+    run: (context) => createAndFocus({ type: "reply", parentIds: [], ...placedAt(context) }),
   },
   {
     id: "newNote",
@@ -241,7 +244,7 @@ export const actions: Action[] = [
     icons: () => ["note"],
     scope: "global",
     isAvailable: () => true,
-    run: () => createAndFocus({ type: "note" }),
+    run: (context) => createAndFocus({ type: "note", ...placedAt(context) }),
   },
   {
     id: "newCode",
@@ -249,7 +252,7 @@ export const actions: Action[] = [
     icons: () => ["code"],
     scope: "global",
     isAvailable: () => true,
-    run: () => createAndFocus({ type: "code" }),
+    run: (context) => createAndFocus({ type: "code", ...placedAt(context) }),
   },
   {
     id: "newFile",
@@ -257,7 +260,7 @@ export const actions: Action[] = [
     icons: () => ["paperclip"],
     scope: "global",
     isAvailable: () => true,
-    run: async () => createFileNode(await pickFiles()),
+    run: async ({ at }) => createFileNode(await pickFiles(), at),
   },
   {
     id: "reader",

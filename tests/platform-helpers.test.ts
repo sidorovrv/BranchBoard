@@ -32,12 +32,9 @@ describe("locateOpencode", () => {
     expect(located.path).toBe(onPath);
   });
 
-  it("honours the explicit override and reports a bad one", () => {
+  it("honours the explicit override, reports a bad one and lists what it searched when nothing is found", () => {
     expect(locateOpencode(environment({ env: { BRANCHBOARD_OPENCODE_PATH: "D:\\oc.cmd" } }, ["D:\\oc.cmd"])).path).toBe("D:\\oc.cmd");
     expect(locateOpencode(environment({ env: { BRANCHBOARD_OPENCODE_PATH: "D:\\gone.cmd" } }, [])).path).toBeUndefined();
-  });
-
-  it("lists what it searched when nothing is found", () => {
     const located = locateOpencode(environment({}, []));
     expect(located.path).toBeUndefined();
     expect(located.searched.length).toBeGreaterThan(1);

@@ -34,12 +34,13 @@ import {
 } from "./claudeStream";
 import { approvalOpened, doneEvents, questionOpened, streamEventMap, subagentEventMap, usageEvents, type LooseNative } from "./commonEvents";
 import type { Location } from "./executableLocator";
-import { probeSupportedModels, type SupportedModel } from "./claudeSupportedModels";
+import { probeClaudeSession, type ClaudeProbe, type SupportedModel } from "./claudeSupportedModels";
 import { launchProcess, readOutput, type LaunchProcess, type ProcessExit } from "./spawnProcess";
 import { createStreamRuntime } from "./streamRuntime";
 
 export const MAX_CONCURRENT_PROCESSES = 2;
 export const TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const PROBE_CACHE_MS = 60_000;
 
 const SESSION_GONE_PATTERN = /no conversation found/i;
 const DIAGNOSTICS_PERMISSION_TOOL = `mcp__${APPROVAL_SERVER_NAME}__${DIAGNOSTICS_TOOL_NAME}`;
@@ -85,7 +86,7 @@ export interface ClaudeDependencies {
   probeAuth: (executable: string, workspacePath: string) => Promise<string>;
   environment: () => NodeJS.ProcessEnv;
   suggestsTitles: boolean;
-  probeModels: (executable: string, workspacePath: string) => Promise<SupportedModel[]>;
+  probeSession: (executable: string, workspacePath: string) => Promise<ClaudeProbe>;
   extraModels: () => (SupportedModel & { source?: ModelSource })[];
   noteModelSeen: (modelId: string) => void;
   diagnostics?: Diagnostics;
@@ -160,23 +161,28 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     probeAuth: (executable, workspacePath) => readOutput(executable, ["auth", "status"], { cwd: workspacePath, env: process.env }),
     environment: () => ({ ...process.env, MCP_TOOL_TIMEOUT: String(TOOL_TIMEOUT_MS), CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: String(TOOL_TIMEOUT_MS) }),
     suggestsTitles: true,
-    probeModels: (executable, workspacePath) => probeSupportedModels(dependencies.launch, executable, workspacePath, dependencies.environment()),
+    probeSession: (executable, workspacePath) => probeClaudeSession(dependencies.launch, executable, workspacePath, dependencies.environment()),
     extraModels: () => [],
     noteModelSeen: () => undefined,
     ...overrides,
   };
   const approvalMemory = createApprovalMemory();
-  const supportedModels = new Map<string, SupportedModel[]>();
+  const probes = new Map<string, { probe: Promise<ClaudeProbe>; at: number }>();
 
-  const supportedModelsOf = async (executable: string, workspacePath: string): Promise<SupportedModel[]> => {
-    const cached = supportedModels.get(executable);
-    if (cached) return cached;
-    const probed = await dependencies.probeModels(executable, workspacePath).catch((error) => {
-      log.debug("claude", `Could not read the model list from claude: ${error instanceof Error ? error.message : String(error)}`);
-      return [];
+  const probeOf = (executable: string, workspacePath: string): Promise<ClaudeProbe> => {
+    const key = `${executable}|${workspacePath}`;
+    const cached = probes.get(key);
+    if (cached && Date.now() - cached.at < PROBE_CACHE_MS) return cached.probe;
+    const probe = dependencies.probeSession(executable, workspacePath).catch((error): ClaudeProbe => {
+      log.debug("claude", `Could not read the model and command lists from claude: ${error instanceof Error ? error.message : String(error)}`);
+      return { models: [], commands: [] };
     });
-    if (probed.length > 0) supportedModels.set(executable, probed);
-    return probed;
+    const entry = { probe, at: Date.now() };
+    probes.set(key, entry);
+    void probe.then((probed) => {
+      if (probed.models.length === 0 && probes.get(key) === entry) probes.delete(key);
+    });
+    return probe;
   };
 
   const modelsOf = (supported: SupportedModel[]): CatalogModel[] => {
@@ -193,8 +199,9 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     if (!located.path) return { agents: [], models: [], health: { ok: false, detail: `The claude command was not found. Install it, sign in once by running claude yourself, or set ${CLAUDE_PATH_VARIABLE} to its full path.` } };
     try {
       const version = await dependencies.probeVersion(located.path, workspacePath);
-      const models = modelsOf(await supportedModelsOf(located.path, workspacePath));
-      return { agents, models, meters: ["limits"], permissionModes: PERMISSION_MODES, commands: withBundledCommands(dependencies.listCommands(workspacePath)), defaultPermissionMode: DEFAULT_PERMISSION_MODE, health: { ok: true, detail: `found claude ${version}` } };
+      const probe = await probeOf(located.path, workspacePath);
+      const models = modelsOf(probe.models);
+      return { agents, models, meters: ["limits"], permissionModes: PERMISSION_MODES, commands: withBundledCommands(dependencies.listCommands(workspacePath), probe.commands), defaultPermissionMode: DEFAULT_PERMISSION_MODE, health: { ok: true, detail: `found claude ${version}` } };
     } catch (error) {
       return { agents: [], models: [], health: { ok: false, detail: `The claude command at ${located.path} did not run: ${error instanceof Error ? error.message : String(error)}` } };
     }
@@ -302,5 +309,5 @@ export const createClaudeRuntime = (overrides: Pick<ClaudeDependencies, "serverU
     return { executable: located.path, supportsSubagentText: supportsSubagentTextFlag, ...auth };
   };
 
-  return { id: "claude", editsFiles: true, canSuggestTitles: dependencies.suggestsTitles, slots: dependencies.limiter, generateText, diagnostics, catalog, forgetCaches: () => (supportedModels.clear(), subagentTextSupport.clear()), openSession, execute, eventMap, answerRequest: async () => undefined };
+  return { id: "claude", editsFiles: true, canSuggestTitles: dependencies.suggestsTitles, slots: dependencies.limiter, generateText, diagnostics, catalog, forgetCaches: () => (probes.clear(),subagentTextSupport.clear()), openSession, execute, eventMap, answerRequest: async () => undefined };
 };

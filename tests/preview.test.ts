@@ -57,7 +57,7 @@ describe("HTML preview", () => {
     expect(codeViewOfPath("app.ts")).toBe("source");
   });
 
-  it("serves the page and its relative assets without the cookie, frameable only by the app", async () => {
+  it("serves the page and its relative assets read-only without the cookie, frameable only by the app", async () => {
     const url = await previewUrlOf(boardA, "site/index.html");
     expect(url).toMatch(/^\/preview\/[0-9a-f]{48}\/site\/index\.html$/);
     const page = await send(url, undefined, anonymous);
@@ -71,12 +71,7 @@ describe("HTML preview", () => {
     expect(stylesheet.headers.get("content-type")).toContain("text/css");
     expect((await send(url.replace("index.html", "app.js"), undefined, anonymous)).headers.get("content-type")).toContain("text/javascript");
     expect((await send("/api/boards", undefined, anonymous)).status).toBe(401);
-  });
-
-  it("is read-only", async () => {
-    const url = await previewUrlOf(boardA, "site/index.html");
-    const response = await server.app.request(`http://${HOST}${url}`, { method: "POST", headers: anonymous, body: "x" });
-    expect(response.status).toBe(405);
+    expect((await server.app.request(`http://${HOST}${url}`, { method: "POST", headers: anonymous, body: "x" })).status).toBe(405);
   });
 
   it("refuses a wrong secret, other folders, traversal, secrets files and other types", async () => {
@@ -109,7 +104,7 @@ describe("HTML preview", () => {
     expect((await send(`/preview/${secretB}/site/index.html`, undefined, anonymous)).status).toBe(404);
   });
 
-  it("refuses to preview a snapshot, a non-html file or a sensitive path", async () => {
+  it("refuses to preview a file that is not html", async () => {
     const markdown = JSON.parse((await command({ type: "extractFile", boardId: boardA, path: "readme.md" })).text).nodeId;
     expect((await command({ type: "openPreview", boardId: boardA, nodeId: markdown })).status).toBe(409);
   });
@@ -128,11 +123,12 @@ describe("HTML preview", () => {
 });
 
 describe("capability store", () => {
-  it("expires after the ttl, slides on use and reuses the secret per subject", () => {
+  it("expires after the ttl, slides on use, reuses the secret per subject and keeps kinds apart", () => {
     let now = 1000;
     const store = createCapabilityStore(() => now);
     const secret = store.issue("preview", "board", 100);
     expect(store.issue("preview", "board", 100)).toBe(secret);
+    expect(store.resolve("mcp", secret)).toBeUndefined();
     now += 60;
     expect(store.resolve("preview", secret)).toBe("board");
     now += 60;
@@ -140,11 +136,5 @@ describe("capability store", () => {
     now += 101;
     expect(store.resolve("preview", secret)).toBeUndefined();
     expect(store.size()).toBe(0);
-  });
-
-  it("keeps kinds apart", () => {
-    const store = createCapabilityStore();
-    const secret = store.issue("preview", "board", 1000);
-    expect(store.resolve("mcp", secret)).toBeUndefined();
   });
 });

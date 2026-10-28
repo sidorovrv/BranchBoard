@@ -266,12 +266,13 @@ export const createBoardService = (repository: Repository, hub: Hub, usage?: Usa
     new Set([...states.values()].flatMap((state) => [...state.undoStack, ...state.redoStack]).flatMap(sessionIdsInPatch));
 
   const viewJsonOf = (boardId: Id): string => {
-    const cached = viewJsons.get(boardId);
-    if (cached) return cached;
-    const { board, graph, parts, requests } = stateOf(boardId);
-    const json = JSON.stringify({ board, graph, parts: withoutLongToolOutputs(parts), requests, savedAt: board.updatedAt });
-    viewJsons.set(boardId, json);
-    return json;
+    let json = viewJsons.get(boardId);
+    if (!json) {
+      const { board, graph, parts, requests } = stateOf(boardId);
+      json = JSON.stringify({ board, graph, parts: withoutLongToolOutputs(parts), requests, savedAt: board.updatedAt });
+      viewJsons.set(boardId, json);
+    }
+    return `${json.slice(0, -1)},"seq":${hub.seqOf(boardId)}}`;
   };
 
   const toolOutputOf = (boardId: Id, nodeId: Id, partId: Id): unknown => stateOf(boardId).parts[nodeId]?.find((part) => part.id === partId)?.meta?.output;

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { listenForEscape } from "../escape";
+import { IconRow, type IconName } from "../kit/Icons";
 
 const EDGE_GAP = 8;
 
@@ -13,6 +14,7 @@ export const keepNativeMenuOnTextFields = (event: MouseEvent) => {
 
 export interface MenuItem {
   label: string;
+  icons?: IconName[];
   isDanger?: boolean;
   run: () => void;
 }
@@ -50,9 +52,12 @@ const ContextMenu = ({ menu, onClose }: { menu: OpenMenu; onClose: () => void })
     };
   }, [onClose]);
   return createPortal(
-    <div ref={element} className="context-menu" style={{ left: position.x, top: position.y }} onMouseDown={(event) => event.stopPropagation()} onContextMenu={keepNativeMenuOnTextFields}>
+    <div ref={element} className="context-menu" style={{ left: position.x, top: position.y }} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => (event.stopPropagation(), keepNativeMenuOnTextFields(event))}>
       {menu.items.map((item, index) => (
-        <button key={index} className={item.isDanger ? "danger" : ""} onClick={() => (onClose(), item.run())}>{item.label}</button>
+        <button key={index} className={item.isDanger ? "danger" : ""} onClick={() => (onClose(), item.run())}>
+          {item.icons && <IconRow names={item.icons} />}
+          {item.label}
+        </button>
       ))}
     </div>,
     document.body,

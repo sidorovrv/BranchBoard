@@ -41,15 +41,11 @@ describe("alignment snapping", () => {
 });
 
 describe("resize snapping", () => {
-  it("snaps the dragged right and bottom edges to other nodes' edges", () => {
+  it("snaps the dragged right and bottom edges to other nodes' edges and ignores an axis that is not being resized", () => {
     const result = snapResizedEdges({ x: 600, y: 0, w: 395, h: 305 }, { x: 1, y: 1 }, [{ x: 0, y: 0, w: 1000, h: 300 }], 8);
     expect([result.dw, result.dh]).toEqual([5, -5]);
     expect(result.guides).toHaveLength(2);
-  });
-
-  it("ignores an axis that is not being resized", () => {
-    const result = snapResizedEdges({ x: 600, y: 0, w: 395, h: 305 }, { x: 1, y: 0 }, [{ x: 0, y: 0, w: 1000, h: 300 }], 8);
-    expect(result.dh).toBe(0);
+    expect(snapResizedEdges({ x: 600, y: 0, w: 395, h: 305 }, { x: 1, y: 0 }, [{ x: 0, y: 0, w: 1000, h: 300 }], 8).dh).toBe(0);
   });
 
   it("snaps the dragged top and left edges", () => {

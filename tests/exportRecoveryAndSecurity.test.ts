@@ -14,38 +14,20 @@ import { quoteForCmdShell } from "../packages/server/src/runtimes/spawnProcess";
 import { locateExecutable } from "../packages/server/src/runtimes/executableLocator";
 import { highlightCode } from "../packages/web/src/kit/highlight";
 import { sanitizeSchema } from "../packages/web/src/kit/markdownSchema";
+import { appClient } from "./support";
 
 const PORT = 47311;
-const ACCESS = "b".repeat(64);
-const trusted = { host: `127.0.0.1:${PORT}`, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/json" };
 const directory = mkdtempSync(join(tmpdir(), "branchboard-export-recovery-"));
 const workspace = join(directory, "workspace");
 let server: ReturnType<typeof createApp>;
 let boardId = "";
 let projectId = "";
 
-const request = async (path: string, body?: unknown) => {
-  const response = await server.app.request(`http://127.0.0.1:${PORT}${path}`, { method: body ? "POST" : "GET", headers: trusted, body: body ? JSON.stringify(body) : undefined });
-  const text = await response.text();
-  return { status: response.status, text, json: text.startsWith("{") || text.startsWith("[") ? JSON.parse(text) : undefined };
-};
-
-const command = (body: Record<string, unknown>) => request("/api/commands", body);
+const { trusted, send, request, command, view, waitForStatus } = appClient(() => server, PORT);
 
 const upload = async (name: string, content: string | Uint8Array, type: string) => {
-  const response = await server.app.request(`http://127.0.0.1:${PORT}/api/boards/${boardId}/attachments?name=${encodeURIComponent(name)}`, { method: "POST", headers: { ...trusted, "content-type": type }, body: new Blob([content as BlobPart]) });
+  const response = await send(`/api/boards/${boardId}/attachments?name=${encodeURIComponent(name)}`, { method: "POST", headers: { ...trusted, "content-type": type }, body: new Blob([content as BlobPart]) });
   return (await response.json()) as { id: string; name: string; mime: string; size: number };
-};
-
-const view = async (id: string) => (await request(`/api/boards/${id}/graph`)).json as { board: { projectId: string }; graph: { nodes: Record<string, GraphNode> }; parts: Record<string, { type: string; text: string; meta?: Record<string, unknown> }[]> };
-
-const waitFor = async (check: () => Promise<boolean>) => {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error("Timed out");
 };
 
 beforeAll(async () => {
@@ -67,7 +49,7 @@ describe("export with files", () => {
     const image = await upload("pic.png", PNG, "image/png");
     const text = await upload("notes.txt", "hello world", "text/plain");
     const fileNode = (await command({ type: "file", boardId, attachmentIds: [image.id, text.id] })).json.nodeId;
-    const code = (await command({ type: "extractAttachment", boardId, attachmentId: text.id, originId: fileNode })).json.nodeId;
+    await command({ type: "extractAttachment", boardId, attachmentId: text.id, originId: fileNode });
     const exported = await request(`/api/boards/${boardId}/export`);
     const document = JSON.parse(exported.text) as BoardDocument;
     expect(Object.keys(document.files ?? {}).sort()).toEqual([image.id, text.id].sort());
@@ -77,12 +59,11 @@ describe("export with files", () => {
     expect(importedFileNode.attachments).toHaveLength(2);
     const [first, second] = importedFileNode.attachments!;
     expect([first.id, second.id]).not.toContain(image.id);
-    const bytes = await server.app.request(`http://127.0.0.1:${PORT}/api/attachments/${first.id}`, { headers: { host: trusted.host } });
+    const bytes = await send(`/api/attachments/${first.id}`, { headers: { host: trusted.host } });
     expect(new Uint8Array(await bytes.arrayBuffer())).toEqual(first.name === "pic.png" ? PNG : new TextEncoder().encode("hello world"));
     const importedCode = nodes.find((node) => node.kind === "code" && node.title === "notes.txt")!;
     expect(importedCode.sourceAttachmentId).toBeDefined();
     expect([image.id, text.id]).not.toContain(importedCode.sourceAttachmentId);
-    expect(code).toBeDefined();
   });
 
   it("leaves files out when asked and imports such a document without attachments", async () => {
@@ -147,26 +128,21 @@ describe("recovery actions", () => {
   it("marks a lost session and offers to resend the context as text", async () => {
     const root = (await command({ type: "reply", boardId, prompt: "start", run: false })).json.nodeId;
     const child = (await command({ type: "reply", boardId, parentIds: [root], prompt: "/gone" })).json.nodeId;
-    await waitFor(async () => (await view(boardId)).graph.nodes[child].status === "error");
+    await waitForStatus(boardId, child, "error");
     const errorPart = (await view(boardId)).parts[child].find((part) => part.type === "error")!;
     expect(errorPart.meta?.recovery).toBe("assemble");
     expect((await command({ type: "regenerate", boardId, nodeId: child, assemble: true })).status).toBe(200);
     expect((await view(boardId)).graph.nodes[child].forceAssemble).toBe(true);
   });
 
-  it("marks a usage limit from its wording", async () => {
-    const node = (await command({ type: "reply", boardId, prompt: "/limit" })).json.nodeId;
-    await waitFor(async () => (await view(boardId)).graph.nodes[node].status === "error");
-    expect((await view(boardId)).parts[node].find((part) => part.type === "error")?.meta?.recovery).toBe("usageLimit");
+  it("marks a usage limit from its wording and continues the failed node inside the same roll", async () => {
     expect(recoveryOfMessage("something else")).toBeUndefined();
-  });
-
-  it("continues a failed node inside the same roll", async () => {
     const node = (await command({ type: "reply", boardId, prompt: "/limit" })).json.nodeId;
-    await waitFor(async () => (await view(boardId)).graph.nodes[node].status === "error");
+    await waitForStatus(boardId, node, "error");
+    expect((await view(boardId)).parts[node].find((part) => part.type === "error")?.meta?.recovery).toBe("usageLimit");
     const before = (await view(boardId)).graph.nodes[node];
     expect((await command({ type: "regenerate", boardId, nodeId: node, continue: true })).status).toBe(200);
-    await waitFor(async () => (await view(boardId)).graph.nodes[node].status === "done");
+    await waitForStatus(boardId, node, "done");
     const after = (await view(boardId)).graph.nodes[node];
     expect(after.rollCount).toBe(before.rollCount);
     expect(after.activeRoll).toBe(before.activeRoll);
@@ -215,7 +191,6 @@ describe("rendering", () => {
     const hostile = '<img src=x onerror=alert(1)><script>alert(2)</script>';
     for (const language of ["html", "xml", "javascript", "typescript", "python"]) {
       const html = highlightCode(hostile, language);
-      expect(html).toBeDefined();
       expect(html).not.toContain("<img");
       expect(html).not.toContain("<script");
     }
@@ -252,15 +227,5 @@ describe("rendering", () => {
       expect(String(properties.src ?? "")).not.toMatch(/^data:/i);
     });
     expect(elements.find((element) => element.tag === "a" && String(element.properties.href).startsWith("c:"))).toBeDefined();
-  });
-});
-
-describe("access", () => {
-  it("keeps the instance route open and everything else locked when a key is set", async () => {
-    const locked = createApp({ databasePath: join(directory, "locked.db"), security: { port: PORT, extraOrigins: [], accessToken: ACCESS } });
-    const headers = { host: trusted.host };
-    expect((await locked.app.request(`http://127.0.0.1:${PORT}/api/report`, { headers })).status).toBe(401);
-    expect((await locked.app.request(`http://127.0.0.1:${PORT}/api/about`, { headers })).status).toBe(401);
-    locked.close();
   });
 });

@@ -210,7 +210,7 @@ export const createApp = (options: AppOptions) => {
   app.get(INSTANCE_PATH,(honoContext) => honoContext.json({ app: "branchboard", dataDirId: dataDirectoryId(dirname(options.databasePath)) }));
   app.get("/api/boards", (honoContext) => honoContext.json(boards.listBoards()));
   app.get("/api/limits", (honoContext) => honoContext.json(limits.current(honoContext.req.query("runtime") ?? "claude") ?? null));
-  app.get("/api/costs", (honoContext) => honoContext.json(costs.lastHour()));
+  app.get("/api/costs", (honoContext) => honoContext.json(costs.windows()));
   app.get("/api/runs",(honoContext) => honoContext.json(runs.listRuns()));
   app.get("/api/runs/finished", (honoContext) => honoContext.json(runs.listFinishedRuns()));
   app.get("/api/projects", (honoContext) => honoContext.json(boards.listProjects()));

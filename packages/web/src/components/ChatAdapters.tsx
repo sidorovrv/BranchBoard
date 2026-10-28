@@ -11,9 +11,13 @@ import { AttachmentList } from "./AttachmentList";
 const answerRequest: AnswerRequest = (requestId, answer, message) =>
   sendBoardCommand({ type: "answerRequest", requestId, answer, ...(message ? { message } : {}) });
 
-export const NodeRequests = ({ nodeId }: { nodeId: string }) => {
+export const NodeRequests = ({ nodeIds }: { nodeIds: string[] }) => {
   const requests = useBoard((state) => state.view.requests);
-  const open = useMemo(() => Object.values(requests).filter((request) => request.status === "open" && request.nodeId === nodeId), [requests, nodeId]);
+  const idKey = nodeIds.join(",");
+  const open = useMemo(() => {
+    const ids = new Set(idKey.split(","));
+    return Object.values(requests).filter((request) => request.status === "open" && ids.has(request.nodeId));
+  }, [requests, idKey]);
   return <Requests requests={open} onAnswer={answerRequest} />;
 };
 

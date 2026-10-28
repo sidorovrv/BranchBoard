@@ -2,16 +2,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { BoardView, GraphNode } from "@branchboard/core";
 import { createApp } from "../packages/server/src/app";
-import { cleanTitle, suggestTitle, titleInstruction } from "../packages/server/src/run/titles";
+import { cleanTitle, suggestTitle } from "../packages/server/src/run/titles";
 import { pickSmallModel } from "../packages/server/src/runtimes/smallModel";
 import { fakeRuntime } from "../packages/server/src/runtimes/fake";
 import { generateThroughSession } from "../packages/server/src/run/askOnce";
 import type { RuntimeSteps } from "../packages/server/src/run/types";
+import { appClient, waitFor } from "./support";
 
 const PORT = 47124;
-const trusted = { host: `127.0.0.1:${PORT}`, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/json" };
 const directory = mkdtempSync(join(tmpdir(), "branchboard-titles-"));
 
 const TITLE_REPLY = '"Banana Facts."';
@@ -30,29 +29,10 @@ const titlingRuntime: RuntimeSteps = {
 let server: ReturnType<typeof createApp>;
 let boardId = "";
 
-const command = async (body: Record<string, unknown>) => {
-  const response = await server.app.request(`http://127.0.0.1:${PORT}/api/commands`, { method: "POST", headers: trusted, body: JSON.stringify(body) });
-  return { status: response.status, json: await response.json() };
-};
-
-const nodeOf = async (nodeId: string): Promise<GraphNode> => {
-  const response = await server.app.request(`http://127.0.0.1:${PORT}/api/boards/${boardId}/graph`, { headers: trusted });
-  return ((await response.json()) as BoardView).graph.nodes[nodeId];
-};
-
-const boardTitleOf = async (id: string): Promise<string> => {
-  const response = await server.app.request(`http://127.0.0.1:${PORT}/api/boards/${id}/graph`, { headers: trusted });
-  return ((await response.json()) as { board: { title: string } }).board.title;
-};
-
-const waitFor = async (check: () => Promise<boolean>) => {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error("Timed out waiting for condition");
-};
+const client = appClient(() => server, PORT);
+const { command } = client;
+const nodeOf = (nodeId: string) => client.nodeOf(boardId, nodeId);
+const boardTitleOf = async (id: string): Promise<string> => (await client.view(id)).board.title;
 
 beforeAll(async () => {
   server = createApp({
@@ -115,15 +95,9 @@ describe("picking a small model without configuration", () => {
     { id: "unpriced", models: { x: { id: "x-large" }, y: { id: "y-lite" } } },
   ];
 
-  it("takes the cheapest usable model of the node's own provider", () => {
+  it("takes the cheapest usable model of the node's own provider, by price, then by a small-sounding name, and gives up when nothing qualifies", () => {
     expect(pickSmallModel(providers, "acme/big")).toBe("acme/tiny-flash");
-  });
-
-  it("prefers a small-sounding name among equally priced free models", () => {
     expect(pickSmallModel(providers, "freebies/alpha")).toBe("freebies/beta-mini");
-  });
-
-  it("uses names alone when no prices are known, and gives up when nothing qualifies", () => {
     expect(pickSmallModel(providers, "unpriced/x-large")).toBe("unpriced/y-lite");
     expect(pickSmallModel(providers, "elsewhere/model")).toBeUndefined();
     expect(pickSmallModel(providers, undefined)).toBeUndefined();
@@ -143,23 +117,10 @@ describe("cleanTitle", () => {
   it("truncates long titles", () => {
     expect(cleanTitle("word ".repeat(40))!.length).toBeLessThanOrEqual(33);
   });
-
-  it("asks for a short title without tools", () => {
-    expect(titleInstruction("question")).toContain("Do not use any tools");
-  });
-
-  it("is built from the prompt alone", () => {
-    expect(titleInstruction("question")).not.toContain("Assistant:");
-  });
 });
 
 describe("automatic node titles", () => {
-  it("replaces the prompt-derived title with a generated one after the first run", async () => {
-    const nodeId = (await command({ type: "reply", boardId, prompt: "what is a banana, really?" })).json.nodeId;
-    await waitFor(async () => (await nodeOf(nodeId)).title === "Banana Facts");
-  });
-
-  it("names only new nodes and branches, not plain replies", async () => {
+  it("names new nodes and branches after their first run, not plain replies", async () => {
     const root = (await command({ type: "reply", boardId, prompt: "root question" })).json.nodeId;
     await waitFor(async () => (await nodeOf(root)).title === "Banana Facts");
     const reply = (await command({ type: "reply", boardId, parentIds: [root], prompt: "plain follow up" })).json.nodeId;

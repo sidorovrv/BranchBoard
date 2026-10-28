@@ -26,7 +26,17 @@ export interface Usage {
   costUsd?: number;
 }
 
+export const COST_WINDOWS = [
+  { id: "hour", label: "Hour", unit: "h", ms: 60 * 60 * 1000 },
+  { id: "day", label: "Day", unit: "d", ms: 24 * 60 * 60 * 1000 },
+  { id: "week", label: "Week", unit: "w", ms: 7 * 24 * 60 * 60 * 1000 },
+  { id: "month", label: "Month", unit: "mo", ms: 30 * 24 * 60 * 60 * 1000 },
+] as const;
+
+export type CostWindowId = (typeof COST_WINDOWS)[number]["id"];
+
 export interface CostSummary {
+  id: CostWindowId;
   costUsd: number;
   runs: number;
   inputTokens: number;
@@ -264,6 +274,8 @@ export type BoardEvent =
   | { type: "request"; request: PendingRequest }
   | { type: "board"; board: Board }
   | { type: "saved"; at: number };
+
+export type SequencedBoardEvent = BoardEvent & { seq: number };
 
 export type TurnKind = NodeKind | "summary";
 

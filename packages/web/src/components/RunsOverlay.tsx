@@ -87,7 +87,7 @@ const RunRow = ({ run, now, onHide }: { run: RunInfo; now: number; onHide: (run:
   ];
   return (
     <li className={`run-row status-${run.status} ${isFinished ? "is-finished" : ""} ${isUnseen ? "is-unseen" : ""}`} onContextMenu={open(menu)}>
-      <button className="run-open" onClick={() => void goToRun(run)} title={`${where}\n${run.prompt}\n\nClick to go to the node. Right-click for more.`}>
+      <button className="run-open" onClick={() => void goToRun(run)} title={`${[statusLabelOf(run), where].filter(Boolean).join(" · ")}\n${run.prompt}\n\nClick to go to the node. Right-click for more.`}>
         <span className={`board-dot ${dotOf(run, isUnseen)}`} aria-hidden="true" />
         <span className="run-text">
           <span className="run-title">{run.title}</span>
@@ -121,7 +121,7 @@ const ScheduledRow = ({ job, now }: { job: ScheduledJob; now: number }) => {
   const menu: MenuItem[] = [{ label: "Unschedule", isDanger: true, run: () => cancelScheduledSend(job.nodeId) }];
   return (
     <li className="run-row status-scheduled" onContextMenu={open(menu)}>
-      <button className="run-open" onClick={() => void goToScheduledJob(job)} title={`${job.where}\n${job.prompt}\n\nRuns at ${new Date(job.at).toLocaleString()}. Click to go to the node. Right-click for more.`}>
+      <button className="run-open" onClick={() => void goToScheduledJob(job)} title={`${["Scheduled", job.where].filter(Boolean).join(" · ")}\n${job.prompt}\n\nRuns at ${new Date(job.at).toLocaleString()}. Click to go to the node. Right-click for more.`}>
         <span className="board-dot is-queued" aria-hidden="true" />
         <span className="run-text">
           <span className="run-title">{job.title}</span>
@@ -200,6 +200,7 @@ export const RunsOverlay = () => {
   const finishedRuns = useBoard((state) => state.finishedRuns);
   const seen = useSeenResults((state) => state.seen);
   const limit = useSettings((state) => state.settings.activeJobsShown);
+  const style = useSettings((state) => state.settings.activeJobsStyle);
   const scheduledAt = useScheduledSends((state) => state.runAt);
   const scheduledDetails = useScheduledSends((state) => state.details);
   const boards = useBoard((state) => state.boards);
@@ -237,7 +238,7 @@ export const RunsOverlay = () => {
   const summary = `${listedRuns.length} active ${listedRuns.length === 1 ? "job" : "jobs"}`;
   if (limit === 0) return null;
   return (
-    <section className={`runs-overlay ${isOpen ? "is-open" : ""}`} aria-label="Runs">
+    <section className={`runs-overlay ${isOpen ? "is-open" : ""} ${style === "mini" ? "is-mini" : ""}`} aria-label="Runs">
       <div className="runs-bar">
         <button className={`runs-head ${needsAnswer ? "needs-answer" : ""} ${listedRuns.length > 0 ? "is-working" : ""}`} onClick={() => setIsOpen(!isOpen)} aria-expanded={isOpen} title={unseenRuns.length > 0 ? `${unseenRuns.length} finished and not seen yet` : "Show or hide the jobs list"}>
           <span className="runs-chevron" aria-hidden="true">›</span>
@@ -255,11 +256,7 @@ export const RunsOverlay = () => {
           </>
         )}
       </div>
-      {isOpen && (
-        <>
-          <RunList runs={listedRuns} scheduled={scheduledJobs} finishedRuns={listedFinished} filter={filter} visibleRows={limit} now={now} onHide={hide} />
-        </>
-      )}
+      {isOpen && <RunList runs={listedRuns} scheduled={scheduledJobs} finishedRuns={listedFinished} filter={filter} visibleRows={limit} now={now} onHide={hide} />}
       {element}
     </section>
   );

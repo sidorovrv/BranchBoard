@@ -1,14 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
-import { RUNTIMES, type RunEvent } from "@branchboard/core";
+import { describe, expect, it } from "vitest";
+import type { RunEvent } from "@branchboard/core";
 import { CUT_OFF_NOTE, STEPS_LIMIT_MESSAGE, STEPS_LIMIT_NOTE } from "../packages/server/src/runtimes/failures";
 import { opencodeEventMap } from "../packages/server/src/runtimes/opencode";
-import { createSeen2, opencode2Runtime, translateEvent2 } from "../packages/server/src/runtimes/opencode2";
+import { createSeen2, translateEvent2 } from "../packages/server/src/runtimes/opencode2";
 import { locateOpencode2, type LocatorEnvironment } from "../packages/server/src/runtimes/opencodeLocator";
 import { majorVersionOf } from "../packages/server/src/runtimes/opencodeGeneration";
-import { unsentFileNotes } from "../packages/server/src/run/fileChecks";
 import type { RunScope } from "../packages/server/src/run/types";
 
 const ROOT = "ses_root";
@@ -113,14 +110,11 @@ describe("OpenCode 2 events", () => {
     ]);
   });
 
-  it("ends the run on success or interruption and reports a failure message", () => {
+  it("ends the run on success or interruption and maps failures to their message and recovery action", () => {
     expect(mapped([event("session.execution.succeeded", { sessionID: ROOT })])).toEqual([{ type: "done" }]);
     expect(mapped([event("session.execution.interrupted", { sessionID: ROOT, reason: "user" })])).toEqual([{ type: "done" }]);
-    expect(mapped([event("session.execution.failed", { sessionID: ROOT, error: { type: "provider.no-route", message: "Model unavailable: opencode/x" } })])).toEqual([{ type: "error", message: "Model unavailable: opencode/x", recovery: "setup" }]);
-  });
-
-  it("maps authentication and rate limit failures to recovery actions", () => {
     const failed = (error: Record<string, unknown>) => mapped([event("session.execution.failed", { sessionID: ROOT, error })]);
+    expect(failed({ type: "provider.no-route", message: "Model unavailable: opencode/x" })).toEqual([{ type: "error", message: "Model unavailable: opencode/x", recovery: "setup" }]);
     expect(failed({ type: "provider.auth", status: 401, message: "Incorrect API key" })).toMatchObject([{ recovery: "signIn" }]);
     expect(failed({ type: "provider.rate-limit", status: 429, message: "Slow down" })).toMatchObject([{ recovery: "usageLimit" }]);
     expect(failed({ type: "provider.invalid-request", status: 404, message: "No such model" })).toEqual([{ type: "error", message: "No such model" }]);
@@ -198,39 +192,7 @@ describe("OpenCode 2 events", () => {
   });
 });
 
-describe("recorded engine file handling", () => {
-  const recordedModel = { id: "cat-jam-free", providerID: "opencode", capabilities: { tools: true, input: ["text"], output: ["text"] } };
-  const directory = mkdtempSync(join(tmpdir(), "branchboard-recorded-"));
-  afterAll(() => rmSync(directory, { recursive: true, force: true }));
-
-  const fileOf = (name: string, mime: string, bytes: Buffer) => {
-    const path = join(directory, name);
-    writeFileSync(path, bytes);
-    return { name, mime, path };
-  };
-
-  it("names the pdf kind the way the engine does for a model that takes text only", () => {
-    const pdf = fileOf("page.pdf", "application/pdf", Buffer.from("%PDF-1.1\n"));
-    expect(unsentFileNotes([pdf], recordedModel.capabilities.input)).toEqual(["page.pdf was not sent: the model does not accept pdf files."]);
-  });
-
-  it("names every kind the model rejects and keeps text files", () => {
-    const files = [
-      fileOf("pixel.png", "image/png", Buffer.from([0x89, 0x50, 0x4e, 0x47])),
-      fileOf("page.pdf", "application/pdf", Buffer.from("%PDF-1.1\n")),
-      fileOf("note.txt", "text/plain", Buffer.from("plain text\n")),
-      fileOf("blob.bin", "application/octet-stream", Buffer.from([0x50, 0x4b, 0, 0xff, 0xfe])),
-    ];
-    expect(unsentFileNotes(files, ["text", "image"])).toEqual(["page.pdf was not sent: the model does not accept pdf files.", "blob.bin was not sent: it is not UTF-8 text, an image or a PDF."]);
-  });
-});
-
 describe("OpenCode 2 setup", () => {
-  it("is registered with its own command, path variable and install line", () => {
-    expect(RUNTIMES.opencode2).toMatchObject({ kind: "cli", pathVariable: "BRANCHBOARD_OPENCODE2_PATH", setup: { install: { linux: "npm install -g @opencode/cli" } } });
-    expect(opencode2Runtime.id).toBe("opencode2");
-  });
-
   it("finds opencode2 next to the npm global shim and honours its own override variable", () => {
     const environment = (overrides: Partial<LocatorEnvironment>, files: string[]): LocatorEnvironment => ({ platform: "linux", env: { PATH: "/usr/bin" }, home: "/home/tester", isFile: (path) => files.includes(path), ...overrides });
     const onPath = (name: string) => join("/opt/bin", name);

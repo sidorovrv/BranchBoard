@@ -18,6 +18,7 @@ import {
   thirdPartyNoticesUrl,
   updateCommand,
   isApiRuntime,
+  COST_WINDOWS,
   telemetryTiles,
   isDefaultBinding,
   isSidePointerButton,
@@ -420,8 +421,19 @@ const SECTIONS: BoardSettingsSection[] = [
     icon: "health",
     summary: "Contents of the top bar.",
     fields: [
-      { key: "showTopbarMeters", kind: "toggle", label: "Show limits and cost", description: "Show usage limits (Claude) or the cost of the last hour (OpenCode) next to the save status." },
+      { key: "showTopbarMeters", kind: "toggle", label: "Show limits and cost", description: "Show usage limits (Claude) or the cost of the chosen periods (OpenCode) next to the save status." },
+      { key: "costWindows", kind: "checklist", label: "OpenCode cost periods", description: "Periods whose cost is shown in the top bar. The cost includes runs that are still going.", options: COST_WINDOWS.map((window) => ({ value: window.id, label: window.label })) },
       { key: "activeJobsShown", kind: "number", label: "Active jobs shown", description: "Runs listed at once in the active jobs list. 0 hides the list.", min: 0, max: ACTIVE_JOBS_SHOWN_MAX, unit: "jobs" },
+      {
+        key: "activeJobsStyle",
+        kind: "choice",
+        label: "Active jobs style",
+        description: "Normal rows show the title, board and status on two lines. Mini is a narrow list with one line per job: status dot, title and run time. Hover a Mini row to see its status and board.",
+        options: [
+          { value: "normal", label: "Normal" },
+          { value: "mini", label: "Mini" },
+        ],
+      },
     ],
   },
   {

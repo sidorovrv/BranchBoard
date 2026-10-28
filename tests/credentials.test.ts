@@ -72,15 +72,9 @@ describe("where keys may be touched", () => {
   const serverSources = sourcesUnder(join(__dirname, "..", "packages", "server", "src"));
   const named = (needle: string) => serverSources.filter((path) => readFileSync(path, "utf8").includes(needle)).map((path) => path.replace(/\\/g, "/").split("/").at(-1));
 
-  it("keeps credentials.json inside credentials.ts", () => {
+  it("keeps credentials.json in the store, lets only the engine and the store read a key, never reads keys from the environment and keeps CLI runtimes away from the store", () => {
     expect(named("credentials.json")).toEqual(["credentials.ts"]);
-  });
-
-  it("lets only the engine and the store read a key", () => {
     expect(named("credentialOf(").sort()).toEqual(["credentials.ts", "flavor.ts"]);
-  });
-
-  it("never reads keys from the environment and keeps CLI runtimes away from the store", () => {
     ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"].forEach((needle) => expect(named(needle), needle).toEqual([]));
     expect(named("process.env")).not.toContain("credentials.ts");
     const cliRuntimes = serverSources.filter((path) => /runtimes[\\/](claude[A-Za-z]*|opencode)\.ts$/.test(path));

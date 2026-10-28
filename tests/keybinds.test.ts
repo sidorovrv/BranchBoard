@@ -4,27 +4,18 @@ import { combinedPanDirection, isTextAttachment, panDirectionOf, bindingProblem,
 const none = { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
 
 describe("keybinds", () => {
-  it("names a key press by modifiers in a fixed order", () => {
+  it("names a key press by modifiers in a fixed order and by the physical letter, and ignores a bare modifier press", () => {
     expect(keyBindingOf({ ...none, ctrlKey: true, shiftKey: true, key: "z", code: "KeyZ" })).toBe("Ctrl+Shift+Z");
     expect(keyBindingOf({ ...none, metaKey: true, key: "k", code: "KeyK" })).toBe("Ctrl+K");
-  });
-
-  it("uses the physical letter so other keyboard layouts match", () => {
     expect(keyBindingOf({ ...none, altKey: true, key: "т", code: "KeyN" })).toBe("Alt+N");
-  });
-
-  it("ignores a bare modifier press and names space and plus", () => {
     expect(keyBindingOf({ ...none, altKey: true, key: "Alt", code: "AltLeft" })).toBeUndefined();
     expect(keyBindingOf({ ...none, key: " ", code: "Space" })).toBe("Space");
     expect(keyBindingOf({ ...none, ctrlKey: true, key: "+" })).toBe("Ctrl+Plus");
   });
 
-  it("names a click", () => {
+  it("names clicks and the middle and side mouse buttons with or without modifiers, and ignores the right one", () => {
     expect(clickBindingOf({ ...none, altKey: true, button: 0 })).toBe("Alt+Click");
     expect(clickBindingOf({ ...none, altKey: true, shiftKey: true, button: 0 })).toBe("Alt+Shift+Click");
-  });
-
-  it("names the middle and side mouse buttons with or without modifiers, and ignores the right one", () => {
     expect(clickBindingOf({ ...none, button: 3 })).toBe("Mouse4");
     expect(clickBindingOf({ ...none, button: 4 })).toBe("Mouse5");
     expect(clickBindingOf({ ...none, ctrlKey: true, button: 1 })).toBe("Ctrl+MiddleClick");
@@ -102,8 +93,10 @@ describe("keyboard panning", () => {
     expect(Math.hypot(diagonal.x, diagonal.y)).toBeCloseTo(1);
     expect(combinedPanDirection("wasd", ["KeyA", "KeyD"])).toEqual({ x: 0, y: 0 });
   });
+});
 
-  it("recognises text attachments by name, type and size", () => {
+describe("text attachments", () => {
+  it("are recognised by name, type and size", () => {
     expect(isTextAttachment({ name: "a.ts", mime: "", size: 10 })).toBe(true);
     expect(isTextAttachment({ name: "a.bin", mime: "text/plain", size: 10 })).toBe(true);
     expect(isTextAttachment({ name: "a.pdf", mime: "application/pdf", size: 10 })).toBe(false);

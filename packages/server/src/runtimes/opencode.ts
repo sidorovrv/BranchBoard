@@ -149,9 +149,10 @@ async function* execute(handle: OpencodeHandle, input: string, scope: RunScope):
   const seen = createSeenState();
   const interrupts = interruptOnAbort(scope.signal, () => call(server, directory, `/session/${sessionId}/abort`, { method: "POST" }));
   try {
+    const model = isChosen(scope.model) ? scope.model : isChosen(scope.effort) ? await configuredModelOf(server, directory) : undefined;
     await call(server, directory, `/session/${sessionId}/prompt_async`, {
       method: "POST",
-      body: JSON.stringify({ agent: scope.agent, model: splitModel(scope.model), variant: isChosen(scope.effort) ? scope.effort : undefined, system: [scope.systemNote, scope.contextNote].filter(Boolean).join("\n\n") || undefined, parts: [{ type: "text", text: input }, ...scope.files.map((file) => ({ type: "file", mime: file.mime, filename: file.name, url: pathToFileURL(file.path).href }))] }),
+      body: JSON.stringify({ agent: scope.agent, model: splitModel(model), variant: isChosen(scope.effort) ? scope.effort : undefined, system: [scope.systemNote, scope.contextNote].filter(Boolean).join("\n\n") || undefined, parts: [{ type: "text", text: input }, ...scope.files.map((file) => ({ type: "file", mime: file.mime, filename: file.name, url: pathToFileURL(file.path).href }))] }),
     });
     interrupts.resendIfAborted();
     for await (const raw of serverSentEvents<OpencodeNative>(stream, scope.signal)) {
@@ -190,13 +191,19 @@ const effortsOf = (model: any): string[] | undefined => {
   return variants.length > 0 ? [UNSET_CHOICE, ...variants] : undefined;
 };
 
+const configuredModelOf = async (server: OpencodeServer, directory: string): Promise<string | undefined> => {
+  const config = await callJson(server, directory, "/config").catch(() => undefined);
+  return typeof config?.model === "string" && config.model.includes("/") ? config.model : undefined;
+};
+
 const catalog = async (workspacePath: string): Promise<Catalog> => {
   try {
     const server = await serverFor(workspacePath);
-    const [agents, providers, commandList] = await Promise.all([
+    const [agents, providers, commandList, defaultModel] = await Promise.all([
       callJson(server, workspacePath, "/agent"),
       callJson(server, workspacePath, "/config/providers"),
       callJson(server, workspacePath, "/command").catch(() => []),
+      configuredModelOf(server, workspacePath),
     ]);
     const commands: CatalogCommand[] = (Array.isArray(commandList) ? commandList : [])
       .filter((entry: any) => typeof entry?.name === "string" && typeof entry?.template === "string")
@@ -205,7 +212,7 @@ const catalog = async (workspacePath: string): Promise<Catalog> => {
       Object.values<any>(provider.models ?? {}).map((model) => ({ id: `${provider.id}/${model.id}`, name: model.name ?? model.id, provider: provider.name ?? provider.id, contextWindow: model.limit?.context, efforts: effortsOf(model) })),
     );
     const primaryAgents = (agents as any[]).filter((agent) => agent.mode !== "subagent" && !agent.hidden).map((agent) => agent.name as string);
-    return { agents: primaryAgents, models, commands, meters: ["cost"], health: { ok: true, detail: "connected to opencode serve" } };
+    return { agents: primaryAgents, models, commands, defaultModel, meters: ["cost"], health: { ok: true, detail: "connected to opencode serve" } };
   } catch (error) {
     log.error("opencode", `Catalog failed for ${workspacePath}`, error);
     return { agents: [], models: [], health: { ok: false, detail: error instanceof Error ? error.message : String(error) } };

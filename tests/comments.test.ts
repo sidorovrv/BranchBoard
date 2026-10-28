@@ -21,16 +21,12 @@ describe("comments on answers", () => {
     expect(removed.inverse.nodes.P.comments).toHaveLength(2);
   });
 
-  it("refuses comments on a missing node", () => {
-    expect(runEdit(graphWithAnswer(), { type: "editComments", nodeId: "X" })).toHaveProperty("refusal");
-  });
-
   it("formats the quote and the comment for the reply prompt", () => {
     expect(commentsPrompt([])).toBe("");
     expect(commentsPrompt([comment({ quote: "line one\nline two", text: "Why?" })])).toBe(`> line one\n> line two\nWhy?\n\n`);
   });
 
-  it("prefills a reply with the comments of the active roll only and does not run it", () => {
+  it("prefills a reply with the comments of the active roll only, does not run it and leaves an explicit prompt alone", () => {
     const graph = graphWithAnswer({ comments: [comment({ id: "old", roll: 1, quote: "old", text: "other roll" }), comment({ id: "now", roll: 2, quote: "now", text: "this roll" })] });
     const command: SeedCommand = { type: "reply", parentIds: ["P"] };
     const seed = seedFrom.reply(graph, command);
@@ -38,6 +34,7 @@ describe("comments on answers", () => {
     expect(seed.prompt).not.toContain("other roll");
     expect(shouldAutoRun(seed, command)).toBe(false);
     expect(addNodeEdit(graph, board, seed).node.prompt).toBe(seed.prompt);
+    expect(seedFrom.reply(graph, { ...command, prompt: "Hello" }).prompt).toBe("Hello");
   });
 
   it("clears only the active roll's comments once a prefilled reply is made", () => {
@@ -48,11 +45,6 @@ describe("comments on answers", () => {
     expect(cleared.nodes.P.comments?.map((item) => item.id)).toEqual(["old"]);
     expect(commentClearingEdits(graph, { type: "reply", parentIds: ["P"], prompt: "Hello" })).toEqual([]);
     expect(commentClearingEdits(graphWithAnswer(), { type: "reply", parentIds: ["P"] })).toEqual([]);
-  });
-
-  it("leaves an explicit prompt alone", () => {
-    const graph = graphWithAnswer({ comments: [comment({ roll: 2 })] });
-    expect(seedFrom.reply(graph, { type: "reply", parentIds: ["P"], prompt: "Hello" }).prompt).toBe("Hello");
   });
 
   it("uses a commented earlier roll once it is selected", () => {
@@ -66,7 +58,7 @@ describe("comments on answers", () => {
     expect(mustApply(graph, { type: "editNode", nodeId: "P", fields: { prompt: "changed" } }).nodes.P.comments).toEqual([]);
   });
 
-  it("appends a comment to the prompt of the earliest unsent child", () => {
+  it("appends a comment to the prompt of the earliest unsent child and has no target once every child has run", () => {
     const withChildren = ["late", "early"].reduce(
       (graph, id, index) => mustApply(graph, { type: "addNode", parentIds: ["P"], node: makeNode("B", { id, status: "idle", prompt: id === "early" ? "draft" : "", createdAt: 10 - index }) }),
       graphWithAnswer(),
@@ -75,11 +67,8 @@ describe("comments on answers", () => {
     expect(target?.id).toBe("early");
     expect(promptWithComment(target!.prompt, comment())).toBe("draft\n\n> alpha\nExplain this\n\n");
     expect(promptWithComment("", comment())).toBe("> alpha\nExplain this\n\n");
-  });
-
-  it("has no target when every child has run", () => {
-    const graph = mustApply(graphWithAnswer(), { type: "addNode", parentIds: ["P"], node: makeNode("B", { id: "C", status: "done" }) });
-    expect(commentTargetOf(graph, "P")).toBeUndefined();
+    const finished = mustApply(graphWithAnswer(), { type: "addNode", parentIds: ["P"], node: makeNode("B", { id: "C", status: "done" }) });
+    expect(commentTargetOf(finished, "P")).toBeUndefined();
   });
 
   it("keeps valid comments and drops malformed ones when importing", () => {

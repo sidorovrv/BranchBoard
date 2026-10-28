@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useState } from "react";
-import { formatAgo, formatCost, formatCountdown, formatTokens, type CostSummary, type LimitWindow, type RateLimits } from "@branchboard/core";
+import { COST_WINDOWS, formatAgo, formatCost, formatCountdown, formatTokens, type CostSummary, type LimitWindow, type RateLimits } from "@branchboard/core";
 import { fetchCosts, fetchLimits } from "../api";
+import { useSettings } from "../settings";
 
 const LIMITS_REFRESH_MS = 10000;
+const COSTS_REFRESH_MS = 3000;
 const WINDOW_LABELS: Record<string, string> = { five_hour: "Session", seven_day: "Weekly" };
 const HIGH_UTILIZATION = 0.8;
 const WARN_UTILIZATION = 0.6;
@@ -26,24 +28,36 @@ const useLimits = (runtime: string): RateLimits | undefined => {
   return limits;
 };
 
-const useCosts = (): CostSummary | undefined => {
-  const [costs, setCosts] = useState<CostSummary>();
+const useCosts = (isEnabled: boolean): CostSummary[] | undefined => {
+  const [costs, setCosts] = useState<CostSummary[]>();
   useEffect(() => {
+    if (!isEnabled) return;
     const refresh = () => void fetchCosts().then(setCosts).catch(() => undefined);
     refresh();
-    const timer = setInterval(refresh, LIMITS_REFRESH_MS);
+    const timer = setInterval(refresh, COSTS_REFRESH_MS);
     return () => clearInterval(timer);
-  }, []);
+  }, [isEnabled]);
   return costs;
 };
 
+const describeCost = (summary: CostSummary, label: string): string =>
+  `${label}: ${formatCost(summary.costUsd)}, ${summary.runs} ${summary.runs === 1 ? "run" : "runs"}, ${formatTokens(summary.inputTokens)} input and ${formatTokens(summary.outputTokens)} output tokens`;
+
 export const CostMeter = () => {
-  const costs = useCosts();
-  if (!costs) return null;
-  const title = `Cost reported by OpenCode for runs that finished in the last hour.\n${costs.runs} ${costs.runs === 1 ? "run" : "runs"}, ${formatTokens(costs.inputTokens)} input and ${formatTokens(costs.outputTokens)} output tokens.`;
+  const shown = useSettings((state) => state.settings.costWindows);
+  const windows = COST_WINDOWS.filter((window) => shown.includes(window.id));
+  const costs = useCosts(windows.length > 0);
+  if (!costs || windows.length === 0) return null;
+  const summaryOf = (id: string) => costs.find((summary) => summary.id === id);
+  const title = ["Cost reported by OpenCode for the last hour, day, week and 30 days, including runs that are still going.", ...windows.flatMap((window) => { const summary = summaryOf(window.id); return summary ? [describeCost(summary, window.label)] : []; })].join("\n");
   return (
     <span className="limits" title={title}>
-      <span className="limit-value cost-value">{formatCost(costs.costUsd)}/h</span>
+      {windows.map((window, index) => (
+        <Fragment key={window.id}>
+          {index > 0 && <span className="limit-separator">/</span>}
+          <span className="limit-value cost-value">{formatCost(summaryOf(window.id)?.costUsd ?? 0)}/{window.unit}</span>
+        </Fragment>
+      ))}
     </span>
   );
 };

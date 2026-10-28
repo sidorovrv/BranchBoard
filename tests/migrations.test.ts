@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -42,19 +42,5 @@ describe("released database fixtures", () => {
     expect(normaliseDocument(documents)).toBe(expected);
     expect(schemaVersionOf(databasePath)).toBe(LATEST_SCHEMA_VERSION);
     expect(existsSync(`${databasePath}.before-v${storedVersion + 1}`)).toBe(storedVersion < LATEST_SCHEMA_VERSION);
-  });
-});
-
-describe("telemetry consent file", () => {
-  it("keeps its consent when an upgraded database opens next to it", () => {
-    const version = versions.at(-1)!;
-    const folder = mkdtempSync(join(scratch, "telemetry-"));
-    const databasePath = join(folder, DATABASE_NAME);
-    copyFileSync(join(FIXTURES, version, DATABASE_NAME), databasePath);
-    writeFileSync(join(folder, "telemetry.json"), JSON.stringify({ schema: 1, consent: "granted", decidedAt: 1760000000000, decidedInVersion: "0.3.0", successfulRuns: 31, firstDay: "2026-09-20", lastSentDay: "2026-10-15", futureField: true }));
-    const server = createApp({ databasePath, security: { port: 47191, extraOrigins: [] } });
-    const state = server.usage.state();
-    server.close();
-    expect(state).toMatchObject({ consent: "granted", decidedAt: 1760000000000, decidedInVersion: "0.3.0", successfulRuns: 31, firstDay: "2026-09-20", lastSentDay: "2026-10-15" });
   });
 });

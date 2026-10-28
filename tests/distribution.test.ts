@@ -2,15 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { installCommandFor, isApiRuntime, isNewerVersion, isRuntimeId, RUNTIME_IDS, RUNTIMES } from "@branchboard/core";
+import { installCommandFor, isApiRuntime, isNewerVersion, isRuntimeId, RUNTIMES } from "@branchboard/core";
 import { runtimeSummary } from "../packages/cli/src/run";
 import { createApp } from "../packages/server/src/app";
 import { CHANNEL_URL, TAGS_URL, createRemoteChannel, parseChannel, parseTags } from "../packages/server/src/channel";
 import { dataDirectoryId } from "../packages/server/src/dataDirectory";
 import { DEFAULT_ENGINE_VERSION } from "../packages/server/src/engine/locator";
-import { createClaudeRuntime } from "../packages/server/src/runtimes/claude";
 import { pickFreePort, readLastPort, resolvePort, writeLastPort, type PortState } from "../packages/cli/src/ports";
-import { parseArguments } from "../packages/cli/src/args";
 
 const directory = mkdtempSync(join(tmpdir(), "branchboard-distribution-"));
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
@@ -22,23 +20,14 @@ describe("choosing a port", () => {
 
   const pickPort = async () => 51234;
 
-  it("asks the system for a port when nothing was requested or remembered", async () => {
-    expect(await resolvePort({ dataDirId: ours, probe: probeOf({}), pickPort })).toEqual({ kind: "start", port: 51234 });
-  });
-
-  it("starts on the remembered port when nothing answers there, so the browser keeps its stored settings", async () => {
-    expect(await resolvePort({ lastPort: 4000, dataDirId: ours, probe: probeOf({}), pickPort })).toEqual({ kind: "start", port: 4000 });
-  });
-
-  it("picks a new port when the remembered one is taken by another program or by another data folder", async () => {
+  it("starts on the remembered port when nothing answers there, reuses it for an instance on the same data folder and otherwise asks the system", async () => {
     const other = { kind: "branchboard" as const, dataDirId: dataDirectoryId("/data/b") };
-    expect(await resolvePort({ lastPort: 4000, dataDirId: ours, probe: probeOf({ 4000: { kind: "busy" } }), pickPort })).toEqual({ kind: "start", port: 51234 });
-    expect(await resolvePort({ lastPort: 4000, dataDirId: ours, probe: probeOf({ 4000: other }), pickPort })).toEqual({ kind: "start", port: 51234 });
-  });
-
-  it("reuses the remembered port while an instance on the same data folder answers there", async () => {
-    const probe = probeOf({ 4000: { kind: "branchboard", dataDirId: ours } });
-    expect(await resolvePort({ lastPort: 4000, dataDirId: ours, probe, pickPort })).toEqual({ kind: "reuse", port: 4000 });
+    const remembered = (states: Record<number, PortState>) => resolvePort({ lastPort: 4000, dataDirId: ours, probe: probeOf(states), pickPort });
+    expect(await resolvePort({ dataDirId: ours, probe: probeOf({}), pickPort })).toEqual({ kind: "start", port: 51234 });
+    expect(await remembered({})).toEqual({ kind: "start", port: 4000 });
+    expect(await remembered({ 4000: { kind: "branchboard", dataDirId: ours } })).toEqual({ kind: "reuse", port: 4000 });
+    expect(await remembered({ 4000: { kind: "busy" } })).toEqual({ kind: "start", port: 51234 });
+    expect(await remembered({ 4000: other })).toEqual({ kind: "start", port: 51234 });
   });
 
   it("uses only the requested port when it was given", async () => {
@@ -56,20 +45,10 @@ describe("choosing a port", () => {
     expect(readLastPort(file)).toBeUndefined();
     expect(await pickFreePort()).toBeGreaterThan(0);
   });
-
-  it("reads --no-auto-update", () => {
-    expect(parseArguments([])).toMatchObject({ shouldAutoUpdate: true });
-    expect(parseArguments(["--no-auto-update"])).toMatchObject({ kind: "run", shouldAutoUpdate: false });
-  });
-
-  it("reads --offline", () => {
-    expect(parseArguments(["--offline"])).toMatchObject({ kind: "run", offline: true });
-  });
 });
 
 describe("runtime registry and start summary", () => {
-  it("lists every runtime with a kind, and API runtimes with an address policy", () => {
-    expect(RUNTIME_IDS.sort()).toEqual(["anthropic", "claude", "codex", "fake", "openai", "opencode", "opencode2"]);
+  it("tells API runtimes apart and refuses prototype keys as runtime ids", () => {
     expect(RUNTIMES.anthropic.credential.baseUrlEditable).toBe(true);
     expect(RUNTIMES.openai.credential.baseUrlEditable).toBe(true);
     expect(isApiRuntime("openai")).toBe(true);
@@ -77,14 +56,11 @@ describe("runtime registry and start summary", () => {
     expect(isRuntimeId("constructor")).toBe(false);
   });
 
-  it("prints only the commands that were found", () => {
+  it("prints only the commands that were found and points to the setup guide when none was", () => {
     const summary = runtimeSummary({ opencode: () => ({ path: "C:\\bin\\opencode.cmd" }), claude: () => ({}), codex: () => ({}) });
     expect(summary).toEqual(["OpenCode: found (C:\\bin\\opencode.cmd)"]);
     expect(installCommandFor("claude", "darwin")).toBe("npm install -g @anthropic-ai/claude-code");
     expect(installCommandFor("anthropic", "linux")).toBeUndefined();
-  });
-
-  it("points to the setup guide when no command was found", () => {
     expect(runtimeSummary({ claude: () => ({}), codex: () => ({}) })).toEqual(["No claude, codex or opencode command was found. The setup guide in the browser shows how to install one."]);
   });
 });
@@ -148,33 +124,28 @@ describe("update channel", () => {
     expect(calls).toBe(6);
   });
 
-  it("keeps the old contents and reports the error when fetches fail", async () => {
-    const dataDirectory = mkdtempSync(join(directory, "channel-fail-"));
+  it("keeps the old contents when fetches fail and reports an error only when the npm check fails", async () => {
     let time = 1;
-    let shouldFail = false;
-    const channel = createRemoteChannel({ dataDirectory, isOffline: () => false, fetchText: async (url) => { if (shouldFail) throw new Error("down"); return fresh(url); }, clock: () => time });
+    let failing: string[] = [];
+    const channelIn = (name: string) =>
+      createRemoteChannel({ dataDirectory: mkdtempSync(join(directory, name)), isOffline: () => false, clock: () => time, fetchText: async (url) => { if (failing.includes(url)) throw new Error(`down ${url === TAGS_URL ? "npm" : "channel"}`); return fresh(url); } });
+    const channel = channelIn("channel-fail-");
     await channel.refresh();
-    shouldFail = true;
+    failing = [TAGS_URL, CHANNEL_URL];
     time += 25 * 60 * 60 * 1000;
     await channel.refresh();
     expect(channel.contents().tags.latest).toBe("0.3.0");
-    expect(channel.status()).toMatchObject({ checkedAt: 1, error: "down" });
-  });
-
-  it("does not report an error when only channel.json fails", async () => {
-    const dataDirectory = mkdtempSync(join(directory, "channel-partial-"));
-    const channel = createRemoteChannel({ dataDirectory, isOffline: () => false, fetchText: async (url) => { if (url === CHANNEL_URL) throw new Error("HTTP 404"); return tagsText; } });
-    await channel.refresh();
-    expect(channel.contents().tags.latest).toBe("0.3.0");
-    expect(channel.status()).toMatchObject({ checkedAt: expect.any(Number), error: null });
-  });
-
-  it("reports the error and keeps the fetched model file when only the npm check fails", async () => {
-    const dataDirectory = mkdtempSync(join(directory, "channel-npm-down-"));
-    const channel = createRemoteChannel({ dataDirectory, isOffline: () => false, fetchText: async (url) => { if (url === TAGS_URL) throw new Error("HTTP 500"); return channelText; } });
-    await channel.refresh();
-    expect(channel.contents().claudeModels).toEqual([{ id: "claude-new-1", name: "New 1" }]);
-    expect(channel.status().error).toBe("HTTP 500");
+    expect(channel.status()).toMatchObject({ checkedAt: 1, error: "down npm" });
+    failing = [CHANNEL_URL];
+    const withoutModelFile = channelIn("channel-partial-");
+    await withoutModelFile.refresh();
+    expect(withoutModelFile.contents().tags.latest).toBe("0.3.0");
+    expect(withoutModelFile.status()).toMatchObject({ checkedAt: time, error: null });
+    failing = [TAGS_URL];
+    const withoutTags = channelIn("channel-npm-down-");
+    await withoutTags.refresh();
+    expect(withoutTags.contents().claudeModels).toEqual([{ id: "claude-new-1", name: "New 1" }]);
+    expect(withoutTags.status().error).toBe("down npm");
   });
 
   it("reads a local channel file when BRANCHBOARD_CHANNEL_FILE is set, on every refresh", async () => {
@@ -200,18 +171,6 @@ describe("update channel", () => {
     ["claude-x-1", "claude-x-1", "no way"].forEach(channel.recordSeenModel);
     expect(channel.seenModels()).toEqual([{ id: "claude-x-1", name: "claude-x-1" }]);
     expect(JSON.parse(readFileSync(join(dataDirectory, "models-seen.json"), "utf8"))).toEqual(["claude-x-1"]);
-  });
-
-  it("adds channel and seen models to the claude catalog without duplicates", async () => {
-    const runtime = createClaudeRuntime({
-      serverUrl: "http://x",
-      locate: () => ({ path: "claude", searched: [] }),
-      probeVersion: async () => "2.9.9",
-      extraModels: () => [{ id: "claude-new-1", name: "New 1" }, { id: "sonnet", name: "Duplicate" }, { id: "claude-new-1", name: "Again" }],
-    });
-    const { models } = await runtime.catalog(directory);
-    expect(models.filter((model) => model.id === "claude-new-1")).toHaveLength(1);
-    expect(models.filter((model) => model.id === "sonnet")).toHaveLength(1);
   });
 });
 

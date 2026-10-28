@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { edgesAtSide, makeNode, NODE_GAP, placeNode, satelliteLinksOf, usedSidesOf, wireSidesOf } from "../packages/core/src";
+import { edgesAtSide, liveNodes, makeNode, NODE_GAP, placeNode, satelliteLinksOf, usedSidesOf, wireSidesOf } from "../packages/core/src";
 import { mustApply, buildGraph } from "./support";
 
 const box = (x: number, y: number) => ({ x, y, w: 100, h: 100 });
@@ -37,6 +37,15 @@ describe("connections at a side and satellites", () => {
     const spot = placeNode(graph, ["P"], size);
     expect(spot.x).toBe(column);
     expect(spot.y + size.h).toBeLessThanOrEqual(100);
+  });
+
+  it("places an unconnected node at the nearest free spot, above the crowd when that is closer", () => {
+    let graph = mustApply(buildGraph([], []), { type: "addNode", parentIds: [], node: makeNode("B", { id: "top", x: 0, y: 0, w: 700, h: 360 }) });
+    ["a", "b", "c", "d"].forEach((id, row) => (graph = mustApply(graph, { type: "addNode", parentIds: [], node: makeNode("B", { id, x: 0, y: 400 + row * 400, w: 700, h: 360 }) })));
+    const size = { w: 350, h: 120 };
+    const spot = placeNode(graph, [], size, undefined, { x: 350, y: 1000 });
+    expect(Math.hypot(spot.x - (350 - size.w / 2), spot.y - (1000 - size.h / 2))).toBeLessThan(800);
+    expect(liveNodes(graph).some((node) => spot.x < node.x + node.w && node.x < spot.x + size.w && spot.y < node.y + node.h && node.y < spot.y + size.h)).toBe(false);
   });
 
   it("links a satellite to its parent on the flow axis and counts the sides as used", () => {

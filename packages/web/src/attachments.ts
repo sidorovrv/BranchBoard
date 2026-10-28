@@ -19,10 +19,10 @@ export const attachToNode = async (nodeId: Id, files: File[]) => {
   if (attachmentIds) await sendBoardCommand({ type: "attach", nodeId, attachmentIds });
 };
 
-export const createFileNode = async (files: File[], position?: { x: number; y: number }) => {
+export const createFileNode = async (files: File[], nearPosition?: { x: number; y: number }) => {
   const attachmentIds = await uploadAll(files);
   if (!attachmentIds) return;
-  const created = await sendBoardCommand<{ nodeId: Id }>({ type: "file", attachmentIds, position });
+  const created = await sendBoardCommand<{ nodeId: Id }>({ type: "file", attachmentIds, ...(nearPosition ? { nearPosition } : {}) });
   if (created) useBoard.getState().requestFocus(created.nodeId);
 };
 
@@ -44,7 +44,7 @@ export const droppedFiles = (event: DragEvent): File[] => [...event.dataTransfer
 
 export const pastedFiles = (event: ClipboardEvent): File[] => [...(event.clipboardData?.files ?? [])];
 
-export const pasteFiles = async (files: File[], newNodePosition: { x: number; y: number }) => {
+export const pasteFiles = async (files: File[], newNodePosition?: { x: number; y: number }) => {
   const { selectedIds, view } = useBoard.getState();
   const target = selectedIds.length === 1 ? view.graph.nodes[selectedIds[0]] : undefined;
   if (target && target.kind !== "context" && target.kind !== "subagent") await attachToNode(target.id, files);

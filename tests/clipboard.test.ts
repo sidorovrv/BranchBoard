@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { applyPatch, buildNodeClipboard, isStale, parseNodeClipboard, planPaste, type Part } from "@branchboard/core";
+import { applyPatch, buildNodeClipboard, contextHash, isStale, parseNodeClipboard, planPaste, type Part } from "@branchboard/core";
 import { buildGraph, mustApply } from "./support";
 
 const answer = (nodeId: string, text: string): Part => ({ id: `${nodeId}:1:text`, nodeId, roll: 1, seq: 0, type: "text", text });
 
 const finishedChain = () => {
   let graph = buildGraph(["a", "b", "c"], [["a", "b"], ["b", "c"]]);
-  const done = (id: string) => ({ id, status: "done" as const, rollCount: 1, activeRoll: 1, runtimeRef: { sessionId: id } as never });
+  const done = (id: string) => ({ id, status: "done" as const, rollCount: 1, activeRoll: 1, runtimeRef: { sessionId: id } as never, contextHash: contextHash(graph, id) });
   graph = mustApply(graph, { type: "patch", patch: { nodes: { a: done("a"), b: done("b"), c: done("c") }, edges: {} } });
   return graph;
 };
@@ -51,13 +51,13 @@ describe("node clipboard", () => {
 
   it("marks a pasted answer stale when its parents were not copied, and resets unfinished nodes", () => {
     const graph = finishedChain();
-    const clipboard = buildNodeClipboard(graph, {}, ["c"])!;
-    const [node] = Object.values(planPaste(graph, "board-1", clipboard, { x: 0, y: 0 }).patch.nodes);
-    const after = applyPatch(graph, planPaste(graph, "board-1", clipboard, { x: 0, y: 0 }).patch);
+    const { patch } = planPaste(graph, "board-1", buildNodeClipboard(graph, {}, ["c"])!, { x: 0, y: 0 });
+    const [node] = Object.values(patch.nodes);
+    const after = applyPatch(graph, patch);
     expect(node.status).toBe("done");
+    expect(isStale(after, after.nodes[node.id!])).toBe(true);
     const unfinished = mustApply(graph, { type: "patch", patch: { nodes: { c: { id: "c", status: "running" } }, edges: {} } });
     const reset = Object.values(planPaste(unfinished, "board-1", buildNodeClipboard(unfinished, {}, ["c"])!, { x: 0, y: 0 }).patch.nodes)[0];
     expect(reset.status).toBe("idle");
-    expect(after).toBeDefined();
   });
 });

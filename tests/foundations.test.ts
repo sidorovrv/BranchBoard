@@ -100,7 +100,9 @@ describe("schema steps", () => {
   const pathOf = (name: string) => join(directory, name);
   const addStep = (to: number): SchemaStep => ({ to, rewrite: { nodes: (row) => ({ ...row, title: `${row.title}+${to}` }) } });
 
-  it("rewrites stored rows, backs the database up and keeps the last two backups", () => {
+  it("backs up only an existing database, rewrites stored rows and keeps the last two backups", () => {
+    openRepository(pathOf("fresh.db")).close();
+    expect(readdirSync(directory).some((name) => name.startsWith("fresh.db.before"))).toBe(false);
     const path = pathOf("rows.db");
     const first = openRepository(path);
     first.upsertMany("nodes", () => "board", [node("n1", "a")]);
@@ -114,12 +116,6 @@ describe("schema steps", () => {
     reopened.close();
     const backups = readdirSync(directory).filter((name) => name.startsWith("rows.db.before-v"));
     expect(backups.sort()).toEqual(["rows.db.before-v4", "rows.db.before-v5"]);
-  });
-
-  it("does not back up a new database", () => {
-    const path = pathOf("fresh.db");
-    openRepository(path).close();
-    expect(readdirSync(directory).some((name) => name.startsWith("fresh.db.before"))).toBe(false);
   });
 
   it("applies the same rewrite to a document", () => {

@@ -1,4 +1,4 @@
-import { COMMAND_TYPE_HEADER, type AboutInfo, type Attachment, type Board, type BoardEvent, type BoardView, type Catalog, type CostSummary, type CredentialStatus, type Project, type RateLimits, type RunInfo, type RuntimePanel, type TelemetryOverview, type TrashListing } from "@branchboard/core";
+import { COMMAND_TYPE_HEADER, type AboutInfo, type Attachment, type Board, type BoardView, type Catalog, type CostSummary, type CredentialStatus, type Project, type RateLimits, type RunInfo, type RuntimePanel, type SequencedBoardEvent, type TelemetryOverview, type TrashListing } from "@branchboard/core";
 
 export class CommandRefused extends Error {
   constructor(message: string, readonly sensitiveFiles: string[] = []) {
@@ -80,7 +80,7 @@ export const fetchFinishedRuns = () => getJson<RunInfo[]>("/api/runs/finished");
 
 export const fetchLimits = (runtime: string) => getJson<RateLimits | null>(`/api/limits?runtime=${encodeURIComponent(runtime)}`);
 
-export const fetchCosts = () => getJson<CostSummary>("/api/costs");
+export const fetchCosts = () => getJson<CostSummary[]>("/api/costs");
 
 export const fetchProjects = () => getJson<Project[]>("/api/projects");
 
@@ -96,7 +96,7 @@ export const fetchAbout =(isFresh = false) => getJson<AboutInfo>(`/api/about${is
 
 export const fetchWorkspaceFiles = (boardId: string, query: string) => getJson<string[]>(`/api/workspace/files?board=${boardId}&q=${encodeURIComponent(query)}`);
 
-export const fetchTimedBoardView = (boardId: string) => getTimedJson<BoardView & { board: Board }>(`/api/boards/${boardId}/graph`);
+export const fetchTimedBoardView = (boardId: string) => getTimedJson<BoardView & { board: Board; seq: number }>(`/api/boards/${boardId}/graph`);
 
 export const fetchBoardView = async (boardId: string) => (await fetchTimedBoardView(boardId)).body;
 
@@ -107,7 +107,7 @@ export const fetchCatalog =(boardId: string) => getJson<Catalog>(`/api/runtime/c
 
 const RECONNECT_DELAY_MS = 1000;
 
-export const subscribeToBoard = (boardId: string, onEvent: (event: BoardEvent) => void, onOpen: () => void): (() => void) => {
+export const subscribeToBoard = (boardId: string, onEvent: (event: SequencedBoardEvent) => void, onOpen: () => void): (() => void) => {
   let socket: WebSocket | undefined;
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;

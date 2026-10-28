@@ -7,13 +7,16 @@ export interface Subscriber {
 export interface Hub {
   subscribe(boardId: Id, subscriber: Subscriber): () => void;
   broadcast(boardId: Id, event: BoardEvent): void;
+  seqOf(boardId: Id): number;
   takeStats(): { clients: number; messages: number };
 }
 
 export const createHub = (): Hub => {
   const subscribers = new Map<Id, Set<Subscriber>>();
+  const seqs = new Map<Id, number>();
   let messagesSinceLastStats = 0;
   return {
+    seqOf: (boardId) => seqs.get(boardId) ?? 0,
     takeStats: () => {
       const messages = messagesSinceLastStats;
       messagesSinceLastStats = 0;
@@ -26,7 +29,9 @@ export const createHub = (): Hub => {
       return () => group.delete(subscriber);
     },
     broadcast: (boardId, event) => {
-      const message = JSON.stringify(event);
+      const seq = (seqs.get(boardId) ?? 0) + 1;
+      seqs.set(boardId, seq);
+      const message = JSON.stringify({ ...event, seq });
       subscribers.get(boardId)?.forEach((subscriber) => {
         messagesSinceLastStats++;
         subscriber.send(message);

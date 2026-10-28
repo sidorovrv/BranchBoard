@@ -24,12 +24,9 @@ const childText = (text: string) => ({ type: "message.part.delta", properties: {
 const childPart = { type: "message.part.updated", properties: { part: { id: "p-child", sessionID: CHILD, messageID: "m-child", type: "text", text: "" } } };
 
 describe("OpenCode todos and subagents", () => {
-  it("turns todo.updated of the main session into a todo list", () => {
+  it("turns todo.updated of the main session into a todo list and ignores todos of another session", () => {
     const events = mapped(translate([{ type: "todo.updated", properties: { sessionID: SESSION, todos: [{ content: "Write", status: "in_progress", priority: "high" }, { content: "Test", status: "pending" }] } }]));
     expect(events).toEqual([{ type: "todos", items: [{ content: "Write", status: "in_progress" }, { content: "Test", status: "pending" }] }]);
-  });
-
-  it("ignores todos that belong to another session", () => {
     expect(translate([{ type: "todo.updated", properties: { sessionID: "ses_other", todos: [{ content: "x", status: "pending" }] } }])).toEqual([]);
   });
 
@@ -41,9 +38,9 @@ describe("OpenCode todos and subagents", () => {
     expect(events.every((event) => event.type !== "part.delta")).toBe(true);
   });
 
-  it("finishes the subagent when its session goes idle without ending the main run", () => {
-    const natives = translate([childCreated, { type: "session.idle", properties: { sessionID: CHILD } }]);
-    expect(natives.map((native) => native.type)).toEqual(["subagent-start", "subagent-done"]);
+  it("finishes the subagent when its session goes idle and ends the main run only on the main session's idle event", () => {
+    const natives = translate([childCreated, { type: "session.idle", properties: { sessionID: CHILD } }, { type: "session.idle", properties: { sessionID: SESSION } }]);
+    expect(natives.map((native) => native.type)).toEqual(["subagent-start", "subagent-done", "idle"]);
     expect(mapped(natives)[1]).toEqual({ type: "subagent.event", key: CHILD, event: { type: "done" } });
   });
 
@@ -51,10 +48,6 @@ describe("OpenCode todos and subagents", () => {
     const natives = translate([childCreated, { type: "permission.asked", properties: { sessionID: CHILD, id: "perm-1", permission: "bash", patterns: ["npm test"] } }]);
     const request = mapped(natives).find((event) => event.type === "subagent.event" && event.event.type === "request.opened") as Extract<RunEvent, { type: "subagent.event" }>;
     expect(request.event).toMatchObject({ type: "request.opened", request: { kind: "approval", remoteId: `${CHILD}/perm-1`, detail: "npm test" } });
-  });
-
-  it("still ends the main run on the main session's idle event", () => {
-    expect(translate([childCreated, { type: "session.idle", properties: { sessionID: SESSION } }]).map((native) => native.type)).toEqual(["subagent-start", "idle"]);
   });
 });
 
@@ -100,7 +93,9 @@ describe("the server log file", () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  it("writes entries, reads the tail and filters by text", () => {
+  it("returns nothing until a file is configured, then writes entries, reads the tail and filters by text", () => {
+    expect(readLogTail(10)).toEqual([]);
+    expect(currentLogFile()).toBeUndefined();
     configureLogFile(path);
     expect(currentLogFile()).toBe(path);
     log.info("test", "first board-aaa line");
@@ -122,10 +117,5 @@ describe("the server log file", () => {
     const tail = readLogTail(5);
     expect(tail.at(-1)).toContain("2299 ");
     expect(existsSync(path)).toBe(true);
-  });
-
-  it("returns nothing when no file is configured", () => {
-    expect(readLogTail(10)).toEqual([]);
-    expect(currentLogFile()).toBeUndefined();
   });
 });

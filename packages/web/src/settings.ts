@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getJson } from "./api";
-import { DEFAULT_MODEL_PREFERENCE, FLOW_DIRECTIONS, KEYBOARD_PAN_MODES, RUNTIME_DEFAULT_PERMISSION_MODE, NODE_HEIGHT, normaliseKeybinds, type FlowDirection, type KeyboardPanMode, type Keybinds, NODE_MAX_HEIGHT, NODE_MAX_WIDTH, NODE_MIN_HEIGHT, NODE_MIN_WIDTH, NODE_WIDTH } from "@branchboard/core";
+import { COST_WINDOWS, DEFAULT_MODEL_PREFERENCE, FLOW_DIRECTIONS, KEYBOARD_PAN_MODES, RUNTIME_DEFAULT_PERMISSION_MODE, NODE_HEIGHT, normaliseKeybinds, type CostWindowId, type FlowDirection, type KeyboardPanMode, type Keybinds, NODE_MAX_HEIGHT, NODE_MAX_WIDTH, NODE_MIN_HEIGHT, NODE_MIN_WIDTH, NODE_WIDTH } from "@branchboard/core";
 
 export interface Settings {
   followScroll: boolean;
@@ -23,9 +23,11 @@ export interface Settings {
   keyboardPanSpeed: number;
   showTopbarMeters: boolean;
   showClaudeCost: boolean;
+  costWindows: CostWindowId[];
   agentDiagnosticsAccess: boolean;
   agentCrossNodeLogs: boolean;
   activeJobsShown: number;
+  activeJobsStyle: ActiveJobsStyle;
   boardMemoryMinutes: number;
   shownTags: NodeTagId[];
   keybinds: Keybinds;
@@ -67,6 +69,10 @@ export const ALT_CLICK_ZOOM_MIN = 50;
 export const ALT_CLICK_ZOOM_MAX = 100;
 export const ALT_CLICK_ZOOM_DEFAULT = 85;
 
+export type ActiveJobsStyle = "normal" | "mini";
+
+export const ACTIVE_JOBS_STYLES: ActiveJobsStyle[] = ["normal", "mini"];
+
 export type SubagentDisplay = "node" | "inline";
 
 export const SUBAGENT_DISPLAYS: SubagentDisplay[] = ["node", "inline"];
@@ -84,7 +90,7 @@ export type ThemeChoice = "system" | "light" | "dark";
 export const THEME_CHOICES: ThemeChoice[] = ["system", "light", "dark"];
 
 
-export const DEFAULT_SETTINGS: Settings = { followScroll: true, defaultNodeWidth: NODE_WIDTH, defaultNodeHeight: NODE_HEIGHT, blinkForAttention: true, snapNextPrompt: false, groupToolCalls: false, defaultModel: DEFAULT_MODEL_PREFERENCE, defaultPermissionMode: RUNTIME_DEFAULT_PERMISSION_MODE, isSidebarOpen: true, isContextPanelOpen: false, readerWidth: READER_DEFAULT_WIDTH, answerFont: "sans", theme: "system", flowDirection: "horizontal", subagentDisplay: "node", altClickZoom: ALT_CLICK_ZOOM_DEFAULT, keyboardPan: "none", keyboardPanSpeed: KEYBOARD_PAN_SPEED_DEFAULT, showTopbarMeters: true, showClaudeCost: false, agentDiagnosticsAccess: true, agentCrossNodeLogs: true, activeJobsShown: ACTIVE_JOBS_SHOWN_DEFAULT, boardMemoryMinutes: BOARD_MEMORY_MINUTES_DEFAULT, shownTags: ALL_NODE_TAGS, keybinds: normaliseKeybinds({}) };
+export const DEFAULT_SETTINGS: Settings = { followScroll: true, defaultNodeWidth: NODE_WIDTH, defaultNodeHeight: NODE_HEIGHT, blinkForAttention: true, snapNextPrompt: false, groupToolCalls: false, defaultModel: DEFAULT_MODEL_PREFERENCE, defaultPermissionMode: RUNTIME_DEFAULT_PERMISSION_MODE, isSidebarOpen: true, isContextPanelOpen: false, readerWidth: READER_DEFAULT_WIDTH, answerFont: "sans", theme: "system", flowDirection: "horizontal", subagentDisplay: "node", altClickZoom: ALT_CLICK_ZOOM_DEFAULT, keyboardPan: "none", keyboardPanSpeed: KEYBOARD_PAN_SPEED_DEFAULT, showTopbarMeters: true, showClaudeCost: false, costWindows: ["hour"], agentDiagnosticsAccess: true, agentCrossNodeLogs: true, activeJobsShown: ACTIVE_JOBS_SHOWN_DEFAULT, activeJobsStyle: "normal", boardMemoryMinutes: BOARD_MEMORY_MINUTES_DEFAULT, shownTags: ALL_NODE_TAGS, keybinds: normaliseKeybinds({}) };
 
 const STORAGE_KEY = "branchboard.settings";
 const OVERRIDE_KEY = "branchboard.settingsOverride";
@@ -128,12 +134,14 @@ const normalizers: SettingNormalizers = {
   },
   showTopbarMeters: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.showTopbarMeters),
   showClaudeCost: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.showClaudeCost),
+  costWindows: (value) => (Array.isArray(value) ? COST_WINDOWS.map((window) => window.id).filter((id) => value.includes(id)) : DEFAULT_SETTINGS.costWindows),
   agentDiagnosticsAccess: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.agentDiagnosticsAccess),
   agentCrossNodeLogs: (value) => (typeof value === "boolean" ? value : DEFAULT_SETTINGS.agentCrossNodeLogs),
   activeJobsShown: (value) => {
     const count = Number(value);
     return Number.isFinite(count) ? Math.min(ACTIVE_JOBS_SHOWN_MAX, Math.max(0, Math.round(count))) : DEFAULT_SETTINGS.activeJobsShown;
   },
+  activeJobsStyle: (value) => (ACTIVE_JOBS_STYLES.includes(value as ActiveJobsStyle) ? (value as ActiveJobsStyle) : DEFAULT_SETTINGS.activeJobsStyle),
   boardMemoryMinutes: (value) => {
     const minutes = Number(value);
     return Number.isFinite(minutes) ? Math.min(BOARD_MEMORY_MINUTES_MAX, Math.max(0, Math.round(minutes))) : DEFAULT_SETTINGS.boardMemoryMinutes;
@@ -163,9 +171,11 @@ const normalize = (raw: Partial<Record<keyof Settings, unknown>>): Settings => (
   keyboardPanSpeed: normalizers.keyboardPanSpeed(raw.keyboardPanSpeed),
   showTopbarMeters: normalizers.showTopbarMeters(raw.showTopbarMeters),
   showClaudeCost: normalizers.showClaudeCost(raw.showClaudeCost),
+  costWindows: normalizers.costWindows(raw.costWindows),
   agentDiagnosticsAccess: normalizers.agentDiagnosticsAccess(raw.agentDiagnosticsAccess),
   agentCrossNodeLogs: normalizers.agentCrossNodeLogs(raw.agentCrossNodeLogs),
   activeJobsShown: normalizers.activeJobsShown(raw.activeJobsShown),
+  activeJobsStyle: normalizers.activeJobsStyle(raw.activeJobsStyle),
   boardMemoryMinutes: normalizers.boardMemoryMinutes(raw.boardMemoryMinutes),
   shownTags: normalizers.shownTags(raw.shownTags),
   keybinds: normalizers.keybinds(raw.keybinds),
